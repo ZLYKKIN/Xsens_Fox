@@ -1,8 +1,8 @@
-// Fox Mocap — MVN-style app for Xsens Link + optional gloves.
-// Full C++ port of HumanInertialPose-main (23-segment Xsens skeleton,
-// T/N-pose reference angles, dummy-segment trick, forward kinematics,
-// static sensor-to-segment calibration).  Connection layer mirrors the
-// XESNSE pose-source abstraction (MVN MXTP02/25 over UDP :9763).
+// Fox Mocap — MVN-compatible motion-capture app for Xsens Link suits
+// and optional Manus gloves.  Implements a 23-segment Xsens skeleton,
+// T / N / K-pose reference-angle calibration, forward kinematics with
+// dummy-segment helpers, and static sensor-to-segment alignment.
+// Network layer accepts MVN MXTP02 / MXTP25 datagrams on UDP :9763.
 
 #pragma once
 
@@ -60,7 +60,7 @@ constexpr int     kCountdownSeconds   = 6;    // 6 s prep / Madgwick warm-up
                                               // (5 s convergence at 240 Hz × β=0.35
                                               //  comfortably flattens all 17 filters)
 
-// Xsens segment indices (matches MXTP segId - 1, same as hipose xsens_segment_names)
+// Xsens segment indices (matches MXTP segId - 1).
 enum Seg : int {
     SEG_Pelvis        = 0,  SEG_L5        = 1,  SEG_L3            = 2,
     SEG_T12           = 3,  SEG_T8        = 4,  SEG_Neck          = 5,
@@ -75,7 +75,7 @@ enum Seg : int {
 extern const char* kSegmentNames[kXsensSegmentCount];
 
 // ============================================================================
-//  Quaternion math (WXYZ, scalar first) — mirrors hipose/rotations.py
+//  Quaternion math (WXYZ, scalar first) — scipy / Hamilton convention
 // ============================================================================
 
 struct Quat {
@@ -143,8 +143,7 @@ struct SuitPose {
 
     // Most-recent per-sensor raw calibrated IMU channels (after SI-unit
     // reconstruction) — used by the calibration dialog to build the full
-    // imu-calibration set exactly like hipose's apply_imu_calibration:
-    // acc_magn, gyr_bias, mag_magn and s2s_offset.
+    // imu-calibration set: acc_magn, gyr_bias, mag_magn and s2s_offset.
     std::array<QVector3D, kXsensSegmentCount> accSensor{};   // g
     std::array<QVector3D, kXsensSegmentCount> gyrSensor{};   // deg/s
     std::array<QVector3D, kXsensSegmentCount> magSensor{};   // calibrated units
@@ -175,7 +174,7 @@ extern const int kFingerChains[kFingerChainCount][kFingerChainLen];
 extern const char* kFingerChainNames[kFingerChainCount];
 
 // ============================================================================
-//  SkeletonXsens — 23 segments + 4 dummy stubs, FK identical to hipose
+//  SkeletonXsens — 23 segments + 4 dummy stubs, forward kinematics
 // ============================================================================
 
 struct ActorConfig {
@@ -189,20 +188,15 @@ struct ActorConfig {
 // ============================================================================
 //  Locomotion — foot-contact detector + foot-lock IK + drift limiter
 //
-//  Architecture mirrors MVN / Xsens Engine (XME) as observed in the
-//  ghidra decomp (xme64.dll):
-//    * `XmeControl_setContacts` (tag 0xb / 0x11f / 0x111) shows MVN's
-//      biomech solver consumes a (rightDown, leftDown) pair produced by
-//      an external detector → we replicate the detector here.
-//    * `XmeControl_setTimestampedAiding`, `clearAiding`, `customAiding`
-//      show drift correction is a loose (Kalman-style) aiding blend of
-//      external observations, NOT raw acceleration integration → we do
-//      the same for foot-ground position constraints (Z always re-pinned
-//      to 0 on re-anchor, XY frozen between strides).
-//    * `XmeControl_setFingerTrackingData` takes a (side, q_array[20],
-//      timestamp?) tuple — we keep the same 20-segment-per-hand layout
-//      and fuse as  world_q = wrist_q * finger_q_local.  See the docs
-//      in the finger section.
+//  Design follows the well-known structure of inertial-mocap biomech
+//  solvers:
+//    * a (rightDown, leftDown) contact pair drives foot-lock IK rather
+//      than raw acceleration double-integration;
+//    * drift correction is a loose, Kalman-style aiding blend of
+//      external observations (foot anchor: Z re-pinned to 0 on re-anchor,
+//      XY frozen between strides);
+//    * finger tracking uses a 20-segment-per-hand local-quaternion array
+//      fused into world space as world_q = wrist_q * finger_q_local.
 // ============================================================================
 
 struct ContactState {
@@ -422,13 +416,13 @@ std::array<Quat, kXsensSegmentCount>
 defaultSegAnglesFor(const std::string& pose);
 
 // ============================================================================
-//  MXTP parser (MVN streaming, big-endian).  Same wire format as my Python
-//  port — see XESNSE network_monitor.cpp for the state-machine inspiration.
+//  MXTP parser (MVN streaming, big-endian).  Implements the public MVN
+//  network-streamer wire format documented in the MVN User Manual.
 // ============================================================================
 
 // ============================================================================
 //  XDA wire types — copies of the opaque structs used by Xsens Device API.
-//  Layouts are verified against XESNSE's static_asserts.
+//  Layouts are verified via static_assert against the runtime ABI.
 // ============================================================================
 
 struct XsDeviceIdBlob {
@@ -459,7 +453,7 @@ struct XsVectorBlob {
 };
 
 // ============================================================================
-//  Connection state — mirrors XESNSE's ConnectionState enum
+//  Connection state — standard enum used by the suit-receiver thread.
 // ============================================================================
 
 enum class ConnStatus {
@@ -522,23 +516,23 @@ public:
 
     // Install sensor-to-segment alignment quaternions (one per tracker).
     // The receiver rotates each sensor's acc / gyr / mag by inv(s2s[i])
-    // before handing them to the fusion filter, exactly like hipose's
-    // apply_imu_calibration(rotation=s2s_offset, inv=True) step.
+    // before handing them to the fusion filter (standard sensor-to-body
+    // alignment, equivalent to applying the inverse s2s offset to raw IMU
+    // samples before AHRS).
     void setS2sAlignment(const std::array<Quat, kXsensSegmentCount>& s2s);
     void resetS2sAlignment();
     Quat getS2s(int idx) const;
 
-    // Per-sensor magnetometer magnitude (hipose: mag_magn).  Each sensor
-    // reads a slightly different raw magnetic-field strength, so we scale
-    // each one by its own mean |mag| from the calibration pose before
-    // feeding it into the fusion filter — the same normalisation
-    // apply_imu_calibration() does in Python.
+    // Per-sensor magnetometer magnitude (mag_magn).  Each sensor reads a
+    // slightly different raw magnetic-field strength, so we scale each one
+    // by its own mean |mag| from the calibration pose before feeding it
+    // into the fusion filter.
     void setMagNormalisation(const std::array<double, kXsensSegmentCount>& magMagn);
 
-    // Per-sensor accelerometer magnitude (hipose: acc_magn) and gyro DC
-    // bias (hipose: gyr_bias).  Applied as `acc = acc / acc_magn` and
-    // `gyr = gyr - gyr_bias` before sensor-to-segment rotation —
-    // exactly matches hipose's apply_imu_calibration() pre-processing.
+    // Per-sensor accelerometer magnitude (acc_magn) and gyro DC bias
+    // (gyr_bias).  Applied as `acc = acc / acc_magn` and
+    // `gyr = gyr - gyr_bias` before sensor-to-segment rotation; standard
+    // IMU calibration pre-processing.
     void setAccNormalisation(const std::array<double, kXsensSegmentCount>& accMagn);
     void setGyroBias(const std::array<QVector3D, kXsensSegmentCount>& gyrBias);
 

@@ -100,10 +100,11 @@ Name: "compact"; Description: "{cm:CompactInstallation}"
 Name: "custom";  Description: "{cm:CustomInstallation}"; Flags: iscustom
 
 [Components]
-Name: "main";          Description: "{cm:CompMain}";          Types: full compact custom; Flags: fixed
-Name: "plugins";       Description: "{cm:CompPluginsRoot}";   Types: full
-Name: "plugins\blender"; Description: "{cm:CompPluginBlender}"; Types: full
-Name: "docs";          Description: "{cm:CompDocs}";          Types: full
+Name: "main";              Description: "{cm:CompMain}";           Types: full compact custom; Flags: fixed
+Name: "plugins";           Description: "{cm:CompPluginsRoot}";    Types: full
+Name: "plugins\blender";   Description: "{cm:CompPluginBlender}";  Types: full
+Name: "plugins\unreal";    Description: "{cm:CompPluginUnreal}";   Types: full
+Name: "docs";              Description: "{cm:CompDocs}";           Types: full
 
 [Tasks]
 Name: "desktopicon";    Description: "{cm:CreateDesktopIcon}";       GroupDescription: "{cm:AdditionalIcons}"
@@ -133,6 +134,24 @@ Source: "..\Plugins\BlenderProject\*"; \
     DestDir: "{app}\Plugins\BlenderProject"; \
     Flags: ignoreversion recursesubdirs createallsubdirs; \
     Components: plugins\blender
+
+; --- Unreal Engine 5.6 LiveLink plugin source (drop into a UE project's
+;     Plugins/ folder; UBT builds Binaries/Intermediate on first launch).
+Source: "..\Plugins\XsensLivc\LiveLinkMvnPlugin.uplugin"; \
+    DestDir: "{app}\Plugins\XsensLivc"; Flags: ignoreversion; \
+    Components: plugins\unreal
+Source: "..\Plugins\XsensLivc\Source\*"; \
+    DestDir: "{app}\Plugins\XsensLivc\Source"; \
+    Flags: ignoreversion recursesubdirs createallsubdirs; \
+    Components: plugins\unreal
+Source: "..\Plugins\XsensLivc\Resources\*"; \
+    DestDir: "{app}\Plugins\XsensLivc\Resources"; \
+    Flags: ignoreversion recursesubdirs createallsubdirs; \
+    Components: plugins\unreal
+Source: "..\Plugins\XsensLivc\Content\*"; \
+    DestDir: "{app}\Plugins\XsensLivc\Content"; \
+    Flags: ignoreversion recursesubdirs createallsubdirs; \
+    Components: plugins\unreal
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"
@@ -174,6 +193,7 @@ english.CustomInstallation=Custom installation
 english.CompMain=Fox Mocap application and runtime DLLs (Xsens / Manus / Qt)
 english.CompPluginsRoot=Optional plugins
 english.CompPluginBlender=Blender plugin (MVN Live add-on + test project)
+english.CompPluginUnreal=Unreal Engine 5.6 plugin source (LiveLink, drop into a UE project)
 english.CompDocs=Documentation, screenshots and README
 english.CreateQuickLaunchIcon=Create a &Quick Launch icon
 english.OpenFirewallUDP9763=Open UDP port 9763 in Windows Firewall (required to receive MVN stream)
@@ -186,6 +206,7 @@ russian.CustomInstallation=Выборочная установка
 russian.CompMain=Приложение Fox Mocap и runtime-библиотеки (Xsens / Manus / Qt)
 russian.CompPluginsRoot=Дополнительные плагины
 russian.CompPluginBlender=Плагин для Blender (MVN Live add-on + тест-проект)
+russian.CompPluginUnreal=Плагин для Unreal Engine 5.6 (исходники LiveLink, кладётся в Plugins/ UE-проекта)
 russian.CompDocs=Документация, скриншоты и README
 russian.CreateQuickLaunchIcon=Создать значок в панели &быстрого запуска
 russian.OpenFirewallUDP9763=Открыть UDP-порт 9763 в брандмауэре Windows (нужен для приёма потока MVN)

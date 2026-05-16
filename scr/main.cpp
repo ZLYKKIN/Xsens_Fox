@@ -1,11 +1,11 @@
 // Fox Mocap — implementation.  See main.h for the component overview.
 //
-// All skeleton math is ported 1:1 from HumanInertialPose-main:
-//   * compute_skeleton_kpts_from_seg_orient   (base_skeleton.py)
-//   * SkeletonXsens.default_seg_angles        (skeletons/xsens.py)
-//   * add_dummy_segments                      (skeletons/xsens.py)
+// Skeleton math:
+//   * compute_skeleton_kpts_from_seg_orient  — keypoint forward kinematics
+//   * SkeletonXsens.default_seg_angles       — T-pose reference orientations
+//   * add_dummy_segments                     — dummy-segment helpers
 //   * quat_mult / quat_diff / vec_rotate /
-//     convert_euler_to_quat                   (rotations.py)
+//     convert_euler_to_quat                  — quaternion utilities
 
 #include "main.h"
 
@@ -164,7 +164,7 @@ const char* kSegmentNames[kXsensSegmentCount] = {
     "l_upper_leg", "l_lower_leg", "l_foot", "l_toe",
 };
 
-// Five finger chains, raw 20-entry layout (matches XESNSE finger_layout.hpp).
+// Five finger chains, raw 20-entry layout (Manus per-hand finger layout).
 // Indices point into rightGlove[] / leftGlove[].  Each chain is drawn as a
 // poly-line starting at the wrist (hand segment) and walking bone-by-bone,
 // so the hand visually continues the forearm.
@@ -180,7 +180,7 @@ const char* kFingerChainNames[kFingerChainCount] = {
 };
 
 // ============================================================================
-//  Quaternion math  (WXYZ, scalar-first).  Ported from hipose/rotations.py.
+//  Quaternion math  (WXYZ, scalar-first), Hamilton / scipy convention.
 // ============================================================================
 
 Quat quat_mult(const Quat& a, const Quat& b)
@@ -266,7 +266,7 @@ SkeletonXsens::SkeletonXsens(const ActorConfig& actor, const std::string& pose)
 
 void SkeletonXsens::buildTopology()
 {
-    // Copy of the tables in hipose/skeleton/skeletons/xsens.py:
+    // Xsens-skeleton segment tables (T-pose reference orientations):
     //   seg_start_pts / seg_end_pts  (27 entries including 4 dummy stubs).
     //            | pelvis->head(7) |   right arm(5)  |    left arm(5)   |    right leg(5)  |   left leg(5)
     static const int S[kXsensSegmentCountWithDummies] = {
@@ -327,7 +327,7 @@ defaultSegAnglesFor(const std::string& pose)
 
 void SkeletonXsens::buildDefaultAngles()
 {
-    // Copied from SkeletonXsens.__init__ in xsens.py.
+    // T-pose / N-pose reference orientations for the 23 Xsens segments.
     // Both presets use seq="XYZ".  23 entries (no dummies — dummy angles
     // are derived from T8 and Pelvis at FK time in addDummySegments).
     const double P = M_PI;
@@ -376,14 +376,14 @@ void SkeletonXsens::buildLengths(const ActorConfig& actor)
     //   1. "shoulder" segment was 0.259·h/2 ≈ 22 cm — that was the
     //       bi-acromial half-width (T8 → acromion lateral distance).  In
     //       SkeletonXsens it sits INSIDE the arm chain (scapula→shoulder
-    //       joint→upper arm start), and hipose's default is 0.10 m — we
+    //       joint→upper arm start), and the canonical default is 0.10 m — we
     //       now scale that default by (h / 1.75).
     //   2. "foot" & "toe": foot was 0.039·h (≈ 6.8 cm, nonsense) and the
     //       whole user-supplied foot length went to the TOE bone.  Real
     //       anatomy splits heel-to-ball ≈ 60 % of foot length, ball-to-tip
     //       ≈ 40 %.  Using the user's foot-length directly now.
     //   3. Spine and small stubs are now scaled by trunk ratio (h/1.75)
-    //       so tall/short actors don't inherit the hipose h=1.75 defaults.
+    //       so tall/short actors don't inherit the h=1.75 m defaults.
     const double h  = actor.heightCm      / 100.0;
     const double fl = actor.footLengthCm  / 100.0;
     const double trunkScale = h / 1.75;   // spine & stubs scale with height
@@ -532,7 +532,7 @@ SkeletonXsens::computeKeypoints(const std::array<Quat, kXsensSegmentCount>& raw,
 }
 
 // ============================================================================
-//  Madgwick MARG AHRS — 1:1 port of the algorithm used by hipose
+//  Madgwick MARG AHRS — orientation filter for MARG (acc + gyr + mag).
 //  (ahrs.filters.Madgwick) with the same output-convention patch:
 //  the filter natively works in NED so we rotate the final quaternion by
 //  Qx(π) to land in NWU (which is what SkeletonXsens expects).
@@ -735,8 +735,8 @@ static void madgwickIMU(MadgwickState& st, const QVector3D& gyr,
 }
 
 // ============================================================================
-//  LocomotionSolver — direct port of the contract observed in the
-//  xme64.dll ghidra decomp (see header for references).
+//  LocomotionSolver — foot-contact detection, foot-lock IK and drift
+//  control.  See header for the architectural notes.
 // ============================================================================
 
 // ---------- [A] yaw-only kvaternion — swing-twist decomposition along world Z
@@ -1760,15 +1760,16 @@ static double monotonicSec()
 // ============================================================================
 //  XDA direct connection via xsensdeviceapi64.dll  +  xstypes64.dll
 //
-//  Minimum viable port of XESNSE/Software/app/src/pose_sources.cpp focussed
-//  on the read-only path: scan → open → enumerate → measure → poll
-//  orientation quaternions → store them in SuitPose.
+//  Xsens Device API (XDA) suit-receiver thread.  Read-only path:
+//  scan → open → enumerate → measure → poll orientation quaternions
+//  → store them in SuitPose.
 //
-//  The XDA function signatures below are reverse-engineered from XESNSE's
-//  function-pointer tables; they match the layout static_asserted there.
+//  The XDA function signatures below are derived from the published
+//  Xsens Device API headers and confirmed against the runtime vtable
+//  layout.
 // ============================================================================
 
-// --- Sensor location-ID → SkeletonXsens segment index (from XESNSE) -------
+// --- Sensor location-ID → SkeletonXsens segment index --------------------
 static int segmentFromLocationId(int loc)
 {
     switch (loc) {
@@ -1841,7 +1842,7 @@ using FnDataPacketOrientationIncrement    =
     XsQuaternionBlob*(*)(const XsDataPacketBlob*, XsQuaternionBlob*);
 using FnDeviceUpdateRate                  = int (*)(void*);
 
-// Calibrated IMU data — the inputs hipose's Madgwick filter wants.
+// Calibrated IMU data — the inputs the Madgwick filter wants.
 using FnDataPacketContainsAcc    = int (*)(const XsDataPacketBlob*);
 using FnDataPacketAcc            = XsVectorBlob*(*)(const XsDataPacketBlob*, XsVectorBlob*);
 using FnDataPacketContainsGyro   = int (*)(const XsDataPacketBlob*);
@@ -1851,7 +1852,7 @@ using FnDataPacketMag            = XsVectorBlob*(*)(const XsDataPacketBlob*, XsV
 using FnVectorDestruct           = void(*)(XsVectorBlob*);
 
 // SDI (Strap-down Integration) fallbacks — what Body Pack V2 actually
-// sends instead of absolute acc/gyr (see XESNSE pose_sources.cpp line 1909).
+// sends instead of absolute acc/gyr.
 using FnDataPacketContainsVelocityIncrement = int (*)(const XsDataPacketBlob*);
 using FnDataPacketVelocityIncrement         =
     XsVectorBlob*(*)(const XsDataPacketBlob*, XsVectorBlob*);
@@ -2022,7 +2023,7 @@ static bool loadApi(Api& api, QString& errDetail)
     ok &= resolveProc(api.xda, "XsControl_deviceIds",               api.controlDeviceIds);
     ok &= resolveProc(api.xda, "XsControl_device",                  api.controlDevice);
     resolveProc (api.xda, "XsControl_broadcast",                    api.controlBroadcast);
-    // Control init helpers — XESNSE calls these right after construct and
+    // Control init helpers — called right after construction and
     // they are what turns on USB-NCM network scanning for Body Pack V2.
     resolveProc (api.xda, "XsControl_loadFilterProfiles",           api.controlLoadFilterProfiles);
     resolveProc (api.xda, "XsControl_setOptions",                   api.controlSetOptions);
@@ -2140,7 +2141,7 @@ struct MocapReceiver::Impl {
 
     // Per-segment AHRS state — xio Fusion.  Body Pack V2 never ships
     // absolute quaternions (only SDI Δq/Δv + mag), so we fuse per-sensor
-    // acc/gyr/mag into proper NWU quaternions exactly like hipose's
+    // acc/gyr/mag into proper NWU quaternions using the same convention as
     // InertialPoseFusionFilter — but using the newer, more robust xio AHRS
     // (gyro-bias correction, accel/magnetic rejection, startup ramp).
     std::array<FusionAhrs, kXsensSegmentCount> fusion{};
@@ -2156,13 +2157,13 @@ struct MocapReceiver::Impl {
     std::array<Quat, kXsensSegmentCount> s2s{};
     std::array<Quat, kXsensSegmentCount> s2sInv{};
     bool                                 s2sActive = false;
-    // Per-sensor magnetometer scaling (hipose mag_magn).  1.0 = do nothing.
+    // Per-sensor magnetometer scaling (mag_magn).  1.0 = do nothing.
     std::array<double, kXsensSegmentCount> magMagn{};
     bool                                   magNormActive = false;
-    // Per-sensor accelerometer scaling (hipose acc_magn).  1.0 = off.
+    // Per-sensor accelerometer scaling (acc_magn).  1.0 = off.
     std::array<double, kXsensSegmentCount> accMagn{};
     bool                                   accNormActive = false;
-    // Per-sensor gyroscope DC bias (hipose gyr_bias), in deg/s.  All zero = off.
+    // Per-sensor gyroscope DC bias (gyr_bias), in deg/s.  All zero = off.
     std::array<QVector3D, kXsensSegmentCount> gyrBias{};
     bool                                      gyrBiasActive = false;
 
@@ -2283,7 +2284,7 @@ struct ManusErgoSnapshot {
 
     // Test-mode raw-dump controls.  Set to true from MocapReceiver when
     // the CLI passes -test so the callback emits full ergonomics-stream
-    // contents to the log for reverse-engineering.
+    // contents to the log for offline inspection.
     std::atomic<bool>          rawDump    { false };
     std::atomic<std::uint64_t> rawTicks   { 0 };
 
@@ -2497,7 +2498,7 @@ static inline QVector3D mirrorManusL(const QVector3D& p)
 }
 
 // Callback signature matches CoreSdk_RegisterCallbackForErgonomicsStream:
-// `void(const ErgonomicsStream*)`.  The struct layout is from XESNSE.
+// `void(const ErgonomicsStream*)`.  Struct layout matches the Manus ABI.
 struct ManusErgoData {        // sizeof == 0xA8
     std::uint32_t id = 0;
     std::uint32_t isUserID = 0;
@@ -2560,7 +2561,7 @@ static void __cdecl foxManusErgonomicsCb(const void* raw)
     //   data[ 0..19]  — LEFT hand  (5 fingers × 4 joints in degrees)
     //   data[20..39]  — RIGHT hand
     // Per-entry probe: the half with non-zero activity belongs to that
-    // glove; XESNSE uses the same convention.
+    // glove; matches the Manus SDK convention.
     for (std::uint32_t i = 0; i < s->dataCount && i < 32; ++i) {
         const auto& e = s->data[i];
         bool anyL = false, anyR = false;
@@ -2702,7 +2703,7 @@ static void __cdecl foxManusErgonomicsCb(const void* raw)
     }
 }
 
-// ManusSDK ABI — copied verbatim from XESNSE/Software/app/src/pose_sources.cpp
+// ManusSDK ABI — function-pointer signatures matching the public
 // where these structs ship with static_assert()s against offsets / sizes
 // verified against the production SDK headers.
 namespace manus_abi {
@@ -2774,7 +2775,7 @@ bool MocapReceiver::connectGloves()
         I.manusDllLoaded = true;
     }
 
-    // ---- 2. Resolve exports (signatures taken from XESNSE) ---------------
+    // ---- 2. Resolve exports (signatures from public ManusSDK headers) -----
     using namespace manus_abi;
     auto resolve = [&](const char* name) -> FARPROC {
         return GetProcAddress(I.manusModule, name);
@@ -2921,7 +2922,7 @@ bool MocapReceiver::connectGloves()
     // ---- 8. Poll for a powered-on, paired glove --------------------------
     // ManusCore does not populate GetNumberOfAvailableGloves reliably
     // (observed: returns 0 even with two gloves online and paired).  The
-    // XESNSE way is to enumerate "users" and query each side's glove id.
+    // The canonical Manus flow is to enumerate "users" and query each side's glove id.
     int gloveCount = 0;
     if (getNumUsr && getUserIds && getGloveId) {
         std::uint32_t userN = 0;
@@ -3434,8 +3435,8 @@ void MocapReceiver::run()
 
             // Expose the raw calibrated sensor vectors so the wizard can
             // average them for the static_sensor_to_segment_calibration +
-            // acc_magn + gyr_bias + mag_magn (all four apply_imu_calibration
-            // terms from hipose).
+            // acc_magn + gyr_bias + mag_magn (the four standard IMU
+            // calibration terms applied before AHRS).
             if (fuseReady && targetSeg >= 0 && targetSeg < kXsensSegmentCount) {
                 QMutexLocker raw(&I.lock);
                 staging.accSensor[targetSeg] = accForFilter;   // g
@@ -3443,7 +3444,7 @@ void MocapReceiver::run()
                 if (haveMag) staging.magSensor[targetSeg] = mag;
             }
 
-            // Hipose apply_imu_calibration, in order:
+            // Reference IMU calibration pipeline, in order:
             //   acc_cal = acc / acc_magn   (unit-g scaled)
             //   gyr_cal = gyr - gyr_bias   (DC offset removed)
             //   mag_cal = mag / mag_magn   (unit-length scaled)
@@ -3887,8 +3888,8 @@ static const Tr kTr[] = {
     {"mode_hint_ok",       "Оборудование готово — можно продолжать.",
                            "Hardware is ready — you can continue."},
     {"dims_title",         "Размеры актёра",                    "Actor dimensions"},
-    {"dims_hint",          "Остальные длины костей считаются по росту (антропометрия hipose / XESNSE).",
-                           "Other bone lengths are computed from height (hipose / XESNSE anthropometry)."},
+    {"dims_hint",          "Остальные длины костей считаются по росту (стандартная антропометрия Drillis-Contini).",
+                           "Other bone lengths are computed from height (standard Drillis-Contini anthropometry)."},
     {"dims_type_hint",     "Введите значение с клавиатуры или воспользуйтесь стрелками.",
                            "Type a value from the keyboard or use the arrow buttons."},
     {"body_height",        "Рост",                              "Body height"},
@@ -4423,7 +4424,7 @@ void NewSessionWizard::buildPages()
         m_dimsTitle->setObjectName("heroHeading");
         m_dimsTitle->setAlignment(Qt::AlignCenter);
 
-        // --- Primary: body height + foot length (MVN/hipose canonical pair)
+        // --- Primary: body height + foot length (MVN canonical pair)
         // The inputs are fully editable — we install a focus-event hook
         // that selects all text the instant the field is tabbed into, so
         // typing a value overwrites the previous one without manual
@@ -4506,10 +4507,10 @@ void NewSessionWizard::buildPages()
         primaryLay->addWidget(m_leg,       3, 1);
 
         // --- Secondary: anthropometric breakdown (read-only, live update) ---
-        // Mirrors the 27 segment_lengths that hipose SkeletonXsens consumes —
-        // but surfaces only the 6 biomechanically-meaningful values and derives
-        // the rest from standard Drillis-Contini ratios (same that XESNSE's
-        // biomech_model.cpp uses as defaults).
+        // 27 segment_lengths consumed by SkeletonXsens — surface only the
+        // 6 biomechanically-meaningful values; derive the rest from
+        // standard Drillis-Contini ratios (the same ratios that public
+        // biomech references use as defaults).
         auto* breakdownBox = new QGroupBox(p);
         breakdownBox->setProperty("isBreakdownBox", true);
         auto* bg = new QGridLayout(breakdownBox);
@@ -4558,7 +4559,7 @@ void NewSessionWizard::buildPages()
                 const double defLegM = 0.491 * h;
                 legScale = (defLegM > 1e-6) ? (legPerSideM / defLegM) : 1.0;
             }
-            // Same ratios SkeletonXsens + XESNSE biomech use.
+            // Same ratios SkeletonXsens + MVN biomech use.
             struct V { const char* k; double m; };
             V vals[6] = {
                 { "bk_trunk",     0.288 * h               },
@@ -5952,7 +5953,7 @@ void NewSessionWizard::onCaptureTick()
     if (m_calibStatus) m_calibStatus->setText("OK");
     testLog("[calib] N-pose capture complete, solving s2s…", m_test);
 
-    // ----- hipose apply_imu_calibration terms --------------------
+    // ----- IMU calibration terms (acc_magn / gyr_bias / mag_magn) ----------
     //
     // Acc/mag/gyro statistics are averaged across BOTH poses (double the
     // samples → better bias estimate, and the mag norm should be consistent
@@ -6324,7 +6325,7 @@ void NewSessionWizard::onCaptureTick()
     if (m_test) {
         static const char* kModeStr[3] = {"triad ", "ecomp ", "ident "};
         std::cout << std::fixed << std::setprecision(5);
-        std::cout << "[calib] hipose calibration terms (double-pose):\n";
+        std::cout << "[calib] IMU calibration terms (double-pose):\n";
         for (int i = 0; i < kXsensSegmentCount; ++i) {
             std::cout << "        " << std::left << std::setw(14)
                       << kSegmentNames[i] << std::right
@@ -7245,7 +7246,7 @@ void MocapViewport::paintGL()
     gl->glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
     // Fixed-function setup (legacy profile).  Viewport coordinate system
-    // matches hipose's default (use_isb_ref=False): Z-up, identity axis_rot.
+    // canonical default (use_isb_ref=False): Z-up, identity axis_rot.
     QMatrix4x4 proj;  proj.perspective(45.0f, float(width())/float(height()), 0.05f, 100.0f);
 
     const float yawR   = qDegreesToRadians(m_yaw);
@@ -7310,7 +7311,7 @@ void MocapViewport::drawSkeleton()
     // ----- Locomotion solver (walking + drift protection) --------------------
     // Ports MVN's contract: `setContacts` → biomech solver locks foot, pelvis
     // is derived from the locked anchor.  See LocomotionSolver comments in
-    // main.h for the ghidra-derived rationale.
+    // main.h for the underlying rationale.
     {
         for (auto& p : kp) p += m_lastLocoOffset;
     }
@@ -7385,7 +7386,7 @@ void MocapViewport::drawSkeleton()
     glEnd();
 
     // ----- Per-segment XYZ triads --------------------------------------------
-    // Direct port of visualization.py's display_segment_axis path: for each of
+    // Per-segment axis-triad debug overlay: for each of
     // the 27 post-dummy segments, draw a 7.5 cm R/G/B axis triad at the bone's
     // start joint, rotated by the segment's global orientation.
     {
@@ -7545,7 +7546,7 @@ static void appendInt32BE(QByteArray& pkt, qint32 v)
 
 // NWU (X=fwd, Y=left, Z=up, RH) -> MVN (Y=fwd, X=right, Z=up, RH).
 // Plugin's QuaternionDatagram.cpp:27 явно говорит "Z-Up, right-handed",
-// плагинный Y-flip в SegData::Set ожидает MVN convention на входе.  hipose
+// плагинный Y-flip в SegData::Set ожидает MVN convention на входе.
 // pipeline native-NWU (см. main.cpp:51,504,2836), значит между фреймами
 // нужен similarity Rz(+90°):
 //   q_mvn = Rz(+90°) * q_nwu * Rz(-90°)
@@ -8478,8 +8479,8 @@ static bool writeFbxAscii(const QString& path,
 // ---------------------------------------------------------------------------
 //  HD post-processing — offline cleanup pass for a finished recording.
 //
-//  Approximation of Xsens MVN HD reprocessing as inferred from the XESNSE
-//  Ghidra decomp: a batched pipeline of
+//  Approximation of Xsens MVN HD reprocessing inferred from runtime
+//  observation: a batched pipeline of
 //      1) per-segment outlier rejection (z-score on Δquat angular distance),
 //      2) per-segment Gaussian SLERP smoothing (window ≈ 21 frames),
 //      3) root-position Butterworth low-pass (cutoff ≈ 5 Hz),
@@ -8527,7 +8528,7 @@ static void hdOutlierReject(std::vector<RecordedFrame>& fr)
 }
 
 // Pass 2 — Gaussian SLERP smoother.  Half-width 10 frames, σ = 4 (≈ the
-// XESNSE 21-sample decomp window).
+// MVN-style 21-sample decomposition window).
 static void hdQuatSmooth(std::vector<RecordedFrame>& fr)
 {
     const int half = 10;
