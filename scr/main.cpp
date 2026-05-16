@@ -3925,6 +3925,12 @@ static const Tr kTr[] = {
     {"calib_n_capture",    "N-поза — не двигайтесь 12с",        "N-pose — hold still 12s"},
     {"calib_k_prepare",    "Теперь K-поза: сядьте на стул (бёдра горизонтально) + руки прямо вперёд — приготовьтесь…", "Now K-pose: sit on chair (thighs horizontal) + arms forward — prepare…"},
     {"calib_k_capture",    "K-поза — сидя, руки вперёд, не двигайтесь", "K-pose — sitting, arms forward, hold still"},
+    {"kpose_hint",         "K-поза: сядьте на стул (бёдра горизонтально, колени 90°) + руки прямо вперёд горизонтально",
+                           "K-pose: sit on a chair (thighs horizontal, knees 90°) + arms straight forward, horizontal"},
+    {"wifi_ssid_ph",       "\xF0\x9F\x93\xB6  SSID сети",                  "\xF0\x9F\x93\xB6  Network SSID"},
+    {"wifi_pass_ph",       "\xF0\x9F\x94\x91  Пароль",                    "\xF0\x9F\x94\x91  Password"},
+    {"live_recalibrate",   "Перекалибровать поток (T-поза)",               "Recalibrate stream (T-pose)"},
+    {"stream_baseline_recap", "Базовая T-поза стрима пересохранена",       "Stream baseline re-captured (hold T-pose)"},
     {"still",              "СТОИТЕ СПОКОЙНО",                   "STILL"},
     {"moving",             "ДВИЖЕНИЕ",                          "MOVING"},
     {"suit_connected",     "костюм подключён",                  "suit connected"},
@@ -4306,11 +4312,11 @@ void NewSessionWizard::buildPages()
             wl->setContentsMargins(0, 0, 0, 0);
             wl->setSpacing(10);
             m_edSsid = new QLineEdit(m_wifiRow);
-            m_edSsid->setPlaceholderText(QString::fromUtf8("\xF0\x9F\x93\xB6  SSID сети"));
+            m_edSsid->setPlaceholderText(Lang::t("wifi_ssid_ph"));
             m_edSsid->setMinimumHeight(34);
             m_edSsid->setMinimumWidth(200);
             m_edPassword = new QLineEdit(m_wifiRow);
-            m_edPassword->setPlaceholderText(QString::fromUtf8("\xF0\x9F\x94\x91  Пароль"));
+            m_edPassword->setPlaceholderText(Lang::t("wifi_pass_ph"));
             m_edPassword->setEchoMode(QLineEdit::Password);
             m_edPassword->setMinimumHeight(34);
             m_edPassword->setMinimumWidth(200);
@@ -4788,6 +4794,8 @@ void NewSessionWizard::retranslate()
     if (m_btnConnectSuit) m_btnConnectSuit->setText(Lang::t(
         (m_rx && m_rx->isStreaming()) ? "disconnect_suit" : "connect_suit"));
     if (m_btnConnectGloves) m_btnConnectGloves->setText(Lang::t("connect_gloves"));
+    if (m_edSsid)     m_edSsid->setPlaceholderText(Lang::t("wifi_ssid_ph"));
+    if (m_edPassword) m_edPassword->setPlaceholderText(Lang::t("wifi_pass_ph"));
     if (m_gloveText) {
         const char* k = "gloves_missing";
         if (m_rx) {
@@ -4824,7 +4832,7 @@ void NewSessionWizard::retranslate()
         const bool kHalf = (m_phase == CalibPhase::PrepK
                          || m_phase == CalibPhase::CaptureK);
         if (kHalf)
-            m_poseHint->setText(QString("K-поза: сядьте на стул (бёдра горизонтально, колени 90°) + руки прямо вперёд горизонтально"));
+            m_poseHint->setText(Lang::t("kpose_hint"));
         else
             m_poseHint->setText(Lang::t(nHalf ? "npose_hint" : "tpose_hint"));
     }
@@ -6475,7 +6483,7 @@ void NewSessionWizard::onCaptureTick()
         m_phase = CalibPhase::PrepK;
         refreshPoseImage();
         if (m_poseHint)
-            m_poseHint->setText(QString("K-поза: сядьте на стул (бёдра горизонтально, колени 90°) + руки прямо вперёд горизонтально"));
+            m_poseHint->setText(Lang::t("kpose_hint"));
         if (m_calibStatus)
             m_calibStatus->setText(Lang::t("calib_k_prepare"));
 
@@ -8855,13 +8863,13 @@ MainWindow::MainWindow(MocapReceiver* rx,
             auto* a = m->addAction(Lang::t("live_start"));
             connect(a, &QAction::triggered, this, &MainWindow::onOpenLiveWizard);
         } else {
-            auto* aRecal = m->addAction(QString::fromUtf8("Recalibrate Stream (T-pose)"));
+            auto* aRecal = m->addAction(Lang::t("live_recalibrate"));
             aRecal->setShortcut(QKeySequence("Ctrl+R"));
             connect(aRecal, &QAction::triggered, this, [this]() {
                 if (m_streamer) {
                     m_streamer->recalibrate();
                     if (statusBar()) statusBar()->showMessage(
-                            QString::fromUtf8("Stream baseline re-captured (стой в T-pose)"), 2000);
+                            Lang::t("stream_baseline_recap"), 2000);
                 }
             });
             auto* a = m->addAction(Lang::t("live_stop"));
