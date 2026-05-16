@@ -11,6 +11,13 @@ on:
         required: false
         default: ''
 
+# Required so the default GITHUB_TOKEN can:
+#   * create / update a GitHub Release (contents: write)
+#   * fetch PR titles for `generate_release_notes: true` (pull-requests: read)
+permissions:
+  contents: write
+  pull-requests: read
+
 jobs:
   build-windows:
     name: Build Windows x64
