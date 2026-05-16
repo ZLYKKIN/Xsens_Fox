@@ -1,8 +1,27 @@
 # Xsens Fox
 
+![Fox Mocap — New Session](image/newsession.png)
+
 Fox Mocap — Qt-приложение для motion capture на базе **Xsens Link (MVN MXTP02/25)** костюма и опциональных перчаток **Manus**. Полный C++ порт `HumanInertialPose-main` (23-сегментный Xsens-скелет, T/N/K-pose калибровка, прямая кинематика, sensor-to-segment alignment), стрим в Unreal Engine / Blender по UDP `9763`.
 
-> ⚠️ Репозиторий приватный. Открыт он будет позже — после публикации это README станет «лицом» проекта.
+[![Release](https://img.shields.io/github/v/release/ZLYKKIN/Xsens_Fox?include_prereleases&sort=semver&label=release)](https://github.com/ZLYKKIN/Xsens_Fox/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/ZLYKKIN/Xsens_Fox/total.svg)](https://github.com/ZLYKKIN/Xsens_Fox/releases)
+[![CI](https://github.com/ZLYKKIN/Xsens_Fox/actions/workflows/release.yml/badge.svg)](https://github.com/ZLYKKIN/Xsens_Fox/actions/workflows/release.yml)
+
+---
+
+## Скачать готовый билд
+
+Не хотите собирать сами — берите готовый Windows-релиз:
+
+➡️ **[Releases → последняя версия](https://github.com/ZLYKKIN/Xsens_Fox/releases/latest)**
+
+В архиве `fox_mocap-vX.Y.Z-windows-x64.zip` уже лежит `fox_mocap.exe`, все Qt-зависимости (через `windeployqt`) и драйверные DLL Xsens / Manus. Запуск:
+
+1. Распакуйте архив в любую папку.
+2. Запустите `fox_mocap.exe`.
+
+Если Windows предупредит про SmartScreen — выберите «Подробнее → Выполнить в любом случае» (бинарь не подписан, как и подавляющее большинство open-source инструментов). SHA-256 сумма архива лежит рядом в `.sha256`.
 
 ---
 

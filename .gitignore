@@ -57,3 +57,6 @@ Desktop.ini
 
 # Claude / agent state
 /.claude/
+
+# Untracked UE Live Link plugin workspace (binaries/intermediate)
+/Plugins/XsensLivc/
