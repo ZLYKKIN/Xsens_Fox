@@ -9952,7 +9952,20 @@ void MainWindow::logTest(const std::string& msg) const
 
 void MainWindow::closeEvent(QCloseEvent* e)
 {
+    // Stop every timer first so no queued QTimer slots can fire after the
+    // window starts tearing down (their lambdas capture `this` and access
+    // m_streamer / m_modeHud / m_recording, which become invalid mid-close).
+    m_renderTimer.stop();
+    if (m_modeHudTimer) m_modeHudTimer->stop();
+
+    // Cleanly shut down outbound streaming and recording so we don't leak
+    // an open UDP socket / file handle on exit.
+    if (m_streamer && m_streamer->isRunning()) m_streamer->stop();
+    if (m_recording) onRecordStop();
+
+    // Receiver thread is joined last — it owns the longest-blocking wait.
     if (m_rx) { m_rx->stop(); m_rx->wait(1500); }
+
     QMainWindow::closeEvent(e);
 }
 
