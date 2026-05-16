@@ -68,8 +68,8 @@ WizardStyle=modern
 WizardResizable=yes
 
 ; 64-bit-only; install in 64-bit Program Files even on x64 hosts.
-ArchitecturesAllowed=x64compatible
-ArchitecturesInstallIn64BitMode=x64compatible
+ArchitecturesAllowed=x64
+ArchitecturesInstallIn64BitMode=x64
 
 ; Default: install for "All Users" (admin) — like most games.
 ; The user can still pick "Just me" from the dropdown in the privileges page.
@@ -197,7 +197,7 @@ russian.GroupNetwork=Сеть:
 [Code]
 function InitializeSetup(): Boolean;
 begin
-  if not IsX64Compatible then
+  if not IsWin64 then
   begin
     MsgBox('Fox Mocap requires a 64-bit version of Windows 10 or later.',
            mbError, MB_OK);
