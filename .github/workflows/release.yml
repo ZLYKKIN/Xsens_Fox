@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Tag to publish (e.g. v0.1.0). Leave empty for a draft test build.'
+        description: 'Tag to publish (e.g. v0.2.0). Leave empty for a draft test build.'
         required: false
         default: ''
 
@@ -58,39 +58,64 @@ jobs:
         shell: pwsh
         run: |
           $tag = '${{ github.ref_name }}'
-          if ($tag -notmatch '^v') { $tag = 'dev-${{ github.sha }}'.Substring(0, 11) }
+          if ($tag -notmatch '^v') { $tag = 'dev-' + '${{ github.sha }}'.Substring(0, 7) }
+          $ver = $tag -replace '^v',''
           $pkg = "fox_mocap-$tag-windows-x64"
-          "tag=$tag"   | Out-File $env:GITHUB_OUTPUT -Append
-          "pkg=$pkg"   | Out-File $env:GITHUB_OUTPUT -Append
+          "tag=$tag" | Out-File $env:GITHUB_OUTPUT -Append
+          "ver=$ver" | Out-File $env:GITHUB_OUTPUT -Append
+          "pkg=$pkg" | Out-File $env:GITHUB_OUTPUT -Append
 
-      - name: Stage release files
+      - name: Stage portable ZIP
         shell: pwsh
         run: |
           $pkg = '${{ steps.name.outputs.pkg }}'
           New-Item -ItemType Directory -Force -Path $pkg | Out-Null
           Copy-Item -Recurse -Force build/bin/* $pkg/
           Copy-Item -Force README.md $pkg/README.md
+          Copy-Item -Force LICENSE   $pkg/LICENSE.txt
           if (Test-Path image) {
             New-Item -ItemType Directory -Force -Path "$pkg/image" | Out-Null
             Copy-Item -Recurse -Force image/* "$pkg/image/"
           }
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Compress-Archive -Path "$pkg/*" -DestinationPath "dist/$pkg.zip" -Force
 
-      - name: Pack ZIP
+      - name: Build installer (Inno Setup)
         shell: pwsh
         run: |
-          $pkg = '${{ steps.name.outputs.pkg }}'
-          Compress-Archive -Path "$pkg/*" -DestinationPath "$pkg.zip" -Force
-          Get-FileHash "$pkg.zip" -Algorithm SHA256 |
-            Select-Object -ExpandProperty Hash |
-            Out-File "$pkg.zip.sha256" -Encoding ascii
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            $iscc = "${env:ProgramFiles}\Inno Setup 6\ISCC.exe"
+          }
+          if (-not (Test-Path $iscc)) {
+            Write-Host "Inno Setup 6 not preinstalled; installing via choco..."
+            choco install innosetup -y --no-progress
+            $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          }
+          Write-Host "Using ISCC at: $iscc"
+          $ver = '${{ steps.name.outputs.ver }}'
+          & "$iscc" `
+              "/DAppVersion=$ver" `
+              "/DBuildDir=$PWD\build\bin" `
+              "/DOutDir=$PWD\dist" `
+              "$PWD\installer\fox_mocap.iss"
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit $LASTEXITCODE" }
+
+      - name: Compute SHA-256 for release assets
+        shell: pwsh
+        run: |
+          Get-ChildItem dist -File | ForEach-Object {
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash
+            "$hash  $($_.Name)" | Out-File "$($_.FullName).sha256" -Encoding ascii
+          }
+          Get-ChildItem dist
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.name.outputs.pkg }}
           path: |
-            ${{ steps.name.outputs.pkg }}.zip
-            ${{ steps.name.outputs.pkg }}.zip.sha256
+            dist/**
           if-no-files-found: error
           retention-days: 14
 
@@ -99,9 +124,25 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            ${{ steps.name.outputs.pkg }}.zip
-            ${{ steps.name.outputs.pkg }}.zip.sha256
+            dist/*.exe
+            dist/*.zip
+            dist/*.sha256
           generate_release_notes: true
           draft: false
           prerelease: false
           fail_on_unmatched_files: true
+          body: |
+            ## Fox Mocap ${{ github.ref_name }} — Windows x64
+
+            ### Скачать
+            * **`FoxMocapSetup-${{ steps.name.outputs.ver }}-windows-x64.exe`** — установщик с выбором папки, лицензией и опциональными плагинами (рекомендуется).
+            * `fox_mocap-${{ github.ref_name }}-windows-x64.zip` — portable-версия, просто распакуйте и запустите `fox_mocap.exe`.
+            * `.sha256` — контрольные суммы для верификации.
+
+            ### Что внутри
+            * `fox_mocap.exe` собран на windows-2022 / MSVC 19.3x / Qt 6.5.3.
+            * Qt-рантайм разложен через `windeployqt`, драйверные DLL Xsens / Manus — в комплекте.
+            * Опциональный Blender-плагин (`MVNBlenderPlugin-main.zip` + тест-проект) ставится по галочке в установщике.
+            * Установщик открывает UDP-порт 9763 в Windows Firewall (можно снять галочку на шаге "Дополнительные задачи").
+
+            > SmartScreen может предупредить о незнакомом издателе — бинарь не подписан. Сравните SHA-256 с прикреплённым `.sha256` и нажмите «Подробнее → Выполнить в любом случае».

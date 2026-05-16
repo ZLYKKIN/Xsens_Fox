@@ -60,3 +60,7 @@ Desktop.ini
 
 # Untracked UE Live Link plugin workspace (binaries/intermediate)
 /Plugins/XsensLivc/
+
+# Installer / packaging output
+/dist/
+/installer/Output/
