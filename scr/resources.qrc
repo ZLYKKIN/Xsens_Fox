@@ -1,0 +1,9 @@
+<!DOCTYPE RCC>
+<RCC version="1.0">
+  <qresource prefix="/img">
+    <file alias="newsession.png">../image/newsession.png</file>
+    <file alias="npose.png">../image/npose.png</file>
+    <file alias="tpose.png">../image/t-pose.png</file>
+    <file alias="kpose.png">../image/k-pose.png</file>
+  </qresource>
+</RCC>

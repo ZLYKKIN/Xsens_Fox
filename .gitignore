@@ -1,0 +1,59 @@
+# Build output
+/build/
+/out/
+/cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+*_autogen/
+Makefile
+build.ninja
+.ninja_deps
+.ninja_log
+
+# IDE
+/.idea/
+/.vs/
+/.vscode/
+*.user
+*.sln
+*.suo
+*.vcxproj*
+*.csproj*
+
+# Compiled objects / executables
+*.obj
+*.o
+*.exe
+*.lib
+*.exp
+*.pdb
+*.ilk
+*.tlog
+*.idb
+
+# Logs and temporary
+*.log
+*.tmp
+*.bak
+*.orig
+
+# Internal session/working notes (kept locally, not for public repo)
+bugfix.txt
+dedup_session.txt
+k-pose.txt
+aqtinstall.log
+build_log.txt
+
+# Blender autosave / backups
+*.blend1
+*.blend2
+
+# OS junk
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.DS_Store
+
+# Claude / agent state
+/.claude/
