@@ -6921,7 +6921,8 @@ void SensorIndicatorsPanel::updateFromPose(const SuitPose& f)
     for (int i = 0; i < kXsensSegmentCount; ++i) {
         if (!m_trackers[i].dot) continue;
         const double age = nowSec - f.segLastT[i];
-        const bool fresh = f.segValid[i] && f.segLastT[i] > 0.0 && age < 2.0;
+        const bool fresh = f.segValid[i] && f.segLastT[i] > 0.0
+                           && age < kStaleSeconds;
         setDot(m_trackers[i].dot, fresh);
     }
     // Finger panel: only show when gloves are actually streaming now.
@@ -7252,6 +7253,12 @@ void MocapViewport::paintGL()
 {
     auto* gl = QOpenGLContext::currentContext()->functions();
     gl->glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    // Skip when the widget has been collapsed to zero pixels in either axis
+    // (occurs while the window is animating between docked / minimised
+    // states). perspective() would otherwise see a 0 height and return an
+    // identity matrix, leaving the scene rendered with junk projection.
+    if (width() <= 0 || height() <= 0) return;
 
     // Fixed-function setup (legacy profile).  Viewport coordinate system
     // canonical default (use_isb_ref=False): Z-up, identity axis_rot.
@@ -8141,6 +8148,16 @@ LiveStreamWizard::LiveStreamWizard(QWidget* parent) : QDialog(parent)
         QString host = m_host->currentText().trimmed();
         const int sp = host.indexOf(' ');
         if (sp > 0) host = host.left(sp);
+
+        // Refuse to accept without a host: otherwise we close the wizard
+        // and propagate the empty target down to LiveStreamSender::start(),
+        // which will fail at bind time after the dialog is already gone —
+        // the user just sees nothing happen. Keep the dialog open instead.
+        if (host.isEmpty()) {
+            m_host->setFocus();
+            m_host->setStyleSheet("QComboBox { border: 1px solid #C03838; }");
+            return;
+        }
         m_result.host = host;
 
         m_result.port = m_port->value();
