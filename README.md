@@ -285,8 +285,17 @@ respective vendor EULAs.
 
 ## Contributing
 
+> A short note from the maintainer
+>
+> Real life keeps me from giving Fox Mocap as much time as it deserves
+> right now, so the project moves in slow bursts rather than a steady
+> stream. If you stumble on a bug, a quirk, or a regression — please
+> still open an issue or, even better, a pull request with a fix. I
+> read everything and merge solid contributions even when I cannot
+> drive new features myself. Thank you for understanding!
+
 Issues and pull requests are welcome on
-[GitHub](https://github.com/ZLYKKIN/Xsens_Fox).
+[GitHub](https://github.com/ZLYKKIN/Xsens_Fox/issues).
 
 When opening a PR:
 
@@ -296,3 +305,13 @@ When opening a PR:
   fusion / receiver / FK boundaries.
 - Mention any non-trivial mocap-rig assumption you rely on, so future
   readers can reproduce the experiment.
+
+Bug-fix PRs are especially welcome — small, focused patches that fix
+a single reproducible issue get merged the fastest.
+
+---
+
+## Contact
+
+- GitHub issues / PRs: [ZLYKKIN/Xsens_Fox](https://github.com/ZLYKKIN/Xsens_Fox/issues)
+- Telegram: [**@ZLYKKIN_FOX**](https://t.me/ZLYKKIN_FOX) — quick questions, mocap-rig advice, bug reports that don't fit a GitHub issue
