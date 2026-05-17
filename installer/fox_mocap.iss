@@ -104,6 +104,14 @@ Name: "main";              Description: "{cm:CompMain}";           Types: full c
 Name: "plugins";           Description: "{cm:CompPluginsRoot}";    Types: full
 Name: "plugins\blender";   Description: "{cm:CompPluginBlender}";  Types: full
 Name: "plugins\unreal";    Description: "{cm:CompPluginUnreal}";   Types: full
+; --- Optional hardware drivers (third-party redistributables). Each
+;     entry runs the vendor's own signed installer; we do not modify
+;     anything inside, just chain-launch it. User picks what they need.
+Name: "drivers";              Description: "{cm:CompDriversRoot}";   Types: full
+Name: "drivers\usbserial";    Description: "{cm:CompDriverUsbSerial}"; Types: full
+Name: "drivers\ethernet";     Description: "{cm:CompDriverEthernet}";  Types: full
+Name: "drivers\bonjour";      Description: "{cm:CompDriverBonjour}";   Types: full
+Name: "drivers\gigevision";   Description: "{cm:CompDriverGigEVision}"; Types: full
 Name: "docs";              Description: "{cm:CompDocs}";           Types: full
 
 [Tasks]
@@ -153,6 +161,22 @@ Source: "..\Plugins\XsensLivc\Content\*"; \
     Flags: ignoreversion recursesubdirs createallsubdirs; \
     Components: plugins\unreal
 
+; --- Hardware drivers: each is the original vendor installer, signed
+;     by the vendor (Silicon Labs, D-Link, Apple, Allied Vision). The
+;     payload is staged into {tmp} so it never lingers under {app}.
+Source: ".\drivers\USBXpressInstaller_x64.exe"; \
+    DestDir: "{tmp}\drivers"; Flags: deleteafterinstall; \
+    Components: drivers\usbserial
+Source: ".\drivers\DUB-13X2_USB3_Gigabit_Drivers.msi"; \
+    DestDir: "{tmp}\drivers"; Flags: deleteafterinstall; \
+    Components: drivers\ethernet
+Source: ".\drivers\BonjourPSSetup.exe"; \
+    DestDir: "{tmp}\drivers"; Flags: deleteafterinstall; \
+    Components: drivers\bonjour
+Source: ".\drivers\AlliedVisionGigEFilter_1.22.exe"; \
+    DestDir: "{tmp}\drivers"; Flags: deleteafterinstall; \
+    Components: drivers\gigevision
+
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"
 Name: "{group}\Project README"; Filename: "{app}\README.md"; Components: docs
@@ -171,6 +195,23 @@ Name: "{userappdata}\Microsoft\Internet Explorer\Quick Launch\{#MyAppName}"; \
 Filename: "{sys}\netsh.exe"; \
     Parameters: "advfirewall firewall add rule name=""Fox Mocap (UDP 9763)"" dir=in action=allow protocol=UDP localport=9763"; \
     Flags: runhidden; Tasks: firewall
+
+; --- Hardware drivers: chain-launch each vendor's installer in turn.
+;     We use waituntilterminated so the user finishes one driver wizard
+;     before the next opens (otherwise four overlapping UAC prompts).
+Filename: "{tmp}\drivers\USBXpressInstaller_x64.exe"; \
+    StatusMsg: "{cm:RunDriverUsbSerial}"; \
+    Flags: waituntilterminated; Components: drivers\usbserial
+Filename: "msiexec.exe"; \
+    Parameters: "/i ""{tmp}\drivers\DUB-13X2_USB3_Gigabit_Drivers.msi"" /qb"; \
+    StatusMsg: "{cm:RunDriverEthernet}"; \
+    Flags: waituntilterminated; Components: drivers\ethernet
+Filename: "{tmp}\drivers\BonjourPSSetup.exe"; \
+    StatusMsg: "{cm:RunDriverBonjour}"; \
+    Flags: waituntilterminated; Components: drivers\bonjour
+Filename: "{tmp}\drivers\AlliedVisionGigEFilter_1.22.exe"; \
+    StatusMsg: "{cm:RunDriverGigEVision}"; \
+    Flags: waituntilterminated; Components: drivers\gigevision
 
 ; "Run Fox Mocap now" checkbox on the Finish page.
 Filename: "{app}\{#MyAppExeName}"; \
@@ -195,6 +236,15 @@ english.CompPluginsRoot=Optional plugins
 english.CompPluginBlender=Blender plugin (MVN Live add-on + test project)
 english.CompPluginUnreal=Unreal Engine 5.6 plugin source (LiveLink, drop into a UE project)
 english.CompDocs=Documentation, screenshots and README
+english.CompDriversRoot=Hardware drivers (optional, third-party installers)
+english.CompDriverUsbSerial=Silicon Labs USBXpress (CP210x — Awinda USB dongle / MT-Link)
+english.CompDriverEthernet=D-Link DUB-13X2 USB 3.0 → Gigabit Ethernet (Awinda station Ethernet)
+english.CompDriverBonjour=Apple Bonjour Print Services (mDNS auto-discovery)
+english.CompDriverGigEVision=Allied Vision GigE Filter Driver 1.22 (GigE cameras)
+english.RunDriverUsbSerial=Installing Silicon Labs USBXpress driver...
+english.RunDriverEthernet=Installing D-Link DUB-13X2 driver...
+english.RunDriverBonjour=Installing Apple Bonjour service...
+english.RunDriverGigEVision=Installing Allied Vision GigE filter driver...
 english.CreateQuickLaunchIcon=Create a &Quick Launch icon
 english.OpenFirewallUDP9763=Open UDP port 9763 in Windows Firewall (required to receive MVN stream)
 english.GroupNetwork=Networking:
@@ -208,6 +258,15 @@ russian.CompPluginsRoot=Дополнительные плагины
 russian.CompPluginBlender=Плагин для Blender (MVN Live add-on + тест-проект)
 russian.CompPluginUnreal=Плагин для Unreal Engine 5.6 (исходники LiveLink, кладётся в Plugins/ UE-проекта)
 russian.CompDocs=Документация, скриншоты и README
+russian.CompDriversRoot=Драйверы оборудования (опционально, сторонние установщики)
+russian.CompDriverUsbSerial=Silicon Labs USBXpress (CP210x — USB-донгл Awinda / MT-Link)
+russian.CompDriverEthernet=D-Link DUB-13X2 USB 3.0 → Gigabit Ethernet (Ethernet станции Awinda)
+russian.CompDriverBonjour=Apple Bonjour Print Services (mDNS — авто-обнаружение)
+russian.CompDriverGigEVision=Allied Vision GigE Filter Driver 1.22 (камеры GigE)
+russian.RunDriverUsbSerial=Установка драйвера Silicon Labs USBXpress…
+russian.RunDriverEthernet=Установка драйвера D-Link DUB-13X2…
+russian.RunDriverBonjour=Установка службы Apple Bonjour…
+russian.RunDriverGigEVision=Установка драйвера Allied Vision GigE…
 russian.CreateQuickLaunchIcon=Создать значок в панели &быстрого запуска
 russian.OpenFirewallUDP9763=Открыть UDP-порт 9763 в брандмауэре Windows (нужен для приёма потока MVN)
 russian.GroupNetwork=Сеть:

@@ -67,3 +67,14 @@ Desktop.ini
 # Installer / packaging output
 /dist/
 /installer/Output/
+
+# Hardware-driver redistributables shipped with the installer.
+# These are signed third-party installers (Silicon Labs, D-Link, Apple,
+# Allied Vision); the *.exe / *.msi rules above would otherwise hide
+# them from git.
+!installer/drivers/*.exe
+!installer/drivers/*.msi
+
+# Standalone Xsens MVN setup is kept locally as a driver-source mine
+# but is 450 MB and proprietary — never commit it.
+/Plugins/xsens_mvn_*_setup.exe
