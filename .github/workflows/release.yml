@@ -141,15 +141,28 @@ jobs:
           body: |
             ## Fox Mocap ${{ github.ref_name }} — Windows x64
 
-            ### Скачать
-            * **`FoxMocapSetup-${{ steps.name.outputs.ver }}-windows-x64.exe`** — установщик с выбором папки, лицензией и опциональными плагинами (рекомендуется).
-            * `fox_mocap-${{ github.ref_name }}-windows-x64.zip` — portable-версия, просто распакуйте и запустите `fox_mocap.exe`.
-            * `.sha256` — контрольные суммы для верификации.
+            ### Downloads
 
-            ### Что внутри
-            * `fox_mocap.exe` собран на windows-2022 / MSVC 19.3x / Qt 6.5.3.
-            * Qt-рантайм разложен через `windeployqt`, драйверные DLL Xsens / Manus — в комплекте.
-            * Опциональный Blender-плагин (`MVNBlenderPlugin-main.zip` + тест-проект) ставится по галочке в установщике.
-            * Установщик открывает UDP-порт 9763 в Windows Firewall (можно снять галочку на шаге "Дополнительные задачи").
+            * **`FoxMocapSetup-${{ steps.name.outputs.ver }}-windows-x64.exe`** — game-style installer with folder selection, MIT licence step and opt-in components (**recommended**).
+            * `fox_mocap-${{ github.ref_name }}-windows-x64.zip` — portable build: unpack anywhere and launch `fox_mocap.exe`, no installation required.
+            * `*.sha256` — SHA-256 checksums for verifying the artifacts above.
 
-            > SmartScreen может предупредить о незнакомом издателе — бинарь не подписан. Сравните SHA-256 с прикреплённым `.sha256` и нажмите «Подробнее → Выполнить в любом случае».
+            ### What's in the installer
+
+            * `fox_mocap.exe` built on windows-2022 with MSVC 19.3x and Qt 6.5.3.
+            * Full Qt 6 runtime deployed via `windeployqt`; Xsens / Manus driver DLLs bundled side-by-side.
+            * **Optional plugins** (Components page):
+              * Blender — MVN Live add-on (`MVNBlenderPlugin-main.zip`) + ready-to-run test project.
+              * Unreal Engine 5.6 — LiveLink-compatible plugin source (`Plugins/XsensLivc/`), drop it into a UE project's `Plugins/` folder.
+            * **Optional hardware drivers** (chain-launched from vendor installers):
+              * Silicon Labs USBXpress (CP210x — Awinda USB dongle / MT-Link).
+              * D-Link DUB-13X2 USB 3.0 → Gigabit Ethernet (Awinda Station Ethernet bridge).
+              * Apple Bonjour Print Services (mDNS auto-discovery).
+              * Allied Vision GigE Filter Driver 1.22 (GigE Vision cameras).
+            * Optional Windows Firewall rule opening UDP `9763` (the MXTP stream port) — toggleable on the "Additional tasks" page.
+
+            ### Notes
+
+            > SmartScreen may warn about an unknown publisher — the binary is not code-signed (typical for open-source desktop tools). Compare the SHA-256 against the attached `.sha256` file and choose **More info → Run anyway**.
+
+            Found a bug? Open an issue or PR at <https://github.com/ZLYKKIN/Xsens_Fox/issues> — or reach the maintainer on Telegram: [@ZLYKKIN_FOX](https://t.me/ZLYKKIN_FOX).
