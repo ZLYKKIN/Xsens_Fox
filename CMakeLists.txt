@@ -46,10 +46,12 @@ add_executable(fox_mocap WIN32
     scr/main.cpp
     scr/main.h
     scr/resources.qrc
-    # xio Fusion AHRS (vendored from xioTechnologies/Fusion via XESNSE)
-    scr/fusion/FusionAhrs.c
-    scr/fusion/FusionBias.c
-    scr/fusion/FusionCompass.c
+    # FoxKf — unified XKFA-class MEKF (per-sensor orient + gyro bias).
+    # Replaces the previous xio Fusion (Madgwick AHRS + FusionBias static
+    # detector) with a single principled Kalman filter that also reports
+    # orientation uncertainty.  See scr/fusion/FoxKf.h.
+    scr/fusion/FoxKf.cpp
+    scr/fusion/FoxKf.h
 )
 target_include_directories(fox_mocap PRIVATE scr scr/fusion)
 target_compile_definitions(fox_mocap PRIVATE

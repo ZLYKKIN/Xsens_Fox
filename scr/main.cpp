@@ -51,7 +51,7 @@
 // Provides: startup ramp, gyro bias correction, acceleration rejection,
 // magnetic rejection + recovery, all in NWU convention natively.
 extern "C" {
-#include "fusion/Fusion.h"
+#include "fusion/FoxKf.h"
 }
 
 // Legacy immediate-mode GL symbols (glBegin/glVertex3f/…) live in the system
@@ -1206,6 +1206,8 @@ void foxLocoResetStatics() { /* no-op — state is now per-instance */ }
         m_pose = PoseUnknown;
         m_poseTicks = 0;
         m_zuptTicks = 0;
+        m_airTicks = 0;
+        m_airborne = false;
 
         foxLocoResetStatics();
     }
@@ -1487,6 +1489,15 @@ QVector3D LocomotionSolver::update(const Quat& qR,
         if (didCommitThisFrame) m_recentCommitTicks = 12;
         else if (m_recentCommitTicks > 0) --m_recentCommitTicks;
 
+        // Phase C: airborne-phase guard.  Both feet released ≥ N frames →
+        // jump or both-feet-up state.  Counts up monotonically while not
+        // committed; any commit resets and lands us back on the floor.
+        if (!m_committedR && !m_committedL)
+            m_airTicks = std::min(m_airTicks + 1, 4096);
+        else
+            m_airTicks = 0;
+        m_airborne = (m_airTicks >= m_airTicksThresh);
+
         if (m_verbose) {
             if (!wasCommittedR && m_committedR) {
                 std::cout << "[loco commit R] anchor=("
@@ -1518,7 +1529,9 @@ QVector3D LocomotionSolver::update(const Quat& qR,
         //   • pelvis ang vel < m_pelvisStillRad — это ужесточено выше
         const bool allStill = (m_pelvisAngV < m_pelvisStillRad)
                            && (m_rAngV < 0.15) && (m_lAngV < 0.15);
-        m_zuptTicks = allStill ? (m_zuptTicks + 1) : 0;
+        // Phase C: airborne suppresses ZUPT — actor is in motion even if
+        // angular velocity briefly dips below thresholds mid-flight.
+        m_zuptTicks = (allStill && !m_airborne) ? (m_zuptTicks + 1) : 0;
         if (m_zuptTicks >= m_zuptTicksThresh && m_offsetReady) {
             m_contact.rightDown = m_committedR;
             m_contact.leftDown  = m_committedL;
@@ -1607,7 +1620,10 @@ QVector3D LocomotionSolver::update(const Quat& qR,
         // 12. Pose-aware Z drift-kill (STAND pose only — the one pose
         //     where we can reliably predict pelvis world Z from actor
         //     height).  Very slow pull, within ±10 cm window.
-        if (m_pose == PoseStand && m_poseTicks >= m_poseStableTicks) {
+        //     Phase C: never fires while airborne — the actor isn't
+        //     standing on the floor, even though pelvis-to-foot Z
+        //     hasn't changed enough to flip the pose classifier.
+        if (!m_airborne && m_pose == PoseStand && m_poseTicks >= m_poseStableTicks) {
             const double targetZ = 0.55 * m_actorHeightM;
             if (std::abs(newOff.z() - targetZ) < 0.10) {
                 newOff.setZ(float((1.0 - m_zDriveRate) * newOff.z()
@@ -1645,6 +1661,32 @@ QVector3D LocomotionSolver::update(const Quat& qR,
         m_anchor  = (m_support == RIGHT) ? m_anchorR : m_anchorL;
 
         return newOff;
+    }
+
+    // Phase B: heel/toe-aware overload.  Picks the per-foot anchor
+    // candidate from the current contact state, then delegates to the
+    // single-point update above so the rest of the solver is untouched.
+    QVector3D LocomotionSolver::update(const Quat& qR,
+                                       const Quat& qL,
+                                       const Quat& qPelvis,
+                                       const QVector3D& fkRHeel,
+                                       const QVector3D& fkRToe,
+                                       const QVector3D& fkLHeel,
+                                       const QVector3D& fkLToe,
+                                       double t)
+    {
+        auto pick = [](bool heelDown, bool toeDown,
+                       const QVector3D& heel, const QVector3D& toe) -> QVector3D {
+            if (heelDown && !toeDown) return heel;
+            if (heelDown &&  toeDown) return (heel + toe) * 0.5f;
+            if (!heelDown && toeDown) return toe;
+            return (heel.z() <= toe.z()) ? heel : toe;
+        };
+        const QVector3D fkR = pick(m_contact.rHeelDown, m_contact.rToeDown,
+                                   fkRHeel, fkRToe);
+        const QVector3D fkL = pick(m_contact.lHeelDown, m_contact.lToeDown,
+                                   fkLHeel, fkLToe);
+        return update(qR, qL, qPelvis, fkR, fkL, t);
     }
 
     void LocomotionSolver::updateHeelToeContacts(const QVector3D& fkRHeel,
@@ -2109,16 +2151,15 @@ struct MocapReceiver::Impl {
     bool             manusCoreReady = false;
     int              manusGloveCount = 0;
 
-    // Per-segment AHRS state — xio Fusion.  Body Pack V2 never ships
-    // absolute quaternions (only SDI Δq/Δv + mag), so we fuse per-sensor
-    // acc/gyr/mag into proper NWU quaternions using the same convention as
-    // InertialPoseFusionFilter — but using the newer, more robust xio AHRS
-    // (gyro-bias correction, accel/magnetic rejection, startup ramp).
-    std::array<FusionAhrs, kXsensSegmentCount> fusion{};
-    std::array<bool,       kXsensSegmentCount> fusionReady{};
-    std::array<FusionBias,           kXsensSegmentCount> bias{};
-    std::array<bool,                 kXsensSegmentCount> biasReady{};
-    std::array<FusionAhrsSettings,   kXsensSegmentCount> ahrsCfg{};
+    // Per-segment AHRS state — single unified MEKF (XKFA-class).  Body
+    // Pack V2 never ships absolute quaternions (only SDI Δq/Δv + mag),
+    // so we fuse per-sensor acc/gyr/mag into proper NWU quaternions.
+    // FoxKf is a 6-state Multiplicative EKF (orient error + gyro bias)
+    // that replaces the previous Madgwick (FusionAhrs) + stationary
+    // bias detector (FusionBias) pair with a single principled filter
+    // that also reports orientation uncertainty.  See scr/fusion/FoxKf.h.
+    std::array<FoxKf, kXsensSegmentCount> kf{};
+    std::array<bool,  kXsensSegmentCount> kfReady{};
     double           freqHz       = 240.0;   // queried from XsDevice_updateRate
 
     // Sensor-to-segment alignment — identity by default, overwritten when
@@ -2954,9 +2995,8 @@ bool MocapReceiver::glovesDllLoaded() const { return m_impl->manusDllLoaded; }
 void MocapReceiver::resetFusion()
 {
     QMutexLocker lk(&m_impl->lock);
-    for (auto& r : m_impl->fusionReady) r = false;
-    for (auto& r : m_impl->biasReady)   r = false;
-    testLog("[fusion] reset — all 17 xio AHRS filters will re-init", m_impl->test);
+    for (auto& r : m_impl->kfReady) r = false;
+    testLog("[fusion] reset — all 17 FoxKf MEKFs will re-init", m_impl->test);
 }
 
 void MocapReceiver::setS2sAlignment(const std::array<Quat, kXsensSegmentCount>& s2s)
@@ -2966,9 +3006,9 @@ void MocapReceiver::setS2sAlignment(const std::array<Quat, kXsensSegmentCount>& 
     for (int i = 0; i < kXsensSegmentCount; ++i)
         m_impl->s2sInv[i] = s2s[i].inv();
     m_impl->s2sActive = true;
-    // Force re-init of every fusion filter so the first few samples after
-    // s2s goes live don't corrupt the existing steady state.
-    for (auto& r : m_impl->fusionReady) r = false;
+    // Force re-init of every MEKF so the first few samples after s2s goes
+    // live don't corrupt the existing steady state.
+    for (auto& r : m_impl->kfReady) r = false;
     testLog("[s2s] sensor-to-segment alignment installed", m_impl->test);
 }
 
@@ -3021,7 +3061,9 @@ void MocapReceiver::setGyroBias(const std::array<QVector3D, kXsensSegmentCount>&
     QMutexLocker lk(&m_impl->lock);
     m_impl->gyrBias = gb;
     m_impl->gyrBiasActive = true;
-    for (auto& r : m_impl->biasReady) r = false;
+    // MEKF will absorb residual bias online; force re-init so the new
+    // prior takes hold from a fresh covariance.
+    for (auto& r : m_impl->kfReady) r = false;
     testLog("[s2s] per-sensor gyr_bias correction installed", m_impl->test);
 }
 
@@ -3041,8 +3083,8 @@ void MocapReceiver::setSegmentGain(const std::array<float, kXsensSegmentCount>& 
     QMutexLocker lk(&m_impl->lock);
     m_impl->segGain = gain;
     m_impl->segGainActive = true;
-    for (auto& r : m_impl->fusionReady) r = false;
-    testLog("[s2s] per-segment AHRS gain installed", m_impl->test);
+    for (auto& r : m_impl->kfReady) r = false;
+    testLog("[s2s] per-segment MEKF gain installed (taken at next predict)", m_impl->test);
 }
 
 QVector3D MocapReceiver::snapshotGyroAvg(int idx, int samples) const
@@ -3376,11 +3418,10 @@ void MocapReceiver::run()
             // velInc = Δv per sample  ⇒ acc = Δv · freq  (m/s²)
             // dq    ≈ (1, ω·dt/2)     ⇒ gyr ≈ 2·dq.xyz · freq  (rad/s)
             //
-            // xio Fusion's API expects gyr in DEG/S and acc in G — NOT the
-            // SI units we reconstruct.  Convert here so FusionAhrsUpdate
-            // sees the magnitudes it was calibrated on (2000 dps range,
-            // ~1 g at rest).  Without the conversion the gyro is ~57×
-            // weaker than expected and the filter drags behind motion.
+            // Legacy convention: gyr stays in DEG/S, acc in G all the way
+            // through the calibration path.  FoxKf consumes acc-in-g
+            // directly but expects gyr in rad/s; the conversion happens
+            // at the FoxKf call site (one kDegToRad multiply).
             const double dt = 1.0 / I.freqHz;
             constexpr double kRadToDeg = 57.29577951308232;
             constexpr double kMs2ToG   = 1.0 / 9.80665;
@@ -3467,94 +3508,69 @@ void MocapReceiver::run()
             Quat fusedQuat;
             bool haveFused = false;
             if (fuseReady && targetSeg >= 0 && targetSeg < kXsensSegmentCount) {
-                FusionAhrs& ahrs = I.fusion[targetSeg];
-                FusionAhrsSettings& s = I.ahrsCfg[targetSeg];
-                if (!I.fusionReady[targetSeg]) {
-                    FusionAhrsInitialise(&ahrs);
-                    s = fusionAhrsDefaultSettings;
-                    s.convention            = FusionConventionNwu;
-                    // Live mocap settings:
-                    //   * moderate gain (0.5) — responsive without overshoot
-                    //   * rejection thresholds squared: accel 25° ≈ 0.18
-                    //     field units (we pass the squared value below
-                    //     because the lib stores the pre-squared magnitude)
-                    //   * recoveryTriggerPeriod=0 so we never get locked in
-                    //     gyro-only mode during fast motion
-                    s.gain                  = (I.segGainActive && I.segGain[targetSeg] > 0.0f)
-                                              ? I.segGain[targetSeg] : 0.5f;
-                    s.gyroscopeRange        = 2000.0f;
-                    s.accelerationRejection = 30.0f;
-                    s.magneticRejection     = 50.0f;
-                    s.recoveryTriggerPeriod = std::max(1, int(I.freqHz / 10));
-                    FusionAhrsSetSettings(&ahrs, &s);
-                    // Kill the 3-second startup ramp — `startup` + `rampedGain`
-                    // add real latency to the first motion after a reset.
-                    // Forcing them here lets the filter respond from the
-                    // very first packet at the steady-state gain.
-                    ahrs.startup    = false;
-                    ahrs.rampedGain = s.gain;
-                    I.fusionReady[targetSeg] = true;
+                // FoxKf (XKFA-class MEKF) replaces the previous
+                // FusionAhrs + FusionBias pair.  See scr/fusion/FoxKf.h
+                // for state, process, and measurement model.
+                FoxKf& kf = I.kf[targetSeg];
+                if (!I.kfReady[targetSeg]) {
+                    FoxKfSettings ks;
+                    // Tune the rejection gates to the same magnitudes
+                    // the previous code used: accept |a-1g|<0.30g, reject
+                    // |m-1|<0.40 unit.  Process noise is conservative.
+                    ks.gyroNoiseStd       = 0.005f;
+                    ks.gyroBiasRwStd      = 1.0e-5f;
+                    ks.accNoiseStd        = 0.05f;
+                    ks.magNoiseStd        = 0.10f;
+                    ks.accRejectG         = 0.30f;
+                    ks.magRejectUnit      = 0.40f;
+                    ks.magDipRad          = 1.047f;   // ~60° EU/RU
+                    ks.zuptOmegaThresh    = 0.05f;
+                    ks.zuptAccThresh      = 0.03f;
+                    ks.zuptHoldFrames     = std::max(5,
+                            int(std::round(0.3 * std::max(60.0, I.freqHz))));
+                    ks.initOrientStdDeg   = 5.0f;
+                    ks.initBiasStd        = 0.5f;
+                    kf.initialise(ks);
+                    I.kfReady[targetSeg] = true;
                 }
 
-                FusionBias& biasRef = I.bias[targetSeg];
-                if (!I.biasReady[targetSeg]) {
-                    FusionBiasInitialise(&biasRef);
-                    FusionBiasSettings bs = fusionBiasDefaultSettings;
-                    bs.sampleRate          = float(std::max(60.0, I.freqHz));
-                    bs.stationaryThreshold = 0.5f;
-                    bs.stationaryPeriod    = 1.0f;
-                    FusionBiasSetSettings(&biasRef, &bs);
-                    I.biasReady[targetSeg] = true;
+                // FoxKf expects gyro in rad/s; gyrForFilter is in deg/s
+                // (kept from the previous xio Fusion convention so the
+                // calibration paths upstream don't have to change).
+                constexpr float kDegToRad = float(M_PI / 180.0);
+                const Vec3 gyrRad{ gyrForFilter.x() * kDegToRad,
+                                   gyrForFilter.y() * kDegToRad,
+                                   gyrForFilter.z() * kDegToRad };
+                const Vec3 accG  { float(accForFilter.x()),
+                                   float(accForFilter.y()),
+                                   float(accForFilter.z()) };
+
+                kf.predict(gyrRad, float(dt));
+
+                const float aLen = std::sqrt(accG[0]*accG[0]
+                                           + accG[1]*accG[1]
+                                           + accG[2]*accG[2]);
+                if (std::fabs(aLen - 1.0f) < 1.0f) {   // sanity gate
+                    kf.updateAcc(accG);
                 }
-
-                FusionVector g = {{ float(gyrForFilter.x()),
-                                    float(gyrForFilter.y()),
-                                    float(gyrForFilter.z()) }};
-                g = FusionBiasUpdate(&biasRef, g);
-
-                const FusionVector a = {{ float(accForFilter.x()),
-                                          float(accForFilter.y()),
-                                          float(accForFilter.z()) }};
-
-                const float aLen = std::sqrt(a.axis.x*a.axis.x + a.axis.y*a.axis.y + a.axis.z*a.axis.z);
-                const float aErr = std::abs(aLen - 1.0f);
-                const float beta = std::exp(-3.0f * aErr * aErr);
-                const float dynAccRej = 30.0f + (80.0f - 30.0f) * (1.0f - beta);
 
                 const bool useMag = haveMag && (mag.length() > 1e-6);
-                float dynMagRej = 50.0f;
                 if (useMag) {
-                    const float mLen = std::sqrt(float(mag.x()*mag.x() + mag.y()*mag.y() + mag.z()*mag.z()));
-                    const float mErr = std::abs(mLen - 1.0f);
-                    if (mErr > 0.40f)      dynMagRej = 80.0f;
-                    else if (mErr > 0.20f) dynMagRej = 60.0f;
-                    else                   dynMagRej = 30.0f;
+                    const Vec3 magV{ float(mag.x()),
+                                     float(mag.y()),
+                                     float(mag.z()) };
+                    kf.updateMag(magV);
                 }
 
-                const float gyrNormForGain = std::sqrt(g.axis.x*g.axis.x + g.axis.y*g.axis.y + g.axis.z*g.axis.z) * float(M_PI / 180.0f);
-                const float baseGain = (I.segGainActive && I.segGain[targetSeg] > 0.0f)
-                                       ? I.segGain[targetSeg] : 0.5f;
-                const float dynGain = (gyrNormForGain > 1.0f) ? std::min(0.8f, baseGain + 0.3f) : baseGain;
-                if (s.accelerationRejection != dynAccRej || s.magneticRejection != dynMagRej || s.gain != dynGain) {
-                    s.accelerationRejection = dynAccRej;
-                    s.magneticRejection     = dynMagRej;
-                    s.gain                  = dynGain;
-                    FusionAhrsSetSettings(&ahrs, &s);
+                // Apply external ZUPT (when the filter's internal still
+                // detector confirms enough quiet frames).  This tightens
+                // bias estimation without harming dynamic accuracy.
+                if (kf.isStationary()) {
+                    kf.updateZupt();
                 }
 
-                if (useMag) {
-                    const FusionVector m = {{ float(mag.x()),
-                                              float(mag.y()),
-                                              float(mag.z()) }};
-                    FusionAhrsUpdate(&ahrs, g, a, m, float(dt));
-                } else {
-                    FusionAhrsUpdateNoMagnetometer(&ahrs, g, a, float(dt));
-                }
-                // xio AHRS natively outputs in the convention we picked
-                // (NWU), no extra rotation needed.
-                const FusionQuaternion fq = FusionAhrsGetQuaternion(&ahrs);
-                fusedQuat = Quat(fq.element.w, fq.element.x,
-                                 fq.element.y, fq.element.z).normalized();
+                const Quat4 qOut = kf.orient();
+                fusedQuat = Quat(qOut[0], qOut[1], qOut[2], qOut[3]).normalized();
                 haveFused = true;
             }
 
@@ -7482,6 +7498,21 @@ QVector3D MocapViewport::tickLoco(
     return m_lastLocoOffset;
 }
 
+QVector3D MocapViewport::tickLocoHT(
+        const std::array<Quat, kXsensSegmentCount>& q,
+        const QVector3D& fkRHeel,
+        const QVector3D& fkRToe,
+        const QVector3D& fkLHeel,
+        const QVector3D& fkLToe,
+        double tSec)
+{
+    m_lastLocoOffset = m_loco.update(
+            q[SEG_RFoot], q[SEG_LFoot], q[SEG_Pelvis],
+            fkRHeel, fkRToe, fkLHeel, fkLToe,
+            tSec);
+    return m_lastLocoOffset;
+}
+
 void MocapViewport::drawSkeleton()
 {
     if (!m_skel) return;
@@ -8141,7 +8172,14 @@ void LiveStreamSender::pushFrameWithGloves(quint32 sample,
             appendFloatBE(body, float(q.y));
             appendFloatBE(body, float(q.z));
         } else {
-            const QVector3D p = rotateNwuToMvn(pArr[mIdx]);
+            // Phase A parity: finger positions land in the same baseline-
+            // relative frame as the body segments above (pRaw =
+            // segPos[i] - baselineSegPos[i]).  Without this subtraction
+            // fingers reach the plugin offset by baselineSegPos[handSeg]
+            // relative to the body and the hand "floats away" from the
+            // wrist on the rig.  Carpus (mIdx < 0) above already does it.
+            const QVector3D pRaw = pArr[mIdx] - m_impl->baselineSegPos[handSeg];
+            const QVector3D p = rotateNwuToMvn(pRaw);
             appendFloatBE(body, p.x()); appendFloatBE(body, p.y()); appendFloatBE(body, p.z());
             const Quat qDelta = quat_mult(qArr[mIdx], baseArr[mIdx].inv()).normalized();
             const Quat q = conjugateNwuToMvn(qDelta);
@@ -9504,8 +9542,29 @@ void MainWindow::onRenderTick()
     // the C2-C7 segment near the head, not by T1.  Smoothstep applied so
     // future tweaks behave consistently with the rest of the spine.
     q[SEG_Neck] = slerp_quat(q[SEG_T8],     q[SEG_Head], smoothstep(0.62));
-    q[SEG_RToe] = q[SEG_RFoot];
-    q[SEG_LToe] = q[SEG_LFoot];
+
+    // Phase D: toe dorsiflexion during toe-off.  Without a toe sensor
+    // the toe segment normally copies the foot orientation, but during
+    // toe-off (heel up, toe-ball still down) real toes dorsiflex ~25°
+    // relative to the foot — the toe tip rises while the ball stays
+    // planted as the push-off pivot.  We derive the phase from the
+    // heel/toe contact state already computed by LocomotionSolver and
+    // apply the tilt around the foot's body-local Y (medio-lateral)
+    // axis.  Sign: foot body frame is X=forward, Y=lateral, Z=up; with
+    // right-hand rotation around +Y, +X (toe forward) tilts toward -Z
+    // (toe down = plantarflexion), so dorsiflexion is -25° around +Y.
+    // No feedback risk: tickHeelToe reads kp[SEG_*Toe] which is the
+    // START of the toe bone (foot/toe joint), determined by the FOOT
+    // bone direction — independent of the toe segment's own orient.
+    const ContactState cs = m_viewport->contactState();
+    const Quat toeDorsi = axisAngleQuat(QVector3D(0, 1, 0),
+                                        qDegreesToRadians(-25.0));
+    q[SEG_RToe] = (cs.rToeDown && !cs.rHeelDown)
+                  ? quat_mult(q[SEG_RFoot], toeDorsi).normalized()
+                  : q[SEG_RFoot];
+    q[SEG_LToe] = (cs.lToeDown && !cs.lHeelDown)
+                  ? quat_mult(q[SEG_LFoot], toeDorsi).normalized()
+                  : q[SEG_LFoot];
 
     if (m_skel) {
         const Quat dA_pel = m_skel->defAngFor(SEG_Pelvis);
@@ -9575,29 +9634,49 @@ void MainWindow::onRenderTick()
     m_viewport->updatePose(q, QVector3D(0.0f, 0.0f, 0.0f));
     const auto& qOut = m_viewport->filteredOrient();
 
+    // ---- Phase A: single source of truth for wrist world orientation. -----
+    // Both the stream and the viewport-side finger rendering must use the
+    // SAME wrist world orientation, otherwise drift-lock-on-wrist or a
+    // non-zero sceneYaw makes the two diverge (viewport fingers would lag
+    // the streamed pose).  qOut is the post-filter (drift-lock + wrist
+    // anatomical constraint) orientation that the viewport actually draws;
+    // sceneYaw is the additional Z-rotation applied to keypoint positions
+    // in drawSkeleton.  Compose once, reuse everywhere.
+    const float sceneYawF = m_viewport->sceneYaw();
+    const Quat qSceneYaw = (sceneYawF != 0.0f)
+        ? axisAngleQuat(QVector3D(0.0f, 0.0f, 1.0f), double(sceneYawF))
+        : Quat(1, 0, 0, 0);
+    const Quat qRHandWorld = m_skel
+        ? quat_mult(qSceneYaw,
+                    quat_mult(qOut[SEG_RHand], m_skel->defAngFor(SEG_RHand)))
+                .normalized()
+        : Quat(1, 0, 0, 0);
+    const Quat qLHandWorld = m_skel
+        ? quat_mult(qSceneYaw,
+                    quat_mult(qOut[SEG_LHand], m_skel->defAngFor(SEG_LHand)))
+                .normalized()
+        : Quat(1, 0, 0, 0);
+
     if (m_skel) {
         const float pelvisZ_loco = float(m_setup.heightCm * 0.55 / 100.0);
         auto kpLoco = m_skel->computeKeypoints(qOut, QVector3D(0.0f, 0.0f, pelvisZ_loco));
-        auto lowest3 = [](const QVector3D& a, const QVector3D& b, const QVector3D& c) -> QVector3D {
-            const QVector3D& ab = a.z() < b.z() ? a : b;
-            return ab.z() < c.z() ? ab : c;
-        };
-        const QVector3D fkRFoot = lowest3(kpLoco[SEG_RFoot], kpLoco[SEG_RToe], kpLoco[26]);
-        const QVector3D fkLFoot = lowest3(kpLoco[SEG_LFoot], kpLoco[SEG_LToe], kpLoco[27]);
+
+        // Phase B: heel/toe contacts must be fresh BEFORE the anchor
+        // pipeline so the solver picks the right point per foot
+        // (heel-strike → heel; midstance → midpoint; toe-off → toe
+        // pivot).  World-frame Z uses the previous frame's offset; lag
+        // is ≤1 frame which is invisible at 90 Hz.
+        const QVector3D offPrev = m_viewport->lastLocoOffset();
+        m_viewport->tickHeelToe(
+                kpLoco[SEG_RFoot] + offPrev, kpLoco[SEG_RToe] + offPrev,
+                kpLoco[SEG_LFoot] + offPrev, kpLoco[SEG_LToe] + offPrev);
+
         const double tSec = std::chrono::duration<double>(
                 std::chrono::steady_clock::now().time_since_epoch()).count();
-        m_viewport->tickLoco(qOut, fkRFoot, fkLFoot, tSec);
-
-        // S3: heel/toe gait phase observables.  Heel = foot segment origin
-        // (kp[SEG_RFoot]), toe = toe segment origin (kp[SEG_RToe]).  Anchor
-        // pipeline is unchanged; ContactState now also carries the four
-        // heel/toe booleans for downstream consumers (UI, logging).  Offset
-        // every keypoint by the locomotion translation so heel/toe Z is in
-        // the same scene frame as the anchor logic.
-        const QVector3D off = m_viewport->lastLocoOffset();
-        m_viewport->tickHeelToe(
-                kpLoco[SEG_RFoot] + off, kpLoco[SEG_RToe] + off,
-                kpLoco[SEG_LFoot] + off, kpLoco[SEG_LToe] + off);
+        m_viewport->tickLocoHT(qOut,
+                kpLoco[SEG_RFoot], kpLoco[SEG_RToe],
+                kpLoco[SEG_LFoot], kpLoco[SEG_LToe],
+                tSec);
     }
 
     // --- Live streaming --------------------------------------------------
@@ -9665,13 +9744,12 @@ void MainWindow::onRenderTick()
         const bool gloves = f.hasGloves && m_setup.useGloves;
         if (gloves) {
             // Компонуем пальцы с мировой ротацией запястья.
-            // f.rightGloveQ[i] / f.leftGloveQ[i] — это cumulative-rotation
-            // в hand-local frame.  qOut[SEG_RHand] / qOut[SEG_LHand] —
-            // мировые ротации запястий (NWU).
-            const Quat qRWristWorld = quat_mult(qStream[SEG_RHand],
-                                                m_skel->defAngFor(SEG_RHand));
-            const Quat qLWristWorld = quat_mult(qStream[SEG_LHand],
-                                                m_skel->defAngFor(SEG_LHand));
+            // f.rightGloveQ[i] / f.leftGloveQ[i] — cumulative rotation
+            // в hand-local frame.  Используем qRHandWorld/qLHandWorld —
+            // единый sceneYaw-учтённый источник, который ниже также
+            // получит viewport (так пальцы в окне и в плагине совпадают
+            // 1:1, включая режимы drift-lock запястья и пост-Reset
+            // sceneYaw≠0).
 
             // Y-flip для левой руки (отражение Manus → Xsens body frame
             // для пальцев).
@@ -9682,13 +9760,13 @@ void MainWindow::onRenderTick()
             for (int i = 0; i < kFingerSegmentsHand; ++i) {
                 const Quat rQ = quat_mult(f.rightGloveQ[i], finger90);
                 const Quat lQ = quat_mult(f.leftGloveQ[i],  finger90);
-                rGloveWorld[i] = quat_mult(qRWristWorld, rQ);
-                lGloveWorld[i] = quat_mult(qLWristWorld, mirror_y_quat(lQ));
+                rGloveWorld[i] = quat_mult(qRHandWorld, rQ);
+                lGloveWorld[i] = quat_mult(qLHandWorld, mirror_y_quat(lQ));
                 // Finger world positions are the wrist origin plus the
                 // rotated local offset (so they're absolute world coords,
                 // not wrist-relative).
-                rGloveWorldP[i] = wristPosR + vec_rotate(f.rightGloveP[i],              qRWristWorld);
-                lGloveWorldP[i] = wristPosL + vec_rotate(mirrorManusL(f.leftGloveP[i]), qLWristWorld);
+                rGloveWorldP[i] = wristPosR + vec_rotate(f.rightGloveP[i],              qRHandWorld);
+                lGloveWorldP[i] = wristPosL + vec_rotate(mirrorManusL(f.leftGloveP[i]), qLHandWorld);
             }
 
             m_streamer->pushFrameWithGloves(
@@ -9928,31 +10006,28 @@ void MainWindow::onRenderTick()
 
     // v4: Rotate Manus-local finger positions into WORLD frame.
     //
-    // Two things are fixed vs the earlier version:
-    //   1. Use cand * defAng (the actual world orientation of the hand
-    //      body-frame), not just cand (the delta from reference).  At T-pose
-    //      cand = identity, so the old code placed fingers along Manus +X
-    //      (forward-of-hand-local) in world — which in T-pose was forward,
-    //      NOT sideways as anatomy requires.  "Broken wrist" bug.
-    //   2. Mirror-Y the Manus-local positions for the LEFT hand.  The Manus
-    //      convention is the same for both hands (+Y = thumb side), but Xsens
-    //      L-hand body-frame is a reflection of the R-hand frame in terms of
-    //      how Manus +Y maps to world.  No quaternion can realise a reflection
-    //      → we fix it with a coord-flip.  After the flip, L-thumb lands
-    //      anatomically forward (+X_world in T-pose), matching R-thumb.
+    // Phase A parity fix: the viewport's wrist position in drawSkeleton
+    // sees the SCENE-yawed, post-filter (drift-lock + wrist-constraint)
+    // wrist — so the finger offsets we hand it must be rotated by the
+    // same orientation.  qRHandWorld/qLHandWorld were composed above as
+    //     qSceneYaw · qOut[SEG_*Hand] · defAngFor(SEG_*Hand)
+    // and are reused both for the stream payload and here.  Without this
+    // unification a drift-locked wrist or a post-Reset sceneYaw≠0 caused
+    // the viewport fingers to lag the streamed pose.
     //
-    // No filters applied: Manus SDK already delivers stable per-finger data.
-    // Suit-only mode is untouched — this block runs regardless, but the
-    // downstream `if (!m_haveGloves) return;` in drawSkeleton prevents any
-    // finger rendering when gloves aren't active.
+    // Mirror-Y on the LEFT hand positions stays — Manus delivers both
+    // hands in the same +Y=thumb-side convention but the Xsens L-hand
+    // body frame is the reflection of the R-hand frame, which can't be
+    // expressed by a quaternion (det=-1).
+    //
+    // No filters applied here either — Manus SDK already delivers
+    // per-finger ergonomics data smoothed.  Suit-only sessions: the block
+    // still runs but drawSkeleton's `if (!m_haveGloves) return;` prevents
+    // any finger rendering.
     std::array<QVector3D, kFingerSegmentsHand> relR{}, relL{};
-    const Quat qRHandFull = quat_mult(q[SEG_RHand],
-                                      m_skel->defAngFor(SEG_RHand));
-    const Quat qLHandFull = quat_mult(q[SEG_LHand],
-                                      m_skel->defAngFor(SEG_LHand));
     for (int i = 0; i < kFingerSegmentsHand; ++i) {
-        relR[i] = vec_rotate(f.rightGloveP[i],              qRHandFull);
-        relL[i] = vec_rotate(mirrorManusL(f.leftGloveP[i]), qLHandFull);
+        relR[i] = vec_rotate(f.rightGloveP[i],              qRHandWorld);
+        relL[i] = vec_rotate(mirrorManusL(f.leftGloveP[i]), qLHandWorld);
     }
     m_viewport->updateHands(f.hasGloves && m_setup.useGloves, relR, relL);
 }

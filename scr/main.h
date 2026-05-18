@@ -236,6 +236,25 @@ public:
                      const QVector3D& fkLeftFoot,
                      double tSeconds);
 
+    // Phase B (S3+L1): heel/toe-aware anchor selection.  Pass the four
+    // FK keypoints (heel and toe-ball per foot) AND the current
+    // m_contact.{r,l}{Heel,Toe}Down state must be fresh (call
+    // updateHeelToeContacts() first).  The solver picks per foot:
+    //    heel down  & !toe down  → anchor = heel (heel-strike)
+    //    heel down  &  toe down  → anchor = midpoint  (midstance)
+    //    !heel down &  toe down  → anchor = toe-ball (toe-off pivot)
+    //    !heel down & !toe down  → anchor = lowest of the two (air)
+    // The picked point is then fed into the single-point update()
+    // above — no logic duplication.  Returns the same offset.
+    QVector3D update(const Quat& rightFootQuat,
+                     const Quat& leftFootQuat,
+                     const Quat& pelvisQuat,
+                     const QVector3D& fkRightHeel,
+                     const QVector3D& fkRightToe,
+                     const QVector3D& fkLeftHeel,
+                     const QVector3D& fkLeftToe,
+                     double tSeconds);
+
     // S3: optional heel/toe observable update.  Pass the four FK
     // keypoints (right heel, right toe-ball, left heel, left toe-ball)
     // BEFORE locomotion offset.  Refreshes the rHeelDown/rToeDown/
@@ -252,6 +271,10 @@ public:
     Side currentSupport() const  { return m_support; }
     QVector3D anchor()    const  { return m_anchor; }
     void setVerbose(bool v) { m_verbose = v; }
+    // Phase C: true while BOTH feet have been released for
+    // ≥ airTicksThresh consecutive frames (jump / both-feet-up state).
+    bool isAirborne() const { return m_airborne; }
+    int  airTicks()   const { return m_airTicks; }
 
 private:
     bool m_verbose = false;
@@ -345,6 +368,19 @@ private:
         // v3: ZUPT ticks counter.  When pelvis + both feet still for
         // >= m_zuptTicksThresh frames → offset fully frozen.
         int       m_zuptTicks         = 0;
+
+        // Phase C: airborne-phase guard.  When BOTH feet are released
+        // for ≥ m_airTicksThresh consecutive frames, we're in a jump
+        // (or both feet briefly off the floor — climbing onto a chair,
+        // etc.).  In this state we suppress interventions that
+        // assume "on the floor": ZUPT accumulation and the pose-aware
+        // Z drift-kill toward 0.55·height.  We don't simulate jump
+        // ballistics — that needs a pelvis-translation sensor (camera
+        // / optical) the system doesn't have — but the guard keeps the
+        // anchor from being incorrectly re-pinned mid-air.
+        int       m_airTicks          = 0;
+        bool      m_airborne          = false;
+        int       m_airTicksThresh    = 4;
 
         // --- tunables ---------------------------------------------------------
         // FIX «walks in place / 5-10 cm jumps»: тюнинг параметров локомоции.
@@ -957,6 +993,16 @@ public:
                        const QVector3D& fkRFoot,
                        const QVector3D& fkLFoot,
                        double tSec);
+    // Phase B: heel/toe-aware loco tick.  Caller must have already
+    // refreshed contacts via tickHeelToe (with world-frame Z) so the
+    // anchor selection inside the solver picks the right point per
+    // foot.  Returns the same loco offset as the single-point tickLoco.
+    QVector3D tickLocoHT(const std::array<Quat, kXsensSegmentCount>& q,
+                         const QVector3D& fkRHeel,
+                         const QVector3D& fkRToe,
+                         const QVector3D& fkLHeel,
+                         const QVector3D& fkLToe,
+                         double tSec);
     // S3: separate observable update for heel/toe contacts.  Anchor
     // pipeline keeps using the single foot keypoint via tickLoco; this
     // exposes additional gait-phase information for the UI / logging.

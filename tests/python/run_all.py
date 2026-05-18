@@ -33,6 +33,12 @@ TEST_MODULES = [
     "test_procrustes_asymmetric_mount",
     "test_z_rate_smoothness",
     "test_palm_with_glove_sensor",
+    "test_visual_stream_parity",
+    "test_heel_toe_anchor",
+    "test_jump_phase",
+    "test_toe_dorsiflexion",
+    "test_fox_kf_per_segment",
+    "test_fox_kf_static_source",
 ]
 
 
