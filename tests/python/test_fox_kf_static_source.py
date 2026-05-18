@@ -95,6 +95,77 @@ def test_setprior_present_in_foxkf():
     assert "setPrior(" in h, "FoxKf.h missing setPrior() for calibration integration"
 
 
+def test_no_dead_filter_api():
+    """The dead public surface (set on never-called paths, or backed by
+    state nothing reads) must not creep back: see plan phase 4."""
+    main_cpp = os.path.join(REPO, "scr", "main.cpp")
+    main_h   = os.path.join(REPO, "scr", "main.h")
+    fkh      = os.path.join(REPO, "scr", "fusion", "FoxKf.h")
+    fkc      = os.path.join(REPO, "scr", "fusion", "FoxKf.cpp")
+    blobs = {p: open(p, "r", encoding="utf-8").read()
+             for p in [main_cpp, main_h, fkh, fkc]}
+
+    # FoxKf diagnostic-only members that nothing called.
+    for sig in ["restart(", "covarianceSnapshot(", "setCovariance("]:
+        for p in [fkh, fkc]:
+            assert sig not in blobs[p], (
+                f"{os.path.basename(p)} still declares dead FoxKf method '{sig}'")
+
+    # Receiver-side: getters with no callers and the dead per-sensor gain.
+    for sig in ["snapshotGyroAvg(", "liveGyrSensor(",
+                "setSegmentGain(", "setGyroBias(",
+                "segGainActive", "gyrBiasActive"]:
+        for p in [main_h, main_cpp]:
+            assert sig not in blobs[p], (
+                f"{os.path.basename(p)} still references retired '{sig}'")
+
+
+def test_extern_c_wrapper_gone():
+    """xio Fusion was C; FoxKf is a C++ class in namespace fox.  The old
+    `extern \"C\" { #include \"fusion/FoxKf.h\" }` wrapper made no sense
+    semantically and shouldn't survive the migration."""
+    main_cpp = os.path.join(REPO, "scr", "main.cpp")
+    with open(main_cpp, "r", encoding="utf-8") as f:
+        src = f.read()
+    # Match the smallest substring that proves the wrapper exists.
+    bad = 'extern "C" {\n#include "fusion/FoxKf.h"'
+    assert bad not in src, ("main.cpp still wraps FoxKf.h in extern \"C\" "
+                            "— FoxKf is C++, drop the wrapper")
+    assert '#include "fusion/FoxKf.h"' in src, (
+        "FoxKf.h must still be #include'd in main.cpp (just without extern C)")
+
+
+def test_eigen_used_in_foxkf():
+    """The CMake build links Eigen3::Eigen; the project promises in
+    FoxKf.cpp's header comment that the EKF math goes through Eigen
+    fixed-size types (Joseph-form covariance update etc).  Verify the
+    header is actually pulled — otherwise the linkage is dead-weight."""
+    fkc = os.path.join(REPO, "scr", "fusion", "FoxKf.cpp")
+    with open(fkc, "r", encoding="utf-8") as f:
+        src = f.read()
+    assert ("#include <Eigen/Dense>" in src
+            or "#include <Eigen/Core>" in src), (
+        "FoxKf.cpp must include an Eigen header — CMake links Eigen3::Eigen "
+        "but it's dead-weight if the .cpp doesn't use it")
+    # Joseph form: P ← (I-KH) P (I-KH)ᵀ + K R Kᵀ.  The transpose() pattern
+    # on the (I - K*H) term is what distinguishes it from the naive form.
+    assert "K * K.transpose()" in src or "K*K.transpose()" in src, (
+        "FoxKf.cpp covariance update should use Joseph form for numerical "
+        "stability (look for `K * K.transpose()` in the update path)")
+
+
+def test_identity_nwu_wrappers_gone():
+    """conjugateNwuToMvn / rotateNwuToMvn were identity wrappers kept as
+    a "future protocol variant" edit-point — pure dead-future-proofing.
+    The internal NWU frame matches the MVN wire format exactly."""
+    main_cpp = os.path.join(REPO, "scr", "main.cpp")
+    with open(main_cpp, "r", encoding="utf-8") as f:
+        src = f.read()
+    for sig in ["conjugateNwuToMvn", "rotateNwuToMvn"]:
+        assert sig not in src, (
+            f"identity wrapper '{sig}' must be removed (NWU == wire frame)")
+
+
 if __name__ == "__main__":
     test_fusion_dir_is_only_foxkf()
     test_cmake_includes_foxkf_not_xio()
@@ -102,4 +173,8 @@ if __name__ == "__main__":
     test_receiver_loop_uses_kf_methods()
     test_impl_struct_has_kf_arrays_only()
     test_setprior_present_in_foxkf()
+    test_no_dead_filter_api()
+    test_extern_c_wrapper_gone()
+    test_eigen_used_in_foxkf()
+    test_identity_nwu_wrappers_gone()
     print("test_fox_kf_static_source: PASS")

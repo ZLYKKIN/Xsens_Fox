@@ -39,6 +39,7 @@ TEST_MODULES = [
     "test_toe_dorsiflexion",
     "test_fox_kf_per_segment",
     "test_fox_kf_static_source",
+    "test_kf_prior_wiring",
 ]
 
 

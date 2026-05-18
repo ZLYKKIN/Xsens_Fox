@@ -47,12 +47,9 @@
 
 #include <QtGui/QSurfaceFormat>
 
-// xio Fusion — production AHRS from Sebastian Madgwick himself.
-// Provides: startup ramp, gyro bias correction, acceleration rejection,
-// magnetic rejection + recovery, all in NWU convention natively.
-extern "C" {
+// FoxKf — unified per-sensor MEKF (replaces xio Fusion).  C++ class in
+// namespace fox; no extern "C" wrapper (it's not C linkage).
 #include "fusion/FoxKf.h"
-}
 
 // Legacy immediate-mode GL symbols (glBegin/glVertex3f/…) live in the system
 // OpenGL library on Windows.  We include the header explicitly because Qt's
@@ -1178,14 +1175,9 @@ void foxLocoResetStatics() { /* no-op — state is now per-instance */ }
         m_rPlantTicks = m_lPlantTicks = m_rLiftTicks = m_lLiftTicks = 0;
         m_contact = {};
 
-        // v2 dead state (kept for layout compat)
-        m_stillFootR = m_stillFootL = QVector3D(0, 0, 0);
-        m_stillTicksR = m_stillTicksL = 0;
         m_offsetLast = QVector3D(0, 0, 0);
         m_offsetPrev = QVector3D(0, 0, 0);
         m_offsetReady = false;
-        m_floorEmaValid = false;
-        m_floorEma = 0.0f;
 
         // v3 state
         m_prevPelvisQ     = Quat(1, 0, 0, 0);
@@ -2174,16 +2166,10 @@ struct MocapReceiver::Impl {
     // Per-sensor accelerometer scaling (acc_magn).  1.0 = off.
     std::array<double, kXsensSegmentCount> accMagn{};
     bool                                   accNormActive = false;
-    // Per-sensor gyroscope DC bias (gyr_bias), in deg/s.  All zero = off.
-    std::array<QVector3D, kXsensSegmentCount> gyrBias{};
-    bool                                      gyrBiasActive = false;
 
     std::array<std::array<double, 9>, kXsensSegmentCount> magSoftMat{};
     std::array<QVector3D, kXsensSegmentCount>             magSoftOff{};
     bool                                                  magSoftActive = false;
-
-    std::array<float, kXsensSegmentCount> segGain{};
-    bool                                  segGainActive = false;
 
     // Connection transport preference: COM = scanPorts first, Network =
     // enumerateNetworkDevices first (skip serial scan for faster WiFi boot).
@@ -3027,7 +3013,6 @@ void MocapReceiver::resetS2sAlignment()
         m_impl->s2sInv[i]  = Quat(1, 0, 0, 0);
         m_impl->magMagn[i] = 1.0;
         m_impl->accMagn[i] = 1.0;
-        m_impl->gyrBias[i] = QVector3D(0, 0, 0);
         for (int k = 0; k < 9; ++k)
             m_impl->magSoftMat[i][k] = (k == 0 || k == 4 || k == 8) ? 1.0 : 0.0;
         m_impl->magSoftOff[i] = QVector3D(0, 0, 0);
@@ -3035,8 +3020,11 @@ void MocapReceiver::resetS2sAlignment()
     m_impl->s2sActive     = false;
     m_impl->magNormActive = false;
     m_impl->accNormActive = false;
-    m_impl->gyrBiasActive = false;
     m_impl->magSoftActive = false;
+    // Calibration teardown also drops any FoxKf priors — the next predict
+    // re-initialises each sensor from (identity, zero) until the wizard
+    // installs fresh priors via setKfPriors.
+    for (auto& r : m_impl->kfReady) r = false;
 }
 
 void MocapReceiver::setMagNormalisation(const std::array<double, kXsensSegmentCount>& mm)
@@ -3056,17 +3044,6 @@ void MocapReceiver::setAccNormalisation(const std::array<double, kXsensSegmentCo
     testLog("[s2s] per-sensor acc_magn normalisation installed", m_impl->test);
 }
 
-void MocapReceiver::setGyroBias(const std::array<QVector3D, kXsensSegmentCount>& gb)
-{
-    QMutexLocker lk(&m_impl->lock);
-    m_impl->gyrBias = gb;
-    m_impl->gyrBiasActive = true;
-    // MEKF will absorb residual bias online; force re-init so the new
-    // prior takes hold from a fresh covariance.
-    for (auto& r : m_impl->kfReady) r = false;
-    testLog("[s2s] per-sensor gyr_bias correction installed", m_impl->test);
-}
-
 void MocapReceiver::setMagSoftIron(const std::array<std::array<double, 9>, kXsensSegmentCount>& mat,
                                    const std::array<QVector3D, kXsensSegmentCount>& offset)
 {
@@ -3078,27 +3055,34 @@ void MocapReceiver::setMagSoftIron(const std::array<std::array<double, 9>, kXsen
     testLog("[s2s] per-sensor mag soft-iron correction installed", m_impl->test);
 }
 
-void MocapReceiver::setSegmentGain(const std::array<float, kXsensSegmentCount>& gain)
+void MocapReceiver::setKfPriors(const std::array<Quat, kXsensSegmentCount>& refQuat,
+                                const std::array<QVector3D, kXsensSegmentCount>& gyrBiasDegSec)
 {
+    constexpr float kDegToRad = float(M_PI / 180.0);
     QMutexLocker lk(&m_impl->lock);
-    m_impl->segGain = gain;
-    m_impl->segGainActive = true;
-    for (auto& r : m_impl->kfReady) r = false;
-    testLog("[s2s] per-segment MEKF gain installed (taken at next predict)", m_impl->test);
-}
-
-QVector3D MocapReceiver::snapshotGyroAvg(int idx, int samples) const
-{
-    if (idx < 0 || idx >= kXsensSegmentCount) return QVector3D(0, 0, 0);
-    QMutexLocker lk(&m_impl->lock);
-    return m_impl->frame.gyrSensor[idx];
-}
-
-QVector3D MocapReceiver::liveGyrSensor(int idx) const
-{
-    if (idx < 0 || idx >= kXsensSegmentCount) return QVector3D(0, 0, 0);
-    QMutexLocker lk(&m_impl->lock);
-    return m_impl->frame.gyrSensor[idx];
+    for (int i = 0; i < kXsensSegmentCount; ++i) {
+        // Hamilton WXYZ, double-precision → float Quat4.
+        const Quat& q = refQuat[i];
+        const fox::Quat4 qf{ float(q.w), float(q.x), float(q.y), float(q.z) };
+        const QVector3D&  b = gyrBiasDegSec[i];
+        const fox::Vec3   bRad{ b.x() * kDegToRad, b.y() * kDegToRad, b.z() * kDegToRad };
+        // Settings must already have been installed once via initialise().
+        if (!m_impl->kfReady[i]) {
+            fox::FoxKfSettings ks;
+            ks.zuptHoldFrames = std::max(5,
+                int(std::round(0.3 * std::max(60.0, m_impl->freqHz))));
+            m_impl->kf[i].initialise(ks);
+        }
+        // 2° initial 1-sigma — calibration snapshot mean is good to within
+        // a fraction of a degree under steady pose; 2° leaves headroom for
+        // small actor drift during the settle window.  biasStd 0.1 rad/s
+        // (≈ 5.7°/s) — calibration estimate is accurate but a small safety
+        // margin lets ZUPT refine further online.
+        m_impl->kf[i].setPrior(qf, bRad, /*orientStdDeg*/ 2.0f, /*biasStd*/ 0.1f);
+        m_impl->kfReady[i] = true;
+    }
+    testLog("[fusion] FoxKf priors installed for 17 sensored segments "
+            "(refQuat + gyrBias)", m_impl->test);
 }
 
 SuitPose MocapReceiver::snapshot() const
@@ -3468,13 +3452,12 @@ void MocapReceiver::run()
                 if (a > 1e-6) accForFilter = accForFilter / float(a);
             }
 
-            // Gyro DC-bias removal — without this a sensor's tiny constant
-            // drift accumulates into a visible yaw/pitch creep over the
-            // span of a minute of motion, which is precisely what broke
-            // elbows / wrists / twists in the previous runs.
-            if (I.gyrBiasActive && targetSeg >= 0 && targetSeg < kXsensSegmentCount) {
-                gyrForFilter = gyrForFilter - I.gyrBias[targetSeg];
-            }
+            // Gyro DC-bias correction is now entirely FoxKf's responsibility
+            // (seeded by setKfPriors after T-N-K calibration, refined online
+            // via ZUPT and acc/mag updates).  The previous upstream
+            // `gyr - gyr_bias` subtraction was double work — the filter
+            // tracked the residual on top of the upstream-subtracted bias,
+            // which fought the calibration estimate during the settle.
 
             if (I.magSoftActive && haveMag && targetSeg >= 0 &&
                 targetSeg < kXsensSegmentCount)
@@ -3574,6 +3557,15 @@ void MocapReceiver::run()
                 haveFused = true;
             }
 
+            // Capture per-segment FoxKf 1-sigma uncertainty for the drift-
+            // lock confidence gate downstream.  Computed even when the
+            // accel update is rejected (filter's covariance keeps growing
+            // during predicts only — drift-lock sees rising stdDeg and
+            // refuses to arm).
+            const float kfStdDeg = (fuseReady && targetSeg >= 0
+                                    && targetSeg < kXsensSegmentCount)
+                ? I.kf[targetSeg].orientStdDeg() : 0.0f;
+
             // --- Publish into the shared frame ---------------------------
             if (targetSeg >= 0 && targetSeg < kXsensSegmentCount) {
                 QMutexLocker lk(&I.lock);
@@ -3581,6 +3573,7 @@ void MocapReceiver::run()
                 else if (haveQuat)  staging.quat[targetSeg] = qo;
                 staging.segValid[targetSeg] = haveFused || haveQuat;
                 staging.segLastT[targetSeg] = monotonicSec();
+                staging.orientStdDeg[targetSeg] = kfStdDeg;
                 if (api.dataPacketContainsPacketCounter &&
                     api.dataPacketPacketCounter &&
                     api.dataPacketContainsPacketCounter(pkt))
@@ -3761,21 +3754,23 @@ void MocapReceiver::run()
                 ss << "--- calibration flags: s2s=" << (I.s2sActive ? "on" : "off")
                    << "  accNorm=" << (I.accNormActive ? "on" : "off")
                    << "  magNorm=" << (I.magNormActive ? "on" : "off")
-                   << "  gyrBias=" << (I.gyrBiasActive ? "on" : "off")
                    << "  freq=" << std::setprecision(1) << I.freqHz << "Hz ---\n";
-                if (I.accNormActive || I.magNormActive || I.gyrBiasActive
-                    || I.s2sActive) {
+                if (I.accNormActive || I.magNormActive || I.s2sActive) {
                     ss << std::setprecision(4);
                     for (int i = 0; i < kXsensSegmentCount; ++i) {
+                        const QVector3D kfBias(I.kf[i].gyroBias()[0],
+                                                I.kf[i].gyroBias()[1],
+                                                I.kf[i].gyroBias()[2]);
                         ss << "  cal[" << std::setw(2) << i << "] "
                            << std::left << std::setw(14) << kSegmentNames[i]
                            << std::right
                            << "  accMagn="  << std::setw(7) << I.accMagn[i]
                            << "  magMagn="  << std::setw(7) << I.magMagn[i]
-                           << "  gyrBias=(" << std::setw(6) << I.gyrBias[i].x()
-                                            << "," << std::setw(6) << I.gyrBias[i].y()
-                                            << "," << std::setw(6) << I.gyrBias[i].z()
-                           << ")  s2s=("    << std::setw(6) << I.s2s[i].w
+                           << "  kfBias=("  << std::setw(6) << kfBias.x()
+                                            << "," << std::setw(6) << kfBias.y()
+                                            << "," << std::setw(6) << kfBias.z()
+                           << ")rad/s  stdDeg=" << std::setw(5) << I.kf[i].orientStdDeg()
+                           << "  s2s=("    << std::setw(6) << I.s2s[i].w
                                             << "," << std::setw(6) << I.s2s[i].x
                                             << "," << std::setw(6) << I.s2s[i].y
                                             << "," << std::setw(6) << I.s2s[i].z
@@ -5845,20 +5840,7 @@ void NewSessionWizard::onCaptureTick()
             symYawS2S_K(SEG_RToe,       SEG_LToe);
         }
 
-        std::array<float, kXsensSegmentCount> segGain{};
-        for (int i = 0; i < kXsensSegmentCount; ++i) {
-            const float noise = std::sqrt(float(gyrStdDev[i].lengthSquared() / 3.0f));
-            float g = 0.7f;
-            if (noise < 0.4f)      g = 0.78f;
-            else if (noise > 2.5f) g = 0.62f;
-            else                   g = 0.78f - (noise - 0.4f) / 2.1f * 0.16f;
-            if (g < 0.62f) g = 0.62f;
-            if (g > 0.82f) g = 0.82f;
-            segGain[i] = g;
-        }
-
         m_rx->setAccNormalisation(accMagn);
-        m_rx->setGyroBias(gyrBias);
         int softIronCount = 0;
         for (int i = 0; i < kXsensSegmentCount; ++i) if (magSoftOk[i]) ++softIronCount;
         if (softIronCount >= 8) {
@@ -5874,7 +5856,6 @@ void NewSessionWizard::onCaptureTick()
                           << int(kXsensSegmentCount) << " segments fitted — falling back to scalar mag_magn\n";
             }
         }
-        m_rx->setSegmentGain(segGain);
 
         {
             const std::pair<int,int> diagPairs[8] = {
@@ -5915,6 +5896,12 @@ void NewSessionWizard::onCaptureTick()
             }
         }
 
+        // Install the FoxKf prior NOW (q-prior + gyrBias) instead of letting
+        // the predict-tick re-initialise from identity.  Without this the
+        // filter has to re-converge through ~2-5 s of acc/mag updates and
+        // the wizard's settle window is partly wasted.
+        m_rx->setKfPriors(m_result.calibReference, gyrBias);
+
         auto confidenceScore = [&](int i) -> double {
             const double cRes = confidenceFromResidual(s2sResidual[i], s2sNewMode[i]);
             const double cSamples = std::min(1.0, double(m_accumCountK[i]) / double(kCalibrationSamples));
@@ -5949,8 +5936,7 @@ void NewSessionWizard::onCaptureTick()
                           << "  mode=" << kModeStrK[s2sNewMode[i]]
                           << "  confidence=" << std::fixed << std::setprecision(2) << confidence[i]
                           << "  (residual=" << s2sResidual[i] << "°"
-                          << "  gyrStd=" << std::sqrt(double(gyrStdDev[i].lengthSquared() / 3.0)) << "°/s"
-                          << "  gain=" << segGain[i] << ")\n";
+                          << "  gyrStd=" << std::sqrt(double(gyrStdDev[i].lengthSquared() / 3.0)) << "°/s)\n";
             }
             std::cout.flush();
         }
@@ -6032,7 +6018,13 @@ void NewSessionWizard::onCaptureTick()
                 ++updated;
             }
             if (updated > 0) {
-                m_rx->setGyroBias(refined);
+                // Re-prime FoxKf with the refined bias and the same
+                // calibReference (the q-prior doesn't change post-settle —
+                // only the gyro bias estimate gets sharper as the actor
+                // holds still longer).  This atomic swap is cheaper than
+                // letting FoxKf re-converge from the upstream-subtracted
+                // estimate it has been using during the settle.
+                m_rx->setKfPriors(m_result.calibReference, refined);
                 if (m_test) {
                     std::cout << "[calib K] post-settle gyrBias refined for "
                               << updated << "/" << int(kXsensSegmentCount)
@@ -6426,20 +6418,7 @@ void NewSessionWizard::onCaptureTick()
         symYawS2S(SEG_RToe,       SEG_LToe);
     }
 
-    std::array<float, kXsensSegmentCount> segGainN{};
-    for (int i = 0; i < kXsensSegmentCount; ++i) {
-        const float noise = std::sqrt(float(gyrStdDevN[i].lengthSquared() / 3.0f));
-        float g = 0.7f;
-        if (noise < 0.4f)      g = 0.78f;
-        else if (noise > 2.5f) g = 0.62f;
-        else                   g = 0.78f - (noise - 0.4f) / 2.1f * 0.16f;
-        if (g < 0.62f) g = 0.62f;
-        if (g > 0.82f) g = 0.82f;
-        segGainN[i] = g;
-    }
-
     m_rx->setAccNormalisation(accMagn);
-    m_rx->setGyroBias(gyrBias);
     int softIronCountN = 0;
     for (int i = 0; i < kXsensSegmentCount; ++i) if (magSoftOkN[i]) ++softIronCountN;
     if (softIronCountN >= 8) {
@@ -6455,7 +6434,6 @@ void NewSessionWizard::onCaptureTick()
                       << int(kXsensSegmentCount) << " segments fitted in T+N — falling back to scalar mag_magn\n";
         }
     }
-    m_rx->setSegmentGain(segGainN);
 
     {
         const std::pair<int,int> diagPairsN[8] = {
@@ -7170,11 +7148,22 @@ void MocapViewport::setActor(const ActorConfig& actor)
 void MocapViewport::updatePose(const std::array<Quat, kXsensSegmentCount>& orient,
                                const QVector3D& root)
 {
+    // 2-arg overload: every sensor treated as confident (stdDeg=0).
+    std::array<float, kXsensSegmentCount> zeros{};
+    updatePose(orient, root, zeros);
+}
+
+void MocapViewport::updatePose(const std::array<Quat, kXsensSegmentCount>& orient,
+                               const QVector3D& root,
+                               const std::array<float, kXsensSegmentCount>& orientStdDeg)
+{
     // Per-segment drift-lock. Render-side only — does NOT touch motion pipeline.
     // Rule: if a bone's angular speed stays <0.8 deg/s for >0.5 s AND angular
-    // acceleration is low (drift is linear in time → ~zero accel), freeze its
-    // output to the locked quat. Real motion starts with non-zero accel or
-    // speed >0.8 deg/s → lock releases within 1 frame.
+    // acceleration is low (drift is linear in time → ~zero accel) AND the
+    // FoxKf reports the orientation is confident (orientStdDeg < 1.5°), freeze
+    // its output to the locked quat.  Without the FoxKf gate a still-converging
+    // filter could be frozen while it still has a slowly-converging bias,
+    // baking that bias into the rendered bone.
     using clk = std::chrono::steady_clock;
     const double now = std::chrono::duration<double>(
                            clk::now().time_since_epoch()).count();
@@ -7250,7 +7239,16 @@ void MocapViewport::updatePose(const std::array<Quat, kXsensSegmentCount>& orien
             //  - intentional motion: >5 deg/s and/or accel >50 deg/s²
             const bool slow = m_angVelLP[i] < slowThresh;
             const bool steady = angAcc < steadyThresh;
-            const bool stillFrame = slow && steady;
+            // FoxKf confidence gate.  orientStdDeg[i] = 0 (e.g. unsensored
+            // spine slerp) is treated as confident: the slerp is bias-free
+            // by construction.  Otherwise the filter must report ≤1.5°
+            // 1-sigma — looser than FoxKf's typical converged value
+            // (≈0.5-1°) but tight enough to refuse a freeze during the
+            // 1-2 s right after a sensor leaves prolonged acc-rejection.
+            constexpr float kStdLockThreshDeg = 1.5f;
+            const bool confident = (orientStdDeg[i] <= 0.0f)
+                                || (orientStdDeg[i] < kStdLockThreshDeg);
+            const bool stillFrame = slow && steady && confident;
 
             if (stillFrame) {
                 m_stillTicks[i] += dt;
@@ -7756,16 +7754,11 @@ static void appendInt32BE(QByteArray& pkt, qint32 v)
     pkt.append(reinterpret_cast<const char*>(&be), 4);
 }
 
-// Fox's internal world frame is NWU (X=forward, Y=left, Z=up, RH).  This is
-// IDENTICAL to the MVN streaming protocol's wire frame, documented in the
-// bundled UE plugin's QuaternionDatagram.cpp:27 ("Z-Up, right-handed") and
-// cross-checked against LiveLinkMvnSource.h:48-50 (UE handles the NWU→UE-LH
-// conversion itself: (x,y,z)→(x,-y,z), (w,x,y,z)→FQuat(-x, y, -z, w)).
-// No coordinate transform is needed between our pipeline and the wire.
-// The wrappers are kept as a single edit point in case a future protocol
-// variant changes the convention.
-static Quat conjugateNwuToMvn(const Quat& q) { return q; }
-static QVector3D rotateNwuToMvn(const QVector3D& p) { return p; }
+// Fox's internal world frame is NWU (X=forward, Y=left, Z=up, RH).  This
+// matches the MVN streaming protocol's wire frame exactly (UE plugin
+// QuaternionDatagram.cpp:27 "Z-Up, right-handed"; LiveLinkMvnSource.h:48-50
+// handles the UE-LH conversion itself).  No coordinate transform is needed
+// between our pipeline and the wire — positions and quats stream as-is.
 
 struct LiveStreamSender::Impl {
     QUdpSocket   sock;
@@ -8006,13 +7999,11 @@ void LiveStreamSender::pushFrame(quint32 sample,
         // baseline subtraction here keeps the streamed scene zeroed on the
         // T-pose pelvis so the receiving rig starts at its scene origin
         // (Blender prop empties / UE LiveLink retarget expect this).
-        const QVector3D pRaw = segPos[i] - m_impl->baselineSegPos[i];
-        const QVector3D p = rotateNwuToMvn(pRaw);
+        const QVector3D p = segPos[i] - m_impl->baselineSegPos[i];
         appendFloatBE(body, p.x());
         appendFloatBE(body, p.y());
         appendFloatBE(body, p.z());
-        const Quat qDelta = quat_mult(segQuat[i], m_impl->baselineBodyQ[i].inv()).normalized();
-        const Quat q = conjugateNwuToMvn(qDelta);
+        const Quat q = quat_mult(segQuat[i], m_impl->baselineBodyQ[i].inv()).normalized();
         appendFloatBE(body, float(q.w));
         appendFloatBE(body, float(q.x));
         appendFloatBE(body, float(q.y));
@@ -8120,13 +8111,11 @@ void LiveStreamSender::pushFrameWithGloves(quint32 sample,
     QByteArray body;
     for (int i = 0; i < kXsensSegmentCount; ++i) {
         appendInt32BE(body, i + 1);
-        const QVector3D pRaw = segPos[i] - m_impl->baselineSegPos[i];
-        const QVector3D p = rotateNwuToMvn(pRaw);
+        const QVector3D p = segPos[i] - m_impl->baselineSegPos[i];
         appendFloatBE(body, p.x());
         appendFloatBE(body, p.y());
         appendFloatBE(body, p.z());
-        const Quat qDelta = quat_mult(segQuat[i], m_impl->baselineBodyQ[i].inv()).normalized();
-        const Quat q = conjugateNwuToMvn(qDelta);
+        const Quat q = quat_mult(segQuat[i], m_impl->baselineBodyQ[i].inv()).normalized();
         appendFloatBE(body, float(q.w));
         appendFloatBE(body, float(q.x));
         appendFloatBE(body, float(q.y));
@@ -8162,27 +8151,23 @@ void LiveStreamSender::pushFrameWithGloves(quint32 sample,
             // F14: carpus slot — ship the wrist's world position (relative
             // to the baseline pelvis) instead of zeros so the receiving
             // plugin can anchor the palm correctly.
-            const QVector3D pRaw = wristWorldPos - m_impl->baselineSegPos[handSeg];
-            const QVector3D p = rotateNwuToMvn(pRaw);
+            const QVector3D p = wristWorldPos - m_impl->baselineSegPos[handSeg];
             appendFloatBE(body, p.x()); appendFloatBE(body, p.y()); appendFloatBE(body, p.z());
-            const Quat qDelta = quat_mult(segQuat[handSeg], m_impl->baselineBodyQ[handSeg].inv()).normalized();
-            const Quat q = conjugateNwuToMvn(qDelta);
+            const Quat q = quat_mult(segQuat[handSeg], m_impl->baselineBodyQ[handSeg].inv()).normalized();
             appendFloatBE(body, float(q.w));
             appendFloatBE(body, float(q.x));
             appendFloatBE(body, float(q.y));
             appendFloatBE(body, float(q.z));
         } else {
             // Phase A parity: finger positions land in the same baseline-
-            // relative frame as the body segments above (pRaw =
-            // segPos[i] - baselineSegPos[i]).  Without this subtraction
-            // fingers reach the plugin offset by baselineSegPos[handSeg]
-            // relative to the body and the hand "floats away" from the
-            // wrist on the rig.  Carpus (mIdx < 0) above already does it.
-            const QVector3D pRaw = pArr[mIdx] - m_impl->baselineSegPos[handSeg];
-            const QVector3D p = rotateNwuToMvn(pRaw);
+            // relative frame as the body segments above (pArr[mIdx] -
+            // baselineSegPos[handSeg]).  Without this subtraction fingers
+            // reach the plugin offset by baselineSegPos[handSeg] relative
+            // to the body and the hand "floats away" from the wrist on the
+            // rig.  Carpus (mIdx < 0) above already does it.
+            const QVector3D p = pArr[mIdx] - m_impl->baselineSegPos[handSeg];
             appendFloatBE(body, p.x()); appendFloatBE(body, p.y()); appendFloatBE(body, p.z());
-            const Quat qDelta = quat_mult(qArr[mIdx], baseArr[mIdx].inv()).normalized();
-            const Quat q = conjugateNwuToMvn(qDelta);
+            const Quat q = quat_mult(qArr[mIdx], baseArr[mIdx].inv()).normalized();
             appendFloatBE(body, float(q.w));
             appendFloatBE(body, float(q.x));
             appendFloatBE(body, float(q.y));
@@ -9175,7 +9160,7 @@ MainWindow::MainWindow(MocapReceiver* rx,
             const float pelvisZ = float(m_setup.heightCm * 0.55 / 100.0);
             auto kp = m_skel->computeKeypoints(identity, QVector3D(0.0f, 0.0f, pelvisZ));
             for (int i = 0; i < kXsensSegmentCount; ++i) {
-                cfg.tposeOriginM[i] = rotateNwuToMvn(kp[i]);
+                cfg.tposeOriginM[i] = kp[i];
                 cfg.defAngT[i] = m_skel->defAngFor(i);
             }
         }
@@ -9631,7 +9616,11 @@ void MainWindow::onRenderTick()
     s_haveOut[SEG_L5] = s_haveOut[SEG_L3] = s_haveOut[SEG_T12] =
     s_haveOut[SEG_Neck] = s_haveOut[SEG_RToe] = s_haveOut[SEG_LToe] = true;
 
-    m_viewport->updatePose(q, QVector3D(0.0f, 0.0f, 0.0f));
+    // Pass FoxKf per-segment 1-sigma uncertainty into the viewport so the
+    // drift-lock confidence gate can refuse to arm on still-converging
+    // sensors.  Unsensored segments (L5/L3/T12/Neck/RToe/LToe) stay at 0,
+    // which updatePose() treats as "trust the propagated quat".
+    m_viewport->updatePose(q, QVector3D(0.0f, 0.0f, 0.0f), f.orientStdDeg);
     const auto& qOut = m_viewport->filteredOrient();
 
     // ---- Phase A: single source of truth for wrist world orientation. -----
@@ -10074,7 +10063,7 @@ void MainWindow::onOpenLiveWizard()
         const float pelvisZ = float(m_setup.heightCm * 0.55 / 100.0);
         auto kp = m_skel->computeKeypoints(identity, QVector3D(0.0f, 0.0f, pelvisZ));
         for (int i = 0; i < kXsensSegmentCount; ++i) {
-            cfg.tposeOriginM[i] = rotateNwuToMvn(kp[i]);
+            cfg.tposeOriginM[i] = kp[i];
             cfg.defAngT[i] = m_skel->defAngFor(i);
         }
     }

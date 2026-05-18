@@ -150,6 +150,14 @@ struct SuitPose {
 
     QVector3D pelvisPos{0, 0, 0};                   // root position in meters
 
+    // Per-segment FoxKf orientation uncertainty (1-sigma, degrees).  The
+    // receiver writes this after every kf update; MocapViewport::updatePose
+    // reads it as a confidence gate before arming the drift-lock (a still-
+    // converging filter must never be frozen — that would bake in whatever
+    // bias is left).  Unsensored segments (spine slerp / toe dorsi) stay
+    // at 0 which the gate treats as "trust the propagated quat".
+    std::array<float, kXsensSegmentCount> orientStdDeg{};
+
     // Last known per-segment packet timestamp (monotonic seconds). Used by
     // SensorIndicatorsPanel to detect stale sensors (>2s without update).
     std::array<double, kXsensSegmentCount> segLastT{};
@@ -309,19 +317,12 @@ private:
     double m_heightMarginSlow = 0.08;
 
     // --- Per-instance state that used to live as function-local statics ---
-    QVector3D m_stillFootR   {0, 0, 0};
-    QVector3D m_stillFootL   {0, 0, 0};
-    int       m_stillTicksR  = 0;
-    int       m_stillTicksL  = 0;
     QVector3D m_offsetLast   {0, 0, 0};
     // F2: previous frame's offset, used to predict pelvis world XY when
     // both feet are released (between strides) so anchor commits use a
     // current-frame estimate instead of a stale m_offsetLast.
     QVector3D m_offsetPrev   {0, 0, 0};
     bool      m_offsetReady  = false;
-    bool      m_floorEmaValid= false;
-    float     m_floorEma     = 0.0f;
-    double    m_floorEmaRate = 0.05;
 
     // =====================================================================
         //               v3 STATE — weighted dual-anchor + ZUPT
@@ -426,11 +427,6 @@ private:
         double    m_actorHeightM      = 1.75;
 
         // === v3 additions END ===
-
-        // v3 no longer uses these v2 members, but they stay as data to keep
-        // the class layout and v2-era calls to m_loco.anchor() compilable:
-        //   m_floorEmaValid, m_floorEma, m_floorEmaRate — dead state
-        //   m_stillFootR/L, m_stillTicksR/L            — dead, replaced by confR/L
 
       public:
         void setActorHeight(double h) { m_actorHeightM = std::max(0.5, h); }
@@ -625,20 +621,24 @@ public:
     // into the fusion filter.
     void setMagNormalisation(const std::array<double, kXsensSegmentCount>& magMagn);
 
-    // Per-sensor accelerometer magnitude (acc_magn) and gyro DC bias
-    // (gyr_bias).  Applied as `acc = acc / acc_magn` and
-    // `gyr = gyr - gyr_bias` before sensor-to-segment rotation; standard
+    // Per-sensor accelerometer magnitude (acc_magn).  Applied as
+    // `acc = acc / acc_magn` before sensor-to-segment rotation; standard
     // IMU calibration pre-processing.
     void setAccNormalisation(const std::array<double, kXsensSegmentCount>& accMagn);
-    void setGyroBias(const std::array<QVector3D, kXsensSegmentCount>& gyrBias);
 
     void setMagSoftIron(const std::array<std::array<double, 9>, kXsensSegmentCount>& mat,
                         const std::array<QVector3D, kXsensSegmentCount>& offset);
 
-    void setSegmentGain(const std::array<float, kXsensSegmentCount>& gain);
-
-    QVector3D snapshotGyroAvg(int idx, int samples) const;
-    QVector3D liveGyrSensor(int idx) const;
+    // Install the post-calibration per-sensor priors into FoxKf — refQuat[i]
+    // is the world-frame orientation measured during the calibration pose;
+    // gyrBias[i] is the DC gyro bias (deg/s) estimated during stillness.
+    // The receiver calls `FoxKf::setPrior` per sensor so the filter starts
+    // from the calibrated state instead of (identity, zero), eliminating
+    // the 2-5 s re-convergence window after the wizard completes.  This
+    // also replaces the previous upstream `gyr - gyr_bias` subtraction:
+    // bias correction is now entirely FoxKf's responsibility.
+    void setKfPriors(const std::array<Quat, kXsensSegmentCount>& refQuat,
+                     const std::array<QVector3D, kXsensSegmentCount>& gyrBiasDegSec);
 
     // Thread-safe copy of the last suit frame.
     SuitPose snapshot() const;
@@ -949,9 +949,17 @@ public:
     MocapViewport(const ActorConfig& actor, const std::string& pose,
                   QWidget* parent=nullptr);
 
-    // Thread-safe: called from Qt timer on the GUI thread.
+    // Thread-safe: called from Qt timer on the GUI thread.  The 3-arg
+    // overload carries per-segment FoxKf orientStdDeg as a confidence
+    // gate for the drift-lock (a still-converging filter is never
+    // frozen).  The legacy 2-arg overload treats every segment as
+    // confident (stdDeg = 0) — kept for tests and any caller that
+    // doesn't have access to the filter uncertainty.
     void updatePose(const std::array<Quat, kXsensSegmentCount>& orientations,
                     const QVector3D& rootPos);
+    void updatePose(const std::array<Quat, kXsensSegmentCount>& orientations,
+                    const QVector3D& rootPos,
+                    const std::array<float, kXsensSegmentCount>& orientStdDeg);
 
     // Updates hand visualisation (positions in world frame, meters).
     void updateHands(bool haveGloves,
