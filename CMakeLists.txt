@@ -41,6 +41,34 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build/lib")
 find_package(Qt6 REQUIRED COMPONENTS
     Core Gui Widgets OpenGL OpenGLWidgets Network)
 
+# ---- Eigen 3 (header-only) --------------------------------------------------
+# Strategy: try system/installed Eigen first; if absent, vendor it via
+# FetchContent (downloads to build/_deps on first configure, then cached).
+# Code can include with either:
+#   #include <Eigen/Dense>          (preferred, version-agnostic)
+#   #include <eigen3/Eigen/Dense>   (legacy Debian-style)
+# Always link via target: target_link_libraries(target PRIVATE Eigen3::Eigen)
+find_package(Eigen3 3.4 QUIET NO_MODULE)
+if (NOT Eigen3_FOUND)
+    message(STATUS "Eigen3 not installed; fetching via FetchContent")
+    include(FetchContent)
+    set(EIGEN_BUILD_DOC OFF CACHE BOOL "" FORCE)
+    set(EIGEN_BUILD_PKGCONFIG OFF CACHE BOOL "" FORCE)
+    set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(eigen
+        GIT_REPOSITORY https://gitlab.com/libeigen/eigen.git
+        GIT_TAG        3.4.0
+        GIT_SHALLOW    TRUE)
+    FetchContent_MakeAvailable(eigen)
+    # FetchContent populates Eigen3::Eigen automatically via Eigen's
+    # own CMake; if it didn't, fall back to a manual interface target.
+    if (NOT TARGET Eigen3::Eigen)
+        add_library(Eigen3::Eigen INTERFACE IMPORTED)
+        target_include_directories(Eigen3::Eigen INTERFACE "${eigen_SOURCE_DIR}")
+    endif()
+endif()
+message(STATUS "Eigen3 ready: ${EIGEN3_VERSION_STRING}${eigen_SOURCE_DIR}")
+
 # ---- Fox Mocap executable ---------------------------------------------------
 add_executable(fox_mocap WIN32
     scr/main.cpp
@@ -59,7 +87,8 @@ target_compile_definitions(fox_mocap PRIVATE
 target_link_libraries(fox_mocap PRIVATE
     Qt6::Core Qt6::Gui Qt6::Widgets
     Qt6::OpenGL Qt6::OpenGLWidgets
-    Qt6::Network)
+    Qt6::Network
+    Eigen3::Eigen)
 
 # Use legacy GL functions (lines/points for skeleton rendering).
 # dwmapi — for Windows 11 immersive dark title bar.
