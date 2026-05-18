@@ -79,3 +79,7 @@ Desktop.ini
 # but is 450 MB and proprietary — never commit it.
 /Plugins/xsens_mvn_*_setup.exe
 tests/python/__pycache__/
+
+# Python bytecode (e.g. from running tools/diff_streams.py)
+__pycache__/
+*.pyc
