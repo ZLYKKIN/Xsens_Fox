@@ -25,6 +25,18 @@ echo === build ===
 cmake --build build --config Release -j
 if errorlevel 1 exit /b 1
 
+echo === math tests ===
+where python >nul 2>&1
+if errorlevel 1 (
+  echo [skip] python not on PATH — skipping tests/python/run_all.py
+) else (
+  python tests\python\run_all.py
+  if errorlevel 1 (
+    echo [ERROR] python math regression tests failed
+    exit /b 1
+  )
+)
+
 echo.
 echo === done ===
 dir build\bin\fox_mocap.exe 2>nul

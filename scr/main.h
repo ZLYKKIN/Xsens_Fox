@@ -251,7 +251,13 @@ private:
     Side      m_support     = RIGHT;
     QVector3D m_anchor      {0, 0, 0};
 
-    double m_stillRad     = 3.00;
+    // F1: 3.00 rad/s (= 172°/s) was too lenient — sStill stayed positive
+    // through the swing phase of normal walking, causing premature anchor
+    // commits and the "walks in place / 5-10 cm jumps" behaviour the
+    // comment block below already complained about.  0.30 rad/s (= 17°/s)
+    // sits comfortably above breathing tremor and standing micro-sway,
+    // below all walking gait kinematics.
+    double m_stillRad     = 0.30;
     double m_heightMargin = 0.03;
     int    m_latchTicks   = 3;
     double m_switchMargin = 0.04;
@@ -263,6 +269,10 @@ private:
     int       m_stillTicksR  = 0;
     int       m_stillTicksL  = 0;
     QVector3D m_offsetLast   {0, 0, 0};
+    // F2: previous frame's offset, used to predict pelvis world XY when
+    // both feet are released (between strides) so anchor commits use a
+    // current-frame estimate instead of a stale m_offsetLast.
+    QVector3D m_offsetPrev   {0, 0, 0};
     bool      m_offsetReady  = false;
     bool      m_floorEmaValid= false;
     float     m_floorEma     = 0.0f;
@@ -276,7 +286,14 @@ private:
         Quat      m_prevPelvisQ      {1, 0, 0, 0};
         double    m_pelvisAngV        = 0.0;
         double    m_pelvisYawAngV     = 0.0;
+        // F4: yaw-freeze is now per-foot.  A pirouette has one foot
+        // pivoting (which should stay anchored) and the other swinging
+        // (which should re-commit at touchdown).  Old single-flag freeze
+        // dropped both feet's stability tracking whenever the pelvis spun,
+        // causing the character to spiral.
         bool      m_yawFrozenPrev     = false;
+        bool      m_yawFrozenPrevR    = false;
+        bool      m_yawFrozenPrevL    = false;
         int       m_pelvisStillTicks  = 0;
 
         // FK-XY history ring buffers (planted-despite-rotating criterion).
@@ -315,14 +332,20 @@ private:
         // из-за чего во время быстрой ходьбы анкор-офсеты не успевали
         // обновиться → персонаж стоял на месте.  Ниже — оптимизация под
         // нормальный темп ходьбы (1-2 m/s, длина шага 0.4-0.7 m).
-        double    m_fkxyStableRange   = 0.04;   // было 0.03 — допускаем
-                                                // 4-cm jitter в planted FK
+        // F1: with m_stillRad now realistic (0.30 rad/s), FK-XY jitter
+        // dominates — tighten the stability window from 4 cm to 2.5 cm so
+        // the FK-XY criterion can carry more weight.
+        double    m_fkxyStableRange   = 0.025;
         double    m_pelvisStillRad    = 0.20;   // было 0.12 — реже триггерим
                                                 // pelvis-stillness gate во время ходьбы
         int       m_pelvisStillTicksThresh = 30;
-        // Confidence hysteresis / LP rates
-        double    m_confCommit        = 0.35;   // было 0.70 — commit быстрее
-        double    m_confRelease       = 0.25;   // было 0.30 — release быстрее тоже
+        // F5: confidence hysteresis — widen from 0.35/0.25 (margin 0.10) to
+        // 0.55/0.30 (margin 0.25).  With m_stillRad=3.0 the old narrow
+        // hysteresis flipped a few times per second during stance; the new
+        // values prevent that chatter while still committing within a few
+        // frames of foot plant once the foot is genuinely still.
+        double    m_confCommit        = 0.55;
+        double    m_confRelease       = 0.30;
         double    m_confRiseRate      = 0.50;   // было 0.30 — быстрый rise
         double    m_confFallRate      = 0.25;   // было 0.10 — быстрый fall (не заклинивать)
         // Offset blend rates
@@ -1098,8 +1121,14 @@ public:
     void setTposeBaseline(const std::array<Quat, kXsensSegmentCount>& tposeQ,
                           const QVector3D& tposePelvis);
 
+    // The position-aware overload sends real world-frame FK positions for
+    // every body segment (MXTP02 carries per-segment absolute positions per
+    // the protocol spec — sending zeros breaks UE retargeting and Blender
+    // prop empties).  Pass kp from SkeletonXsens::computeKeypoints, offset
+    // by locomotion / scene shift.
     void pushFrame(quint32 sample,
                    const std::array<Quat, kXsensSegmentCount>& segQuat,
+                   const std::array<QVector3D, kXsensSegmentCount>& segPos,
                    const QVector3D& pelvisPos);
 
     // Glove variant — sends body segments then right+left hand fingers
@@ -1107,13 +1136,20 @@ public:
     // fingerSegmentCount field (Blender MVN plugin: segmentCount ≥ 32 ⇒
     // gloves present). Safe to call every tick; if gloves data is all-
     // zero the plugin gracefully ignores finger segments.
+    //
+    // wristPosR/L are the world-frame positions of the right/left wrist
+    // joints (kp[SEG_RHand]/kp[SEG_LHand] from FK) — used to populate the
+    // carpus slot (Manus index -1) with real positions instead of zeros.
     void pushFrameWithGloves(quint32 sample,
         const std::array<Quat, kXsensSegmentCount>& segQuat,
+        const std::array<QVector3D, kXsensSegmentCount>& segPos,
         const QVector3D& pelvisPos,
         const std::array<Quat, kFingerSegmentsHand>& rightGloveQ,
         const std::array<QVector3D, kFingerSegmentsHand>& rightGloveP,
         const std::array<Quat, kFingerSegmentsHand>& leftGloveQ,
-        const std::array<QVector3D, kFingerSegmentsHand>& leftGloveP);
+        const std::array<QVector3D, kFingerSegmentsHand>& leftGloveP,
+        const QVector3D& wristPosR,
+        const QVector3D& wristPosL);
 
     const LiveSettings& settings() const { return m_cfg; }
 
