@@ -204,6 +204,17 @@ struct ContactState {
     bool   leftDown   = false;
     double rightAngV  = 0.0;        // rad/s (smoothed) — for debug/UI
     double leftAngV   = 0.0;
+    // S3: heel/toe observables.  Detected per-frame from FK heel (foot
+    // segment origin) and toe (toe segment origin) Z heights with a
+    // small hysteresis so a foot at rest doesn't chatter on IMU jitter.
+    // Used by downstream UI / gait-phase visualisation; the anchor logic
+    // continues to use the single foot keypoint (lowest of heel/toe) so
+    // this is purely additive.  See tests/python/test_heel_toe_gait.py
+    // for the algorithm.
+    bool   rHeelDown  = false;
+    bool   rToeDown   = false;
+    bool   lHeelDown  = false;
+    bool   lToeDown   = false;
 };
 
 class LocomotionSolver {
@@ -224,6 +235,17 @@ public:
                      const QVector3D& fkRightFoot,
                      const QVector3D& fkLeftFoot,
                      double tSeconds);
+
+    // S3: optional heel/toe observable update.  Pass the four FK
+    // keypoints (right heel, right toe-ball, left heel, left toe-ball)
+    // BEFORE locomotion offset.  Refreshes the rHeelDown/rToeDown/
+    // lHeelDown/lToeDown booleans in m_contact.  Calling this is
+    // optional — if you don't, those fields stay at their last value
+    // (or default-false).
+    void updateHeelToeContacts(const QVector3D& fkRHeel,
+                               const QVector3D& fkRToe,
+                               const QVector3D& fkLHeel,
+                               const QVector3D& fkLToe);
 
     ContactState contact() const { return m_contact; }
     enum Side { RIGHT = 0, LEFT = 1, BOTH = 2 };
@@ -378,10 +400,25 @@ private:
         void setActorHeight(double h) { m_actorHeightM = std::max(0.5, h); }
 
       private:
+        // S4: prevPose is the previously-committed pose; the function
+        // applies ±m_poseHysteresisM around the sit/squat thresholds so a
+        // slow sit→stand or squat→stand transition doesn't flap when IMU
+        // noise straddles the boundary.  Pass PoseUnknown for a fresh
+        // classification with no hysteresis.
         PoseKind _classifyPose(const Quat& qPelvis,
                                const QVector3D& fkR,
                                const QVector3D& fkL,
+                               PoseKind prevPose,
                                double& outTiltCos) const;
+        // ±5 cm: large enough to ride out 1-2 cm IMU jitter on the
+        // pelvis-to-foot metric, small enough that a genuine 10+ cm
+        // pose change still commits within a frame.
+        double m_poseHysteresisM = 0.05;
+
+        // S3: heel/toe contact thresholds — see test_heel_toe_gait.py
+        // for the algorithm and the synthetic gait it covers.
+        double m_heelToeThreshM       = 0.02;   // height "down" gate (m)
+        double m_heelToeReleaseHystM  = 0.015;  // release adds +1.5 cm
 };
 
 class SkeletonXsens {
@@ -920,6 +957,16 @@ public:
                        const QVector3D& fkRFoot,
                        const QVector3D& fkLFoot,
                        double tSec);
+    // S3: separate observable update for heel/toe contacts.  Anchor
+    // pipeline keeps using the single foot keypoint via tickLoco; this
+    // exposes additional gait-phase information for the UI / logging.
+    void tickHeelToe(const QVector3D& fkRHeel,
+                     const QVector3D& fkRToe,
+                     const QVector3D& fkLHeel,
+                     const QVector3D& fkLToe) {
+        m_loco.updateHeelToeContacts(fkRHeel, fkRToe, fkLHeel, fkLToe);
+    }
+    ContactState contactState() const { return m_loco.contact(); }
     QVector3D lastLocoOffset() const { return m_lastLocoOffset; }
 
     QVector3D sceneShift() const { return m_sceneShift; }

@@ -1341,7 +1341,7 @@ QVector3D LocomotionSolver::update(const Quat& qR,
         // Z floor-snap (lines below) to be skipped → first-frame pelvis Z
         // can land 5–30 cm off the floor.
         double tiltCos = 1.0;
-        const PoseKind newPose = _classifyPose(qPelvis, fkR, fkL, tiltCos);
+        const PoseKind newPose = _classifyPose(qPelvis, fkR, fkL, m_pose, tiltCos);
         if (newPose == m_pose)
             m_poseTicks = std::min(m_poseTicks + 1, 4096);
         else
@@ -1553,9 +1553,20 @@ QVector3D LocomotionSolver::update(const Quat& qR,
         const double xyRate = m_offsetRateDouble
                             + (m_offsetRatePrimary - m_offsetRateDouble) * imbalance;
         const double effXyRate = xyRate * (1.0 - pelvisRotKill);
-        const double zRate  = (m_pelvisAngV > m_pelvisStillRad)
-                              ? m_zRatePelvisMoving
-                              : m_zRatePelvisStill;
+        // S14: blended zRate.  Previously a hard switch on
+        // m_pelvisAngV > m_pelvisStillRad jumped the Z-blend rate
+        // 6.7× in a single frame (0.06 → 0.40), producing a visible
+        // few-cm Z jerk when the user paused mid-sit-down.  The
+        // blend window spans 0.5·thresh to 1.5·thresh so the
+        // transition takes ~10 frames at 90 Hz instead of one.  See
+        // tests/python/test_z_rate_smoothness.py.
+        const double zRateLo = 0.5 * m_pelvisStillRad;
+        const double zRateHi = 1.5 * m_pelvisStillRad;
+        const double zRateW  = std::clamp(
+            (m_pelvisAngV - zRateLo) / std::max(1e-6, zRateHi - zRateLo),
+            0.0, 1.0);
+        const double zRate   = m_zRatePelvisStill
+                             + zRateW * (m_zRatePelvisMoving - m_zRatePelvisStill);
 
         QVector3D newOff = m_offsetLast;
         if (total > 1e-3) {
@@ -1636,10 +1647,28 @@ QVector3D LocomotionSolver::update(const Quat& qR,
         return newOff;
     }
 
+    void LocomotionSolver::updateHeelToeContacts(const QVector3D& fkRHeel,
+                                                 const QVector3D& fkRToe,
+                                                 const QVector3D& fkLHeel,
+                                                 const QVector3D& fkLToe)
+    {
+        // Schmitt-trigger style: drop down at <= thresh, release at > thresh+hyst.
+        auto update = [&](float z, bool prev) -> bool {
+            if (z <= float(m_heelToeThreshM)) return true;
+            if (z >  float(m_heelToeThreshM + m_heelToeReleaseHystM)) return false;
+            return prev;
+        };
+        m_contact.rHeelDown = update(fkRHeel.z(), m_contact.rHeelDown);
+        m_contact.rToeDown  = update(fkRToe.z(),  m_contact.rToeDown);
+        m_contact.lHeelDown = update(fkLHeel.z(), m_contact.lHeelDown);
+        m_contact.lToeDown  = update(fkLToe.z(),  m_contact.lToeDown);
+    }
+
     LocomotionSolver::PoseKind
     LocomotionSolver::_classifyPose(const Quat& qPelvis,
                                     const QVector3D& fkR,
                                     const QVector3D& fkL,
+                                    PoseKind prevPose,
                                     double& outTiltCos) const
     {
         // Pelvis body +Z direction → world.  If world-Z component < ~0.5,
@@ -1652,8 +1681,23 @@ QVector3D LocomotionSolver::update(const Quat& qR,
         if (uz < m_lieTiltCosThresh) return PoseLying;
         const double pelvisZ_loco = 0.55 * m_actorHeightM;
         const double pelvisToFoot = pelvisZ_loco - double(std::min(fkR.z(), fkL.z()));
-        if (pelvisToFoot < m_squatKneeThresh) return PoseSquat;
-        if (pelvisToFoot < m_sitKneeThresh)   return PoseSit;
+
+        // S4: hysteresis around sit/squat thresholds.  See
+        // tests/python/test_pose_hysteresis.py for the simulation that
+        // proves a slow sit→stand otherwise toggles Sit↔Stand on every
+        // frame whose pelvisToFoot lands within IMU-jitter range of the
+        // threshold (≈ ±1 cm), which freezes m_poseTicks and disables
+        // the Z drift-kill during the transition.
+        double sitT = m_sitKneeThresh;
+        double squatT = m_squatKneeThresh;
+        if (prevPose == PoseSit) sitT += m_poseHysteresisM;
+        else if (prevPose == PoseStand) sitT -= m_poseHysteresisM;
+        if (prevPose == PoseSquat) squatT += m_poseHysteresisM;
+        else if (prevPose == PoseSit || prevPose == PoseStand)
+            squatT -= m_poseHysteresisM;
+
+        if (pelvisToFoot < squatT) return PoseSquat;
+        if (pelvisToFoot < sitT)   return PoseSit;
         return PoseStand;
     }
 
@@ -5651,7 +5695,13 @@ void NewSessionWizard::onCaptureTick()
                               << " using=" << sym << "\n";
                 }
                 if (dev <= 3.0) return;
-                if (dev >= 60.0) {
+                // S12: tightened from 60° to 12° — field-realistic 5–20°
+                // asymmetric mounting offsets (one strap rotated more
+                // than the other on a 17-sensor suit) used to fall in
+                // the 3°–60° fusion band and get averaged 50/50, washing
+                // out per-side accuracy.  See
+                // tests/python/test_procrustes_asymmetric_mount.py.
+                if (dev >= 12.0) {
                     if (m_test) {
                         std::cout << "[calib refine] paired " << kSegmentNames[rSeg]
                                   << "/" << kSegmentNames[lSeg]
@@ -6241,7 +6291,10 @@ void NewSessionWizard::onCaptureTick()
                           << " using=" << sym << "\n";
             }
             if (dev <= 3.0) return;
-            if (dev >= 60.0) {
+            // S12: tightened 60° → 12° (same rationale as the K-pass
+            // procrustesPair). Both passes must agree or one side wins
+            // and the other loses asymmetry, defeating the fix.
+            if (dev >= 12.0) {
                 if (m_test) {
                     std::cout << "[calib refine] paired " << kSegmentNames[rSeg]
                               << "/" << kSegmentNames[lSeg]
@@ -6320,7 +6373,12 @@ void NewSessionWizard::onCaptureTick()
             const bool bothTriad = (mR == 0 && mL == 0);
             const bool bothEcomp = (mR == 1 && mL == 1);
             if (!bothTriad && !bothEcomp) return;
-            const double guard = bothTriad ? 0.95 : 0.7;
+            // S1: match the K-pose lambda's tightened guards — see the
+            // §E block at scr/main.cpp:5743 for the angular-budget math.
+            // Without this, an 8° per-sensor mounting asymmetry would be
+            // preserved by K-pose refinement and then averaged away here
+            // (the N-pose pass runs last), nullifying the K-pose fix.
+            const double guard = bothTriad ? 0.998 : 0.99;
             const Quat& qR = s2s[rSeg];
             const Quat& qL = s2s[lSeg];
             const Quat yawR  = yaw_only_quat(qR);
@@ -9529,6 +9587,17 @@ void MainWindow::onRenderTick()
         const double tSec = std::chrono::duration<double>(
                 std::chrono::steady_clock::now().time_since_epoch()).count();
         m_viewport->tickLoco(qOut, fkRFoot, fkLFoot, tSec);
+
+        // S3: heel/toe gait phase observables.  Heel = foot segment origin
+        // (kp[SEG_RFoot]), toe = toe segment origin (kp[SEG_RToe]).  Anchor
+        // pipeline is unchanged; ContactState now also carries the four
+        // heel/toe booleans for downstream consumers (UI, logging).  Offset
+        // every keypoint by the locomotion translation so heel/toe Z is in
+        // the same scene frame as the anchor logic.
+        const QVector3D off = m_viewport->lastLocoOffset();
+        m_viewport->tickHeelToe(
+                kpLoco[SEG_RFoot] + off, kpLoco[SEG_RToe] + off,
+                kpLoco[SEG_LFoot] + off, kpLoco[SEG_LToe] + off);
     }
 
     // --- Live streaming --------------------------------------------------

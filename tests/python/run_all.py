@@ -21,6 +21,18 @@ TEST_MODULES = [
     "test_thumb_opposition",
     "test_glove_stream_layout",
     "test_per_sensor_asymmetry",
+    "test_symyaws2s_guard_consistency",
+    "test_metadata_per_plugin",
+    "test_pose_hysteresis",
+    "test_wrist_constraint_order",
+    "test_full_yaw_invariance",
+    "test_thumb_gestures",
+    "test_heel_toe_gait",
+    "test_ui_invariants",
+    "test_pose_separation_matrix",
+    "test_procrustes_asymmetric_mount",
+    "test_z_rate_smoothness",
+    "test_palm_with_glove_sensor",
 ]
 
 
