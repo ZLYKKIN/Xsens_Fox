@@ -199,21 +199,46 @@ def calculate_rotation(mocap_bone, t_quaternion):
     Adjusts the target quaternion to match the Blender's coordinate system based on the
     bone's name. The adjusted quaternion is then returned.
     """
+    try:
+        from . import file_logger
+        _log_open = file_logger.is_open()
+    except Exception:
+        _log_open = False
+
+    def _emit(rule_name: str, q_out):
+        if not _log_open:
+            return
+        try:
+            from . import file_logger
+            file_logger.log(
+                f"[rule] bone={mocap_bone.name} rule={rule_name} "
+                f"in={t_quaternion[0]:.6f},{t_quaternion[1]:.6f},"
+                f"{t_quaternion[2]:.6f},{t_quaternion[3]:.6f} "
+                f"out={q_out[0]:.6f},{q_out[1]:.6f},{q_out[2]:.6f},{q_out[3]:.6f}"
+            )
+        except Exception:
+            pass
+
     if not mocap_bone.delta_quaternion:
         new_quaternion = t_quaternion
+        _emit("identity-no-delta", new_quaternion)
         return new_quaternion
     # Global +Z
     if mocap_bone.name in ["Pelvis", "L5", "L3", "T12", "T8", "Neck", "Head"]:
         new_quaternion = Quaternion((t_quaternion[0], t_quaternion[2], t_quaternion[3], t_quaternion[1]))
+        _emit("spine_wxyz->w,y,z,x", new_quaternion)
     # Global -Z
     elif mocap_bone.name in ["RightUpperLeg", "RightLowerLeg", "LeftUpperLeg", "LeftLowerLeg"]:
         new_quaternion = Quaternion((t_quaternion[0], t_quaternion[2], -t_quaternion[3], -t_quaternion[1]))
+        _emit("leg_wxyz->w,y,-z,-x", new_quaternion)
     # Global +X
     elif mocap_bone.name in ["LeftShoulder", "LeftUpperArm", "LeftForeArm", "LeftHand"]:
         new_quaternion = Quaternion((t_quaternion[0], t_quaternion[1], t_quaternion[2], t_quaternion[3]))
+        _emit("larm_identity", new_quaternion)
     # Global -X
     elif mocap_bone.name in ["RightShoulder", "RightUpperArm", "RightForeArm", "RightHand"]:
         new_quaternion = Quaternion((t_quaternion[0], -t_quaternion[1], -t_quaternion[2], t_quaternion[3]))
+        _emit("rarm_wxyz->w,-x,-y,z", new_quaternion)
     # Hand bones
     elif mocap_bone.name in [
         "LeftCarpus",
@@ -238,6 +263,7 @@ def calculate_rotation(mocap_bone, t_quaternion):
         "LeftFifthDP",
     ]:
         new_quaternion = t_quaternion
+        _emit("lfingers_identity", new_quaternion)
         return new_quaternion
     elif mocap_bone.name in [
         "RightCarpus",
@@ -262,11 +288,13 @@ def calculate_rotation(mocap_bone, t_quaternion):
         "RightFifthDP",
     ]:
         new_quaternion = Quaternion((t_quaternion[0], -t_quaternion[1], -t_quaternion[2], t_quaternion[3]))
+        _emit("rfingers_wxyz->w,-x,-y,z", new_quaternion)
         return new_quaternion
     else:
         # Feet and toe bones
         converted_quaternion = Quaternion((t_quaternion[0], t_quaternion[2], -t_quaternion[3], -t_quaternion[1]))
         new_quaternion = mocap_bone.delta_quaternion.inverted() @ converted_quaternion @ mocap_bone.delta_quaternion
+        _emit("foot/toe_similarity-delta", new_quaternion)
 
     return new_quaternion
 

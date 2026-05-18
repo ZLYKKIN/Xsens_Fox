@@ -113,6 +113,26 @@ def create_bone(armature, bone_name: str, parent_name: str, head: Vector, tail: 
     if parent_name and parent_name in edit_bones:
         edit_bone.parent = edit_bones[parent_name]
 
+    # [rest_pose] — one-shot per bone, emitted at armature build.  The diff
+    # tool joins these against Fox's stream's [send] T-pose origin
+    # positions (MXTP13 scale message) to verify the rest skeleton has
+    # the geometry the streamer intended.  This is the FIRST place to
+    # look when "skeleton is in wrong pose at start" — the rest pose is
+    # what you see before any [recv] arrives.
+    try:
+        from . import file_logger
+        if file_logger.is_open():
+            file_logger.log(
+                f"[rest_pose] bone={bone_name} parent={parent_name or '-'} "
+                f"head={head.x:.6f},{head.y:.6f},{head.z:.6f} "
+                f"tail={tail.x:.6f},{tail.y:.6f},{tail.z:.6f} "
+                f"roll={roll:.6f} "
+                f"delta_q={delta_quaternion.w:.6f},{delta_quaternion.x:.6f},"
+                f"{delta_quaternion.y:.6f},{delta_quaternion.z:.6f}"
+            )
+    except Exception:
+        pass
+
     try:
         bpy.ops.object.mode_set(mode="OBJECT")
         bone = armature.data.bones[bone_name]

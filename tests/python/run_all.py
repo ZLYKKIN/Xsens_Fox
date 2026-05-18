@@ -40,6 +40,7 @@ TEST_MODULES = [
     "test_fox_kf_per_segment",
     "test_fox_kf_static_source",
     "test_kf_prior_wiring",
+    "test_diff_streams",
 ]
 
 

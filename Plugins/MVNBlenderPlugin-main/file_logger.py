@@ -51,8 +51,14 @@ class _FileLogger:
             target.parent.mkdir(parents=True, exist_ok=True)
             self._path = target
             self._fh = open(target, "w", encoding="utf-8", buffering=1)
+            # Schema header — tells the diff tool (tools/diff_streams.py) how
+            # to parse lines.  Bumping SCHEMA_VERSION below is the protocol
+            # for forward/backward compat with the diff tool.
             self._fh.write(
                 f"[boot] alllog opened at {target}  (host_t={time.time():.6f})\n"
+                f"[schema] version=2 events=raw,recv,converted,axis_pos,"
+                f"rule,bone_world,bone_local,rest_pose,apply,start,stop,"
+                f"err,gloves_state\n"
             )
             self._fh.flush()
             return target
@@ -85,6 +91,17 @@ class _FileLogger:
                 # File got pulled out from under us — silently stop logging
                 # rather than crashing the receiver thread.
                 pass
+
+    # --------------------------------------------------------------------
+    def flush(self) -> None:
+        """Force OS-level flush.  Useful before Blender quits / crashes so
+        the diff tool sees a complete trace."""
+        with self._lock:
+            if self._fh is not None:
+                try:
+                    self._fh.flush()
+                except Exception:
+                    pass
 
     # --------------------------------------------------------------------
     def is_open(self) -> bool:
@@ -130,6 +147,11 @@ def log(line: str) -> None:
 
 def is_open() -> bool:
     return _INSTANCE.is_open()
+
+
+def flush() -> None:
+    """Force OS-level flush (no-op if logger is closed)."""
+    _INSTANCE.flush()
 
 
 def current_path() -> Optional[Path]:
