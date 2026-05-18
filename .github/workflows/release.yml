@@ -139,30 +139,24 @@ jobs:
           prerelease: false
           fail_on_unmatched_files: true
           body: |
-            ## Fox Mocap ${{ github.ref_name }} — Windows x64
+            **Fox Mocap** — free Windows app that captures full-body motion from
+            an Xsens MVN suit and streams it live to Unreal Engine and Blender.
 
-            ### Downloads
+            ### Download
 
-            * **`FoxMocapSetup-${{ steps.name.outputs.ver }}-windows-x64.exe`** — game-style installer with folder selection, MIT licence step and opt-in components (**recommended**).
-            * `fox_mocap-${{ github.ref_name }}-windows-x64.zip` — portable build: unpack anywhere and launch `fox_mocap.exe`, no installation required.
-            * `*.sha256` — SHA-256 checksums for verifying the artifacts above.
+            * **`FoxMocapSetup-${{ steps.name.outputs.ver }}-windows-x64.exe`** — installer (recommended).
+            * `fox_mocap-${{ github.ref_name }}-windows-x64.zip` — portable, just unzip and run.
+            * `*.sha256` — checksums.
 
-            ### What's in the installer
+            ### What's inside
 
-            * `fox_mocap.exe` built on windows-2022 with MSVC 19.3x and Qt 6.5.3.
-            * Full Qt 6 runtime deployed via `windeployqt`; Xsens / Manus driver DLLs bundled side-by-side.
-            * **Optional plugins** (Components page):
-              * Blender — MVN Live add-on (`MVNBlenderPlugin-main.zip`) + ready-to-run test project.
-              * Unreal Engine 5.6 — LiveLink-compatible plugin source (`Plugins/XsensLivc/`), drop it into a UE project's `Plugins/` folder.
-            * **Optional hardware drivers** (chain-launched from vendor installers):
-              * Silicon Labs USBXpress (CP210x — Awinda USB dongle / MT-Link).
-              * D-Link DUB-13X2 USB 3.0 → Gigabit Ethernet (Awinda Station Ethernet bridge).
-              * Apple Bonjour Print Services (mDNS auto-discovery).
-              * Allied Vision GigE Filter Driver 1.22 (GigE Vision cameras).
-            * Optional Windows Firewall rule opening UDP `9763` (the MXTP stream port) — toggleable on the "Additional tasks" page.
+            * `fox_mocap.exe` (Qt 6.5.3 / MSVC, Windows 10/11 x64).
+            * Optional plugins: **Blender** (MVN Live add-on + test project) and **Unreal Engine 5.6** (LiveLink plugin source).
+            * Optional hardware drivers: Silicon Labs USBXpress, D-Link DUB-13X2, Apple Bonjour, Allied Vision GigE Filter.
+            * Optional firewall rule opening UDP `9763`.
 
-            ### Notes
+            Everything is opt-in on the installer's *Components* page — pick what your rig needs.
 
-            > SmartScreen may warn about an unknown publisher — the binary is not code-signed (typical for open-source desktop tools). Compare the SHA-256 against the attached `.sha256` file and choose **More info → Run anyway**.
+            > SmartScreen may warn about an unknown publisher (the binary is not code-signed). Compare the SHA-256 with the attached `.sha256` and choose *More info → Run anyway*.
 
-            Found a bug? Open an issue or PR at <https://github.com/ZLYKKIN/Xsens_Fox/issues> — or reach the maintainer on Telegram: [@ZLYKKIN_FOX](https://t.me/ZLYKKIN_FOX).
+            Found a bug? <https://github.com/ZLYKKIN/Xsens_Fox/issues> or Telegram [@ZLYKKIN_FOX](https://t.me/ZLYKKIN_FOX).
