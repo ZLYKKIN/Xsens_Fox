@@ -369,28 +369,52 @@ void SkeletonXsens::buildLengths(const ActorConfig& actor)
 {
     // 27 entries in segment order (start->end).
     //
-    // Two corrections on top of the first pass:
-    //   1. "shoulder" segment was 0.259·h/2 ≈ 22 cm — that was the
-    //       bi-acromial half-width (T8 → acromion lateral distance).  In
-    //       SkeletonXsens it sits INSIDE the arm chain (scapula→shoulder
-    //       joint→upper arm start), and the canonical default is 0.10 m — we
-    //       now scale that default by (h / 1.75).
-    //   2. "foot" & "toe": foot was 0.039·h (≈ 6.8 cm, nonsense) and the
-    //       whole user-supplied foot length went to the TOE bone.  Real
-    //       anatomy splits heel-to-ball ≈ 60 % of foot length, ball-to-tip
-    //       ≈ 40 %.  Using the user's foot-length directly now.
-    //   3. Spine and small stubs are now scaled by trunk ratio (h/1.75)
-    //       so tall/short actors don't inherit the h=1.75 m defaults.
+    // Geometry derivation — Drillis-Contini biomech ratios, with per-segment
+    // user overrides so actors far from the population mean (broad-shouldered,
+    // narrow-hipped, long-handed, etc.) get accurate FK.  When an override
+    // field is 0 the formula falls back to the canonical ratio.
+    //
+    //   shoulderWidthCm — bi-acromial breadth (default 0.259 × h).
+    //   hipWidthCm      — bi-iliac breadth     (default 0.191 × h).
+    //   handLengthCm    — wrist→fingertip      (default 0.108 × h · armScale).
+    //
+    // Pre-fix history (kept for context):
+    //   1. "shoulder" bone used to be `0.10 × trunkScale` — a fixed default
+    //      that ignored real bi-acromial breadth.  Prayer-pose mismatches
+    //      where the two hands meet behind / in front of the chest plane
+    //      came from this.  Now we drive it from shoulderWidthCm.
+    //   2. Foot/toe split is 60/40 heel-to-ball-to-tip (anatomy standard).
+    //   3. Spine and small stubs scale by trunk ratio (h / 1.75).
+    //   4. bodyWidthM in the armSpan→armScale derivation was 0.30 × (h/1.75) —
+    //      a coarse fudge.  Replaced with the actual bi-acromial breadth
+    //      (user override or 0.259 × h), which is what armSpan actually
+    //      subtracts to leave per-side arm length.
     const double h  = actor.heightCm      / 100.0;
     const double fl = actor.footLengthCm  / 100.0;
     const double trunkScale = h / 1.75;   // spine & stubs scale with height
 
+    // Bi-acromial breadth: user override OR Drillis-Contini 0.259·h.
+    // Half-width is the lateral distance from spine to acromion (shoulder
+    // tip) — that's exactly what the FK shoulder bone needs.
+    const double shoulderWidthM = (actor.shoulderWidthCm > 0.0)
+        ? (actor.shoulderWidthCm / 100.0) : (0.259 * h);
+    const double shoulderHalfM = std::max(0.05, 0.5 * shoulderWidthM);
+
+    // Bi-iliac breadth.  Pelvis dummy stub goes from pelvis centre to hip
+    // joint = half of bi-iliac.
+    const double hipWidthM = (actor.hipWidthCm > 0.0)
+        ? (actor.hipWidthCm / 100.0) : (0.191 * h);
+    const double hipHalfM = std::max(0.05, 0.5 * hipWidthM);
+
     double armScale = 1.0;
     if (actor.armSpanCm > 0.0) {
-        const double bodyWidthM = 0.30 * (h / 1.75);
+        // armSpan = bi-acromial breadth + 2·(per-side arm).  Solve for arm:
+        //   armPerSide = (armSpan - shoulderWidth) / 2
+        // shoulderWidth here is the SAME bi-acromial used for the FK
+        // shoulder bone, so the geometry composes correctly.
         const double armPerSideM = std::max(0.10,
-            (actor.armSpanCm / 100.0 - bodyWidthM) * 0.5);
-        const double defArmM = 0.44 * h;
+            (actor.armSpanCm / 100.0 - shoulderWidthM) * 0.5);
+        const double defArmM = 0.44 * h;     // upper-arm + forearm + hand
         armScale = (defArmM > 1e-6) ? (armPerSideM / defArmM) : 1.0;
     }
     double legScale = 1.0;
@@ -399,6 +423,11 @@ void SkeletonXsens::buildLengths(const ActorConfig& actor)
         const double defLegM = 0.491 * h;
         legScale = (defLegM > 1e-6) ? (legPerSideM / defLegM) : 1.0;
     }
+
+    // Hand length: user override OR Drillis-Contini 0.108·h scaled by arm
+    // (long-armed actors typically have proportionally longer hands).
+    const double handLenM = (actor.handLengthCm > 0.0)
+        ? (actor.handLengthCm / 100.0) : (0.108 * h * armScale);
 
     const std::array<float, kXsensSegmentCountWithDummies> L = {
         // ----- spine + head -----
@@ -410,25 +439,25 @@ void SkeletonXsens::buildLengths(const ActorConfig& actor)
         float(0.05 * trunkScale),   // neck → head
         float(0.130 * h),           // head → top-of-head (vertex)
         // ----- right arm -----
-        float(0.05 * trunkScale),
-        float(0.10 * trunkScale),
-        float(0.186 * h * armScale),
-        float(0.146 * h * armScale),
-        float(0.108 * h * armScale),
+        float(0.05 * trunkScale),         // scapula stub (spine-side gap)
+        float(shoulderHalfM),             // shoulder bone — bi-acromial half
+        float(0.186 * h * armScale),      // upper arm
+        float(0.146 * h * armScale),      // forearm
+        float(handLenM),                  // hand
         // ----- left arm (mirror) -----
         float(0.05 * trunkScale),
-        float(0.10 * trunkScale),
+        float(shoulderHalfM),
         float(0.186 * h * armScale),
         float(0.146 * h * armScale),
-        float(0.108 * h * armScale),
+        float(handLenM),
         // ----- right leg -----
-        float(0.10 * trunkScale),   // pelvis stub  (pelvis → hip joint)
-        float(0.245 * h * legScale),// upper leg    (hip    → knee)
-        float(0.246 * h * legScale),// lower leg    (knee   → ankle)
-        float(0.60  * fl),          // foot (heel → ball, ~60 % of foot length)
-        float(0.40  * fl),          // toe  (ball → tip,  ~40 % of foot length)
+        float(hipHalfM),                  // pelvis stub  (pelvis → hip joint)
+        float(0.245 * h * legScale),      // upper leg    (hip    → knee)
+        float(0.246 * h * legScale),      // lower leg    (knee   → ankle)
+        float(0.60  * fl),                // foot (heel → ball, ~60 % of foot length)
+        float(0.40  * fl),                // toe  (ball → tip,  ~40 % of foot length)
         // ----- left leg (mirror) -----
-        float(0.10 * trunkScale),
+        float(hipHalfM),
         float(0.245 * h * legScale),
         float(0.246 * h * legScale),
         float(0.60  * fl),
@@ -3895,6 +3924,13 @@ static const Tr kTr[] = {
     {"bk_thigh",           "Бедро",                             "Thigh"},
     {"bk_shin",            "Голень",                            "Shin"},
     {"bk_foot",            "Стопа",                             "Foot"},
+    {"bk_shoulder",        "Полуширина плеча",                  "Shoulder half"},
+    {"bk_hip",             "Полуширина таза",                   "Hip half"},
+    {"bk_hand",            "Длина ладони",                      "Hand length"},
+    {"body_shoulder_width","Ширина плеч (bi-acromial), см",     "Shoulder width (bi-acromial), cm"},
+    {"body_hip_width",     "Ширина таза (bi-iliac), см",        "Hip width (bi-iliac), cm"},
+    {"body_hand_length",   "Длина ладони (запястье→кончик), см","Hand length (wrist→tip), cm"},
+    {"body_auto_hint",     "0 = вычислить из роста",            "0 = derive from height"},
     {"calib_title",        "Калибровка",                        "Calibration"},
     {"tpose",              "T-поза",                            "T-Pose"},
     {"npose",              "N-поза",                            "N-Pose"},
@@ -4450,12 +4486,22 @@ void NewSessionWizard::buildPages()
         configSpin(m_height, 175.0, 100.0, 230.0, 0.5);
         m_foot   = new QDoubleSpinBox(p);
         configSpin(m_foot,    26.0,  15.0,  35.0, 0.5);
-        // FIX: размах рук и длина ноги перенесены из вьюпорта в wizard.
         // 0 = «вычислить из роста» (фоллбэк в SkeletonXsens::buildLengths).
         m_arm = new QDoubleSpinBox(p);
         configSpin(m_arm,      0.0,   0.0, 250.0, 0.5);
         m_leg = new QDoubleSpinBox(p);
         configSpin(m_leg,      0.0,   0.0, 130.0, 0.5);
+        // New Drillis-Contini per-segment overrides — needed for actors
+        // whose anthropometry deviates from the population mean (broad
+        // shoulders, narrow hips, long hands).  Defaults 0 ⇒ derive from
+        // height via the canonical biomech ratios.  Ranges chosen to span
+        // the realistic adult human population per ISO/IEC anthropometry.
+        m_shoulder = new QDoubleSpinBox(p);
+        configSpin(m_shoulder, 0.0,   0.0,  65.0, 0.5);     // 0 ⇒ 0.259·h
+        m_hip      = new QDoubleSpinBox(p);
+        configSpin(m_hip,      0.0,   0.0,  50.0, 0.5);     // 0 ⇒ 0.191·h
+        m_hand     = new QDoubleSpinBox(p);
+        configSpin(m_hand,     0.0,   0.0,  25.0, 0.5);     // 0 ⇒ 0.108·h·armScale
 
         // True "select-all-on-focus" — attached via an event filter on
         // each spin's internal QLineEdit.  Needed because QAbstractSpinBox
@@ -4470,19 +4516,22 @@ void NewSessionWizard::buildPages()
             }
         };
         static SelAllFilter s_selAll;
-        for (auto* s : { m_height, m_foot, m_arm, m_leg }) {
+        for (auto* s : { m_height, m_foot, m_arm, m_leg,
+                         m_shoulder, m_hip, m_hand }) {
             if (auto* le = s->findChild<QLineEdit*>())
                 le->installEventFilter(&s_selAll);
         }
 
-        m_lblHeight = new QLabel(p);
-        m_lblFoot   = new QLabel(p);
-        m_lblArm    = new QLabel(p);
-        m_lblLeg    = new QLabel(p);
-        m_lblHeight->setStyleSheet("font-weight:600;");
-        m_lblFoot  ->setStyleSheet("font-weight:600;");
-        m_lblArm   ->setStyleSheet("font-weight:600;");
-        m_lblLeg   ->setStyleSheet("font-weight:600;");
+        m_lblHeight   = new QLabel(p);
+        m_lblFoot     = new QLabel(p);
+        m_lblArm      = new QLabel(p);
+        m_lblLeg      = new QLabel(p);
+        m_lblShoulder = new QLabel(p);
+        m_lblHip      = new QLabel(p);
+        m_lblHand     = new QLabel(p);
+        for (auto* lab : { m_lblHeight, m_lblFoot, m_lblArm, m_lblLeg,
+                           m_lblShoulder, m_lblHip, m_lblHand })
+            lab->setStyleSheet("font-weight:600;");
 
         auto* primaryBox = new QGroupBox(p);
         primaryBox->setProperty("isPrimaryDims", true);
@@ -4490,15 +4539,20 @@ void NewSessionWizard::buildPages()
         primaryLay->setContentsMargins(24, 20, 24, 20);
         primaryLay->setHorizontalSpacing(32);
         primaryLay->setVerticalSpacing(10);
-        primaryLay->addWidget(m_lblHeight, 0, 0, Qt::AlignRight | Qt::AlignVCenter);
-        primaryLay->addWidget(m_height,    0, 1);
-        primaryLay->addWidget(m_lblFoot,   1, 0, Qt::AlignRight | Qt::AlignVCenter);
-        primaryLay->addWidget(m_foot,      1, 1);
-        // FIX: добавляем размах рук и длину ноги в ту же сетку.
-        primaryLay->addWidget(m_lblArm,    2, 0, Qt::AlignRight | Qt::AlignVCenter);
-        primaryLay->addWidget(m_arm,       2, 1);
-        primaryLay->addWidget(m_lblLeg,    3, 0, Qt::AlignRight | Qt::AlignVCenter);
-        primaryLay->addWidget(m_leg,       3, 1);
+        primaryLay->addWidget(m_lblHeight,   0, 0, Qt::AlignRight | Qt::AlignVCenter);
+        primaryLay->addWidget(m_height,      0, 1);
+        primaryLay->addWidget(m_lblFoot,     1, 0, Qt::AlignRight | Qt::AlignVCenter);
+        primaryLay->addWidget(m_foot,        1, 1);
+        primaryLay->addWidget(m_lblArm,      2, 0, Qt::AlignRight | Qt::AlignVCenter);
+        primaryLay->addWidget(m_arm,         2, 1);
+        primaryLay->addWidget(m_lblLeg,      3, 0, Qt::AlignRight | Qt::AlignVCenter);
+        primaryLay->addWidget(m_leg,         3, 1);
+        primaryLay->addWidget(m_lblShoulder, 4, 0, Qt::AlignRight | Qt::AlignVCenter);
+        primaryLay->addWidget(m_shoulder,    4, 1);
+        primaryLay->addWidget(m_lblHip,      5, 0, Qt::AlignRight | Qt::AlignVCenter);
+        primaryLay->addWidget(m_hip,         5, 1);
+        primaryLay->addWidget(m_lblHand,     6, 0, Qt::AlignRight | Qt::AlignVCenter);
+        primaryLay->addWidget(m_hand,        6, 1);
 
         // --- Secondary: anthropometric breakdown (read-only, live update) ---
         // 27 segment_lengths consumed by SkeletonXsens — surface only the
@@ -4512,9 +4566,10 @@ void NewSessionWizard::buildPages()
         bg->setHorizontalSpacing(40);
         bg->setVerticalSpacing(6);
 
-        const char* rowKeys[6] = {
+        const char* rowKeys[9] = {
             "bk_trunk", "bk_upper_arm", "bk_forearm",
-            "bk_thigh", "bk_shin", "bk_foot"
+            "bk_thigh", "bk_shin", "bk_foot",
+            "bk_shoulder", "bk_hip", "bk_hand",
         };
         auto makeLabel = [&](int row, const char* captionKey) {
             auto* cap = new QLabel(p);
@@ -4529,20 +4584,32 @@ void NewSessionWizard::buildPages()
             bg->addWidget(cap, row, 0);
             bg->addWidget(val, row, 1);
         };
-        for (int i = 0; i < 6; ++i) makeLabel(i, rowKeys[i]);
+        for (int i = 0; i < 9; ++i) makeLabel(i, rowKeys[i]);
 
         auto updateBreakdown = [this, p]() {
             const double h  = m_height->value() / 100.0;
             const double fl = m_foot->value()   / 100.0;
-            // FIX: учитываем m_arm / m_leg если actor ввёл их (>0).  Та же
-            // формула что в SkeletonXsens::buildLengths — armScale = arm
-            // per side / (0.44·h), legScale = leg / (0.491·h).
+            // Identical formula to SkeletonXsens::buildLengths — keep the
+            // breakdown in sync so the actor sees exactly what FK will use.
+            //
+            // shoulderWidthM: user override OR Drillis-Contini 0.259·h.
+            // Used to derive armScale from armSpan (armSpan minus
+            // shoulderWidth = 2·perSideArm) AND drives the shoulder bone.
+            const double shoulderCm = m_shoulder ? m_shoulder->value() : 0.0;
+            const double shoulderWidthM = (shoulderCm > 0.0)
+                ? (shoulderCm / 100.0) : (0.259 * h);
+            const double shoulderHalfM = std::max(0.05, 0.5 * shoulderWidthM);
+
+            const double hipCm = m_hip ? m_hip->value() : 0.0;
+            const double hipWidthM = (hipCm > 0.0)
+                ? (hipCm / 100.0) : (0.191 * h);
+            const double hipHalfM = std::max(0.05, 0.5 * hipWidthM);
+
             double armScale = 1.0;
             const double armSpanCm = m_arm ? m_arm->value() : 0.0;
             if (armSpanCm > 0.0) {
-                const double bodyWidthM = 0.30 * (h / 1.75);
                 const double armPerSideM = std::max(0.10,
-                    (armSpanCm / 100.0 - bodyWidthM) * 0.5);
+                    (armSpanCm / 100.0 - shoulderWidthM) * 0.5);
                 const double defArmM = 0.44 * h;
                 armScale = (defArmM > 1e-6) ? (armPerSideM / defArmM) : 1.0;
             }
@@ -4553,15 +4620,21 @@ void NewSessionWizard::buildPages()
                 const double defLegM = 0.491 * h;
                 legScale = (defLegM > 1e-6) ? (legPerSideM / defLegM) : 1.0;
             }
-            // Same ratios SkeletonXsens + MVN biomech use.
+            const double handCm = m_hand ? m_hand->value() : 0.0;
+            const double handLenM = (handCm > 0.0)
+                ? (handCm / 100.0) : (0.108 * h * armScale);
+
             struct V { const char* k; double m; };
-            V vals[6] = {
+            V vals[9] = {
                 { "bk_trunk",     0.288 * h               },
                 { "bk_upper_arm", 0.186 * h * armScale    },
                 { "bk_forearm",   0.146 * h * armScale    },
                 { "bk_thigh",     0.245 * h * legScale    },
                 { "bk_shin",      0.246 * h * legScale    },
                 { "bk_foot",      fl                      },
+                { "bk_shoulder",  shoulderHalfM           },   // half (FK bone)
+                { "bk_hip",       hipHalfM                },   // half (FK stub)
+                { "bk_hand",      handLenM                },
             };
             for (auto* lab : p->findChildren<QLabel*>()) {
                 if (!lab->property("isBreakdownVal").toBool()) continue;
@@ -4570,14 +4643,11 @@ void NewSessionWizard::buildPages()
                     if (k == v.k) lab->setText(QString::number(v.m * 100.0, 'f', 1) + " cm");
             }
         };
-        connect(m_height, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
-                p, [updateBreakdown](double){ updateBreakdown(); });
-        connect(m_foot,   QOverload<double>::of(&QDoubleSpinBox::valueChanged),
-                p, [updateBreakdown](double){ updateBreakdown(); });
-        connect(m_arm,    QOverload<double>::of(&QDoubleSpinBox::valueChanged),
-                p, [updateBreakdown](double){ updateBreakdown(); });
-        connect(m_leg,    QOverload<double>::of(&QDoubleSpinBox::valueChanged),
-                p, [updateBreakdown](double){ updateBreakdown(); });
+        for (auto* s : { m_height, m_foot, m_arm, m_leg,
+                         m_shoulder, m_hip, m_hand }) {
+            connect(s, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+                    p, [updateBreakdown](double){ updateBreakdown(); });
+        }
         updateBreakdown();
 
         m_dimsHint = new QLabel(p);
@@ -4800,6 +4870,19 @@ void NewSessionWizard::retranslate()
     // FIX: переведённые подписи к новым полям размаха рук и длины ноги.
     if (m_lblArm)         m_lblArm->setText(Lang::t("body_arm_span") + ":");
     if (m_lblLeg)         m_lblLeg->setText(Lang::t("body_leg_length") + ":");
+    // New Drillis-Contini overrides: shoulder breadth, hip breadth, hand
+    // length.  Tooltips spell out the 0 = auto convention so the user
+    // doesn't accidentally lock in "0 cm" thinking it's a real value.
+    auto setOptionalLabel = [](QLabel* lab, QDoubleSpinBox* sp, const char* key) {
+        if (!lab) return;
+        lab->setText(Lang::t(key) + ":");
+        if (sp) sp->setToolTip(Lang::t("body_auto_hint"));
+    };
+    setOptionalLabel(m_lblShoulder, m_shoulder, "body_shoulder_width");
+    setOptionalLabel(m_lblHip,      m_hip,      "body_hip_width");
+    setOptionalLabel(m_lblHand,     m_hand,     "body_hand_length");
+    if (m_arm) m_arm->setToolTip(Lang::t("body_auto_hint"));
+    if (m_leg) m_leg->setToolTip(Lang::t("body_auto_hint"));
     if (m_dimsHint)       m_dimsHint->setText(Lang::t("dims_hint"));
     for (QGroupBox* gb : findChildren<QGroupBox*>()) {
         if (gb->property("isPrimaryDims"  ).toBool()) gb->setTitle(Lang::t("dims_primary"));
@@ -4946,11 +5029,13 @@ void NewSessionWizard::goNext()
     } else if (m_pageIdx == 2) {
         m_result.heightCm     = m_height->value();
         m_result.footLengthCm = m_foot->value();
-        // FIX: размах рук и длина ноги теперь захватываются здесь же,
-        // а не во вьюпорте.  0 → SkeletonXsens::buildLengths использует
-        // антропометрический фоллбэк по росту.
-        m_result.armSpanCm    = m_arm  ? m_arm->value()  : 0.0;
-        m_result.legLengthCm  = m_leg  ? m_leg->value()  : 0.0;
+        // 0 → SkeletonXsens::buildLengths использует антропометрический
+        // Drillis-Contini фоллбэк по росту (см. ActorConfig docs).
+        m_result.armSpanCm       = m_arm      ? m_arm->value()      : 0.0;
+        m_result.legLengthCm     = m_leg      ? m_leg->value()      : 0.0;
+        m_result.shoulderWidthCm = m_shoulder ? m_shoulder->value() : 0.0;
+        m_result.hipWidthCm      = m_hip      ? m_hip->value()      : 0.0;
+        m_result.handLengthCm    = m_hand     ? m_hand->value()     : 0.0;
     }
     if (m_pageIdx < m_pages->count() - 1) {
         ++m_pageIdx;
@@ -9080,11 +9165,14 @@ MainWindow::MainWindow(MocapReceiver* rx,
 
     // Actor config derived from wizard result.
     ActorConfig actor;
-    actor.heightCm     = m_setup.heightCm;
-    actor.footLengthCm = m_setup.footLengthCm;
-    actor.armSpanCm    = m_setup.armSpanCm;
-    actor.legLengthCm  = m_setup.legLengthCm;
-    actor.useGloves    = m_setup.useGloves;
+    actor.heightCm        = m_setup.heightCm;
+    actor.footLengthCm    = m_setup.footLengthCm;
+    actor.armSpanCm       = m_setup.armSpanCm;
+    actor.legLengthCm     = m_setup.legLengthCm;
+    actor.shoulderWidthCm = m_setup.shoulderWidthCm;
+    actor.hipWidthCm      = m_setup.hipWidthCm;
+    actor.handLengthCm    = m_setup.handLengthCm;
+    actor.useGloves       = m_setup.useGloves;
 
     m_viewport = new MocapViewport(actor, m_setup.poseKind, this);
     m_skel     = std::make_unique<SkeletonXsens>(actor, m_setup.poseKind);
@@ -9114,25 +9202,34 @@ MainWindow::MainWindow(MocapReceiver* rx,
 
     {
         ActorConfig defaults;
-        defaults.heightCm     = m_setup.heightCm;
-        defaults.footLengthCm = m_setup.footLengthCm;
-        defaults.armSpanCm    = m_setup.armSpanCm;
-        defaults.legLengthCm  = m_setup.legLengthCm;
-        defaults.useGloves    = m_setup.useGloves;
+        defaults.heightCm        = m_setup.heightCm;
+        defaults.footLengthCm    = m_setup.footLengthCm;
+        defaults.armSpanCm       = m_setup.armSpanCm;
+        defaults.legLengthCm     = m_setup.legLengthCm;
+        defaults.shoulderWidthCm = m_setup.shoulderWidthCm;
+        defaults.hipWidthCm      = m_setup.hipWidthCm;
+        defaults.handLengthCm    = m_setup.handLengthCm;
+        defaults.useGloves       = m_setup.useGloves;
         m_panel->setActorDefaults(defaults);
     }
     connect(m_panel, &SensorIndicatorsPanel::actorChanged,
             this, [this](ActorConfig a) {
-        m_setup.heightCm     = a.heightCm;
-        m_setup.footLengthCm = a.footLengthCm;
-        m_setup.armSpanCm    = a.armSpanCm;
-        m_setup.legLengthCm  = a.legLengthCm;
-        a.useGloves          = m_setup.useGloves;
+        m_setup.heightCm        = a.heightCm;
+        m_setup.footLengthCm    = a.footLengthCm;
+        m_setup.armSpanCm       = a.armSpanCm;
+        m_setup.legLengthCm     = a.legLengthCm;
+        m_setup.shoulderWidthCm = a.shoulderWidthCm;
+        m_setup.hipWidthCm      = a.hipWidthCm;
+        m_setup.handLengthCm    = a.handLengthCm;
+        a.useGloves             = m_setup.useGloves;
         if (m_viewport) m_viewport->setActor(a);
         if (m_skel) m_skel = std::make_unique<SkeletonXsens>(a, m_setup.poseKind);
         std::ostringstream ss;
         ss << "[actor] h=" << a.heightCm << " foot=" << a.footLengthCm
-           << " arm=" << a.armSpanCm << " leg=" << a.legLengthCm;
+           << " arm=" << a.armSpanCm << " leg=" << a.legLengthCm
+           << " shoulder=" << a.shoulderWidthCm
+           << " hip=" << a.hipWidthCm
+           << " hand=" << a.handLengthCm;
         logTest(ss.str());
     });
 
@@ -9900,11 +9997,14 @@ void MainWindow::onRenderTick()
             // viewport applies additional camera / locomotion offsets we
             // don't want contaminating the log).
             ActorConfig actor;
-            actor.heightCm     = m_setup.heightCm;
-            actor.footLengthCm = m_setup.footLengthCm;
-            actor.armSpanCm    = m_setup.armSpanCm;
-            actor.legLengthCm  = m_setup.legLengthCm;
-            actor.useGloves    = m_setup.useGloves;
+            actor.heightCm        = m_setup.heightCm;
+            actor.footLengthCm    = m_setup.footLengthCm;
+            actor.armSpanCm       = m_setup.armSpanCm;
+            actor.legLengthCm     = m_setup.legLengthCm;
+            actor.shoulderWidthCm = m_setup.shoulderWidthCm;
+            actor.hipWidthCm      = m_setup.hipWidthCm;
+            actor.handLengthCm    = m_setup.handLengthCm;
+            actor.useGloves       = m_setup.useGloves;
             static SkeletonXsens s_skel(actor, m_setup.poseKind);
             const auto pts = s_skel.computeKeypoints(q, QVector3D(0, 0, 0));
             ss << "--- 28 FK keypoints (world, m) ---\n";

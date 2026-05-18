@@ -190,7 +190,25 @@ struct ActorConfig {
     double footLengthCm  = 26.0;
     double armSpanCm     = 0.0;
     double legLengthCm   = 0.0;
-    bool   useGloves     = false;
+    // Drillis-Contini per-segment anthropometry — 0 = "derive from height".
+    // shoulderWidthCm: bi-acromial breadth (shoulder-tip to shoulder-tip).
+    //   Default ≈ 0.259 × height (Winter's biomech ref).
+    //   Drives the spine→shoulder-joint lateral offset that the prayer pose
+    //   pivots around — when the actor's real bi-acromial is wider than the
+    //   default, the two hands meet behind the chest plane on the model.
+    // hipWidthCm: bi-iliac breadth (pelvis side to pelvis side).
+    //   Default ≈ 0.191 × height.  Drives the hip-joint lateral offset
+    //   (pelvis dummy stub length) — wrong value breaks the lotus pose
+    //   because the legs fold from the wrong starting points.
+    // handLengthCm: wrist-to-fingertip length.
+    //   Default ≈ 0.108 × height × armScale.  Drives the hand bone length
+    //   (and through it the fingertip reach) — actors with hands far from
+    //   the population mean can't grab the top of their own head if this
+    //   stays hardcoded.
+    double shoulderWidthCm = 0.0;
+    double hipWidthCm      = 0.0;
+    double handLengthCm    = 0.0;
+    bool   useGloves       = false;
 };
 
 // ============================================================================
@@ -702,6 +720,12 @@ public:
         double footLengthCm = 26.0;
         double armSpanCm = 0.0;
         double legLengthCm = 0.0;
+        // Drillis-Contini per-segment overrides — 0 ⇒ derive from height
+        // via the canonical biomech ratios in SkeletonXsens::buildLengths.
+        // See ActorConfig in main.h for the rationale and defaults.
+        double shoulderWidthCm = 0.0;
+        double hipWidthCm      = 0.0;
+        double handLengthCm    = 0.0;
         std::string poseKind = "tpose";
         std::array<Quat, kXsensSegmentCount> calibReference{};
         std::array<Quat, kXsensSegmentCount> tposeReference{};
@@ -766,10 +790,16 @@ private:
     class QLabel*          m_lblFoot   = nullptr;
     class QLabel*          m_lblArm    = nullptr;   // FIX: размах рук перенесён сюда
     class QLabel*          m_lblLeg    = nullptr;   // FIX: длина ноги перенесена сюда
+    class QLabel*          m_lblShoulder = nullptr; // bi-acromial breadth
+    class QLabel*          m_lblHip      = nullptr; // bi-iliac breadth
+    class QLabel*          m_lblHand     = nullptr; // wrist→fingertip
     class QDoubleSpinBox*  m_height = nullptr;
     class QDoubleSpinBox*  m_foot   = nullptr;
     class QDoubleSpinBox*  m_arm    = nullptr;      // FIX: arm span (опц., 0 = по росту)
     class QDoubleSpinBox*  m_leg    = nullptr;      // FIX: leg length (опц., 0 = по росту)
+    class QDoubleSpinBox*  m_shoulder = nullptr;    // 0 = derive (0.259 × h)
+    class QDoubleSpinBox*  m_hip      = nullptr;    // 0 = derive (0.191 × h)
+    class QDoubleSpinBox*  m_hand     = nullptr;    // 0 = derive (0.108 × h × armScale)
     class QLabel*          m_dimsHint  = nullptr;
 
     // Page 4 (calibration)
