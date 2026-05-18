@@ -16,6 +16,11 @@ TEST_MODULES = [
     "test_locomotion_thresholds",
     "test_shoulder_cone",
     "test_stream_frame",
+    "test_dummy_stubs_under_tilt",
+    "test_wrist_anatomy_constraint",
+    "test_thumb_opposition",
+    "test_glove_stream_layout",
+    "test_per_sensor_asymmetry",
 ]
 
 

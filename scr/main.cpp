@@ -447,13 +447,23 @@ SkeletonXsens::addDummySegments(const std::array<Quat, kXsensSegmentCount>& s) c
     // Смещения тазовых и лопаточных "заглушек" теперь все по ±π/2 —
     // анатомически верные 90° отступы от оси позвоночника, без 100°
     // костыля который вводил асимметрию +10° в каждой руке.
+    //
+    // §A fix: use the FULL pelvis/T8 orientation (not just yaw) when
+    // composing the stub direction.  yaw_only_quat dropped trunk tilt
+    // entirely, so side-lean / squat / lateral lunge moved the hip-joint
+    // and scapula stubs by up to 50° relative to where they should be
+    // (validated by tests/python/test_dummy_stubs_under_tilt.py).  The
+    // full orientation matches the yaw-only result identically for pure
+    // yaw and pure forward bend (test_global_yaw + test_symmetry still
+    // pass), and recovers the correct world-frame stub direction under
+    // arbitrary rotations.
     const double P = M_PI;
-    const Quat t8yaw     = yaw_only_quat(s[SEG_T8]);
-    const Quat pelvisYaw = yaw_only_quat(s[SEG_Pelvis]);
-    const Quat rScap = quat_mult(t8yaw,     euler_to_quat(0, -P/2, -P/2, "XYZ"));
-    const Quat lScap = quat_mult(t8yaw,     euler_to_quat(0, -P/2,  P/2, "XYZ"));
-    const Quat rHip  = quat_mult(pelvisYaw, euler_to_quat(0,  0,   -P/2, "XYZ"));
-    const Quat lHip  = quat_mult(pelvisYaw, euler_to_quat(0,  0,    P/2, "XYZ"));
+    const Quat& t8full     = s[SEG_T8];
+    const Quat& pelvisFull = s[SEG_Pelvis];
+    const Quat rScap = quat_mult(t8full,     euler_to_quat(0, -P/2, -P/2, "XYZ"));
+    const Quat lScap = quat_mult(t8full,     euler_to_quat(0, -P/2,  P/2, "XYZ"));
+    const Quat rHip  = quat_mult(pelvisFull, euler_to_quat(0,  0,   -P/2, "XYZ"));
+    const Quat lHip  = quat_mult(pelvisFull, euler_to_quat(0,  0,    P/2, "XYZ"));
 
     std::array<Quat, kXsensSegmentCountWithDummies> out{};
     int k = 0;
@@ -5730,7 +5740,15 @@ void NewSessionWizard::onCaptureTick()
                 const bool bothTriad = (mR == 0 && mL == 0);
                 const bool bothEcomp = (mR == 1 && mL == 1);
                 if (!bothTriad && !bothEcomp) return;
-                const double guard = bothTriad ? 0.95 : 0.7;
+                // §E: guard is a quat dot-product, i.e. cos(yaw_diff / 2)
+                // because quaternions encode half-angles.  Old TRIAD guard
+                // 0.95 → 2·acos(0.95) = 36° permitted asymmetry was averaged
+                // away, masking 8° per-sensor mounting offsets the suit
+                // actually has (validated by test_per_sensor_asymmetry).
+                // 0.998 → ~7° angular gate, ecomp 0.99 → ~16°.  Preserves
+                // real asymmetry while still smoothing sub-degree drift
+                // from a symmetric suit-up.
+                const double guard = bothTriad ? 0.998 : 0.99;
                 const Quat& qR = s2sNew[rSeg];
                 const Quat& qL = s2sNew[lSeg];
                 const Quat yawR  = yaw_only_quat(qR);
