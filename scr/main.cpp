@@ -1638,17 +1638,49 @@ QVector3D LocomotionSolver::update(const Quat& qR,
             }
         }
 
-        // 12. Pose-aware Z drift-kill (STAND pose only — the one pose
-        //     where we can reliably predict pelvis world Z from actor
-        //     height).  Very slow pull, within ±10 cm window.
-        //     Phase C: never fires while airborne — the actor isn't
-        //     standing on the floor, even though pelvis-to-foot Z
-        //     hasn't changed enough to flip the pose classifier.
-        if (!m_airborne && m_pose == PoseStand && m_poseTicks >= m_poseStableTicks) {
-            const double targetZ = 0.55 * m_actorHeightM;
-            if (std::abs(newOff.z() - targetZ) < 0.10) {
-                newOff.setZ(float((1.0 - m_zDriveRate) * newOff.z()
-                                  + m_zDriveRate * targetZ));
+        // 12. Pose-aware Z drift-kill — continuous + stillness-gated.
+        //     See plan-fix-10cm-drop: target is per-pose in OFFSET coords
+        //     (pre-fix had a units bug comparing world-Z target against
+        //     offset-Z, plus a ±10cm deadzone that left a visible drop on
+        //     stand→sit).  Rate scales with pelvis stillness so the kill
+        //     never fights an active sit/stand motion; per-frame step is
+        //     capped at 3 cm so even a pathological gap can't snap.
+        if (!m_airborne && m_poseTicks >= m_poseStableTicks) {
+            double targetOffsetZ = 0.0;
+            bool   haveTarget    = false;
+            switch (m_pose) {
+                case PoseStand:
+                    // Pelvis world Z ≈ 0.55·h ⇒ offset.z target = 0.
+                    targetOffsetZ = 0.0;
+                    haveTarget    = true;
+                    break;
+                case PoseSit:
+                    // Pelvis world Z ≈ 0.45·h (typical chair) ⇒ offset.z
+                    // target ≈ -0.10·h.
+                    targetOffsetZ = -0.10 * m_actorHeightM;
+                    haveTarget    = true;
+                    break;
+                case PoseLying:
+                    // Pelvis world Z ≈ 0 ⇒ offset.z target = -0.55·h.
+                    targetOffsetZ = -0.55 * m_actorHeightM;
+                    haveTarget    = true;
+                    break;
+                case PoseSquat:
+                case PoseUnknown:
+                default:
+                    break;
+            }
+            if (haveTarget) {
+                const double stillness = 1.0 - std::clamp(
+                    m_pelvisAngV / std::max(1e-6, m_pelvisStillRad), 0.0, 1.0);
+                const double rate    = m_zDriveRate * stillness;
+                const double rawStep = rate * (targetOffsetZ - newOff.z());
+                // 3 cm per-frame cap — at 90 Hz that's 2.7 m/s, ten times
+                // faster than a real human sit-down (~0.3 m/s peak), so
+                // legitimate motion is unaffected but pathological gaps
+                // can't fire in a single visible snap.
+                const double step = std::clamp(rawStep, -0.03, 0.03);
+                newOff.setZ(float(newOff.z() + step));
             }
         }
 
@@ -1696,12 +1728,48 @@ QVector3D LocomotionSolver::update(const Quat& qR,
                                        const QVector3D& fkLToe,
                                        double t)
     {
-        auto pick = [](bool heelDown, bool toeDown,
-                       const QVector3D& heel, const QVector3D& toe) -> QVector3D {
-            if (heelDown && !toeDown) return heel;
-            if (heelDown &&  toeDown) return (heel + toe) * 0.5f;
-            if (!heelDown && toeDown) return toe;
-            return (heel.z() <= toe.z()) ? heel : toe;
+        // Continuous-weight pick instead of the binary heel ↔ midpoint ↔
+        // toe switch.  The old switch produced visible whole-body jitter
+        // when the actor sat cross-legged or with feet on heels: small
+        // IMU noise rocks the foot back and forth across the 2 cm
+        // contact threshold, the boolean heelDown/toeDown flicker
+        // bidirectionally, and `pick` jumps between heel.z and toe.z
+        // (which can differ by 5–10 cm for a pitched foot) on every
+        // flip — the pelvis offset chain inherits each jump.
+        //
+        // The fixed pick blends heel and toe by their REAL distance to
+        // the floor, on a ramp that matches the contact detector's
+        // hysteresis band exactly.  When the foot is genuinely flat
+        // (both at z = 0) the result is the midpoint (heel + toe)/2 —
+        // same as the old code.  When the foot is fully pitched
+        // (heel down, toe up by > 3.5 cm), the result is the heel —
+        // again same as the old code.  In between (the 2-3.5 cm band
+        // where the old code flickered) the result is a smooth
+        // interpolation that stays bounded in motion magnitude.
+        auto pick = [&](bool heelDownFallback, bool toeDownFallback,
+                        const QVector3D& heel, const QVector3D& toe) -> QVector3D {
+            auto certainty = [&](float z) -> float {
+                const float thresh = float(m_heelToeThreshM);
+                const float hyst   = float(m_heelToeReleaseHystM);
+                if (z <= thresh)              return 1.0f;
+                if (z >= thresh + hyst)       return 0.0f;
+                return 1.0f - (z - thresh) / std::max(1e-4f, hyst);
+            };
+            const float hc = certainty(heel.z());
+            const float tc = certainty(toe.z());
+            const float total = hc + tc;
+            if (total < 1e-3f) {
+                // Both fully airborne — fall back to the boolean state
+                // (legacy behaviour: pick whichever the contact detector
+                // says is down, or the lower of the two if neither).
+                if (heelDownFallback && !toeDownFallback) return heel;
+                if (!heelDownFallback && toeDownFallback) return toe;
+                return (heel.z() <= toe.z()) ? heel : toe;
+            }
+            const float w = 1.0f / total;
+            return QVector3D((heel.x() * hc + toe.x() * tc) * w,
+                              (heel.y() * hc + toe.y() * tc) * w,
+                              (heel.z() * hc + toe.z() * tc) * w);
         };
         const QVector3D fkR = pick(m_contact.rHeelDown, m_contact.rToeDown,
                                    fkRHeel, fkRToe);

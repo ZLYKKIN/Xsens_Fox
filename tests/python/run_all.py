@@ -42,6 +42,7 @@ TEST_MODULES = [
     "test_kf_prior_wiring",
     "test_diff_streams",
     "test_actor_dimensions",
+    "test_pose_transition_z",
 ]
 
 
