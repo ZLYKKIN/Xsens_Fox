@@ -50,10 +50,6 @@ struct FoxKfSettings {
     // Measurement noise.
     float accNoiseStd        = 0.05f;      // g  (≈ 0.5 m/s²)
     float magNoiseStd        = 0.10f;      // unit-norm-mag
-    // Rejection gates.  Adaptive inflation keeps the filter open on shocks
-    // (acc) and structural mag disturbances rather than freezing (xio Fusion's
-    // approach was a hard cutout via recoveryTriggerPeriod; XKF3i instead
-    // tracks disturbance and slowly converges).
     float accRejectG         = 0.30f;      // skip update if |a|-1 > this (g)
     float magRejectUnit      = 0.40f;      // skip update if |m|-1 > this
     // Magnetic dip — average for European/Russian latitudes ~ 60° down.
@@ -76,19 +72,11 @@ public:
     void initialise(const FoxKfSettings& s = FoxKfSettings{});
     const FoxKfSettings& settings() const { return m_set; }
 
-    // Reset orientation and bias to a known prior and inflate covariance.
-    // Called once per sensor after T-N-K calibration finishes (the wizard
-    // produces a world-frame reference quat and a gyro-bias estimate; the
-    // filter takes those as its starting point and refines online).
     void setPrior(const Quat4& qWorldBody,
                   const Vec3&  biasInit,
                   float orientStdDeg = -1.0f,    // -1 ⇒ use settings.initOrientStdDeg
                   float biasStd      = -1.0f);   // -1 ⇒ use settings.initBiasStd
 
-    // Predict: integrate gyro for dt seconds, propagate covariance.
-    // gyrRadPerSec is in the SENSOR / segment body frame after the
-    // calibration s2s rotation (the caller's existing pipeline already
-    // applies inv(s2s) before invoking the filter).
     void predict(const Vec3& gyrRadPerSec, float dt);
 
     // Update with accelerometer.  Expected ≈ unit-norm direction of gravity
@@ -96,17 +84,8 @@ public:
     // 1.0 (impact / linear acc).  Pass post-calibration acc / |acc_magn|.
     void updateAcc(const Vec3& accUnitG);
 
-    // Update with magnetometer.  Expected ≈ unit-norm magnetic field in body
-    // frame.  Filter rejects when the norm is far from 1 (structural
-    // disturbance / hard iron).  Pass post-calibration mag / |mag_magn|
-    // already corrected for soft-iron.
     void updateMag(const Vec3& magUnit);
 
-    // Update when actor is detected stationary: forces (ω - b_g) ≈ 0.
-    // Caller-driven gate (e.g. through LocomotionSolver) is fine too;
-    // the filter also tracks its own gate via m_stillTicks below.  We
-    // expose this as an explicit method so external knowledge (foot
-    // contact / sit pose) can pin ZUPT firmly.
     void updateZupt();
 
     Quat4 orient()       const { return m_q; }
@@ -123,14 +102,6 @@ private:
     Quat4 m_q{1.0f, 0.0f, 0.0f, 0.0f};       // world ← body quaternion
     Vec3  m_b{0.0f, 0.0f, 0.0f};             // gyro bias estimate (rad/s)
     float m_P[36]{};                          // 6×6 covariance — opaque
-                                              // storage, only read/written
-                                              // through the Eigen::Map in
-                                              // FoxKf.cpp.  The matrix is
-                                              // kept symmetric by every
-                                              // update (Joseph form + an
-                                              // explicit symmetrise step)
-                                              // so the storage order is
-                                              // invisible to consumers.
     bool  m_still           = false;
     int   m_stillTicks      = 0;
     Vec3  m_lastGyrCorrected{0.0f, 0.0f, 0.0f};

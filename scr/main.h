@@ -134,10 +134,6 @@ struct SuitPose {
     quint64 sampleCounter = 0;
     double  recvTime      = 0.0;                   // monotonic seconds
 
-    // Only the 17 trackers actually on the suit write orientations; spine
-    // (L5, L3, T12), Neck and toes have no physical sensor.  The defaults
-    // below keep them as identity quats so the skeleton's T/N-pose angles
-    // still drive them correctly inside forward kinematics.
     std::array<Quat, kXsensSegmentCount> quat;     // W,X,Y,Z, world-frame
     std::array<bool, kXsensSegmentCount> segValid{};   // per-segment: have we seen it?
 
@@ -150,12 +146,6 @@ struct SuitPose {
 
     QVector3D pelvisPos{0, 0, 0};                   // root position in meters
 
-    // Per-segment FoxKf orientation uncertainty (1-sigma, degrees).  The
-    // receiver writes this after every kf update; MocapViewport::updatePose
-    // reads it as a confidence gate before arming the drift-lock (a still-
-    // converging filter must never be frozen — that would bake in whatever
-    // bias is left).  Unsensored segments (spine slerp / toe dorsi) stay
-    // at 0 which the gate treats as "trust the propagated quat".
     std::array<float, kXsensSegmentCount> orientStdDeg{};
 
     // Last known per-segment packet timestamp (monotonic seconds). Used by
@@ -190,21 +180,6 @@ struct ActorConfig {
     double footLengthCm  = 26.0;
     double armSpanCm     = 0.0;
     double legLengthCm   = 0.0;
-    // Drillis-Contini per-segment anthropometry — 0 = "derive from height".
-    // shoulderWidthCm: bi-acromial breadth (shoulder-tip to shoulder-tip).
-    //   Default ≈ 0.259 × height (Winter's biomech ref).
-    //   Drives the spine→shoulder-joint lateral offset that the prayer pose
-    //   pivots around — when the actor's real bi-acromial is wider than the
-    //   default, the two hands meet behind the chest plane on the model.
-    // hipWidthCm: bi-iliac breadth (pelvis side to pelvis side).
-    //   Default ≈ 0.191 × height.  Drives the hip-joint lateral offset
-    //   (pelvis dummy stub length) — wrong value breaks the lotus pose
-    //   because the legs fold from the wrong starting points.
-    // handLengthCm: wrist-to-fingertip length.
-    //   Default ≈ 0.108 × height × armScale.  Drives the hand bone length
-    //   (and through it the fingertip reach) — actors with hands far from
-    //   the population mean can't grab the top of their own head if this
-    //   stays hardcoded.
     double shoulderWidthCm = 0.0;
     double hipWidthCm      = 0.0;
     double handLengthCm    = 0.0;
@@ -212,17 +187,6 @@ struct ActorConfig {
 };
 
 // ============================================================================
-//  Locomotion — foot-contact detector + foot-lock IK + drift limiter
-//
-//  Design follows the well-known structure of inertial-mocap biomech
-//  solvers:
-//    * a (rightDown, leftDown) contact pair drives foot-lock IK rather
-//      than raw acceleration double-integration;
-//    * drift correction is a loose, Kalman-style aiding blend of
-//      external observations (foot anchor: Z re-pinned to 0 on re-anchor,
-//      XY frozen between strides);
-//    * finger tracking uses a 20-segment-per-hand local-quaternion array
-//      fused into world space as world_q = wrist_q * finger_q_local.
 // ============================================================================
 
 struct ContactState {
@@ -230,13 +194,6 @@ struct ContactState {
     bool   leftDown   = false;
     double rightAngV  = 0.0;        // rad/s (smoothed) — for debug/UI
     double leftAngV   = 0.0;
-    // S3: heel/toe observables.  Detected per-frame from FK heel (foot
-    // segment origin) and toe (toe segment origin) Z heights with a
-    // small hysteresis so a foot at rest doesn't chatter on IMU jitter.
-    // Used by downstream UI / gait-phase visualisation; the anchor logic
-    // continues to use the single foot keypoint (lowest of heel/toe) so
-    // this is purely additive.  See tests/python/test_heel_toe_gait.py
-    // for the algorithm.
     bool   rHeelDown  = false;
     bool   rToeDown   = false;
     bool   lHeelDown  = false;
@@ -247,14 +204,6 @@ class LocomotionSolver {
 public:
     void reset();
 
-    // Feed one frame of data.  Foot keypoints are FK world positions
-    // BEFORE applying this solver's offset.  Returns the translation to
-    // add to every keypoint so the skeleton walks in the scene.
-    //
-    // v2 signature: now takes the pelvis quaternion too.  The solver needs
-    // it to detect "pelvis is actually holding still" — the master gate
-    // for freezing the offset against isolated-limb motion (scenario A) and
-    // preventing feet-up-on-chair from dropping the avatar (scenario C).
     QVector3D update(const Quat& rightFootQuat,
                      const Quat& leftFootQuat,
                      const Quat& pelvisQuat,
@@ -262,16 +211,6 @@ public:
                      const QVector3D& fkLeftFoot,
                      double tSeconds);
 
-    // Phase B (S3+L1): heel/toe-aware anchor selection.  Pass the four
-    // FK keypoints (heel and toe-ball per foot) AND the current
-    // m_contact.{r,l}{Heel,Toe}Down state must be fresh (call
-    // updateHeelToeContacts() first).  The solver picks per foot:
-    //    heel down  & !toe down  → anchor = heel (heel-strike)
-    //    heel down  &  toe down  → anchor = midpoint  (midstance)
-    //    !heel down &  toe down  → anchor = toe-ball (toe-off pivot)
-    //    !heel down & !toe down  → anchor = lowest of the two (air)
-    // The picked point is then fed into the single-point update()
-    // above — no logic duplication.  Returns the same offset.
     QVector3D update(const Quat& rightFootQuat,
                      const Quat& leftFootQuat,
                      const Quat& pelvisQuat,
@@ -281,12 +220,6 @@ public:
                      const QVector3D& fkLeftToe,
                      double tSeconds);
 
-    // S3: optional heel/toe observable update.  Pass the four FK
-    // keypoints (right heel, right toe-ball, left heel, left toe-ball)
-    // BEFORE locomotion offset.  Refreshes the rHeelDown/rToeDown/
-    // lHeelDown/lToeDown booleans in m_contact.  Calling this is
-    // optional — if you don't, those fields stay at their last value
-    // (or default-false).
     void updateHeelToeContacts(const QVector3D& fkRHeel,
                                const QVector3D& fkRToe,
                                const QVector3D& fkLHeel,
@@ -322,12 +255,6 @@ private:
     Side      m_support     = RIGHT;
     QVector3D m_anchor      {0, 0, 0};
 
-    // F1: 3.00 rad/s (= 172°/s) was too lenient — sStill stayed positive
-    // through the swing phase of normal walking, causing premature anchor
-    // commits and the "walks in place / 5-10 cm jumps" behaviour the
-    // comment block below already complained about.  0.30 rad/s (= 17°/s)
-    // sits comfortably above breathing tremor and standing micro-sway,
-    // below all walking gait kinematics.
     double m_stillRad     = 0.30;
     double m_heightMargin = 0.03;
     int    m_latchTicks   = 3;
@@ -343,18 +270,10 @@ private:
     bool      m_offsetReady  = false;
 
     // =====================================================================
-        //               v3 STATE — weighted dual-anchor + ZUPT
         // =====================================================================
-        // Pelvis angular-velocity tracker (used by pelvis-stillness gate and
-        // ZUPT).
         Quat      m_prevPelvisQ      {1, 0, 0, 0};
         double    m_pelvisAngV        = 0.0;
         double    m_pelvisYawAngV     = 0.0;
-        // F4: yaw-freeze is now per-foot.  A pirouette has one foot
-        // pivoting (which should stay anchored) and the other swinging
-        // (which should re-commit at touchdown).  Old single-flag freeze
-        // dropped both feet's stability tracking whenever the pelvis spun,
-        // causing the character to spiral.
         bool      m_yawFrozenPrev     = false;
         bool      m_yawFrozenPrevR    = false;
         bool      m_yawFrozenPrevL    = false;
@@ -388,39 +307,14 @@ private:
         // >= m_zuptTicksThresh frames → offset fully frozen.
         int       m_zuptTicks         = 0;
 
-        // Phase C: airborne-phase guard.  When BOTH feet are released
-        // for ≥ m_airTicksThresh consecutive frames, we're in a jump
-        // (or both feet briefly off the floor — climbing onto a chair,
-        // etc.).  In this state we suppress interventions that
-        // assume "on the floor": ZUPT accumulation and the pose-aware
-        // Z drift-kill toward 0.55·height.  We don't simulate jump
-        // ballistics — that needs a pelvis-translation sensor (camera
-        // / optical) the system doesn't have — but the guard keeps the
-        // anchor from being incorrectly re-pinned mid-air.
         int       m_airTicks          = 0;
         bool      m_airborne          = false;
         int       m_airTicksThresh    = 4;
 
-        // --- tunables ---------------------------------------------------------
-        // FIX «walks in place / 5-10 cm jumps»: тюнинг параметров локомоции.
-        //
-        // Старые значения требовали слишком высокой confidence для commit
-        // (0.70) и медленно гасили стрижок при движении одной ноги (0.18),
-        // из-за чего во время быстрой ходьбы анкор-офсеты не успевали
-        // обновиться → персонаж стоял на месте.  Ниже — оптимизация под
-        // нормальный темп ходьбы (1-2 m/s, длина шага 0.4-0.7 m).
-        // F1: with m_stillRad now realistic (0.30 rad/s), FK-XY jitter
-        // dominates — tighten the stability window from 4 cm to 2.5 cm so
-        // the FK-XY criterion can carry more weight.
         double    m_fkxyStableRange   = 0.025;
         double    m_pelvisStillRad    = 0.20;   // было 0.12 — реже триггерим
                                                 // pelvis-stillness gate во время ходьбы
         int       m_pelvisStillTicksThresh = 30;
-        // F5: confidence hysteresis — widen from 0.35/0.25 (margin 0.10) to
-        // 0.55/0.30 (margin 0.25).  With m_stillRad=3.0 the old narrow
-        // hysteresis flipped a few times per second during stance; the new
-        // values prevent that chatter while still committing within a few
-        // frames of foot plant once the foot is genuinely still.
         double    m_confCommit        = 0.55;
         double    m_confRelease       = 0.30;
         double    m_confRiseRate      = 0.50;   // было 0.30 — быстрый rise
@@ -450,11 +344,6 @@ private:
         void setActorHeight(double h) { m_actorHeightM = std::max(0.5, h); }
 
       private:
-        // S4: prevPose is the previously-committed pose; the function
-        // applies ±m_poseHysteresisM around the sit/squat thresholds so a
-        // slow sit→stand or squat→stand transition doesn't flap when IMU
-        // noise straddles the boundary.  Pass PoseUnknown for a fresh
-        // classification with no hysteresis.
         PoseKind _classifyPose(const Quat& qPelvis,
                                const QVector3D& fkR,
                                const QVector3D& fkL,
@@ -526,13 +415,9 @@ std::array<Quat, kXsensSegmentCount>
 defaultSegAnglesFor(const std::string& pose);
 
 // ============================================================================
-//  MXTP parser (MVN streaming, big-endian).  Implements the public MVN
-//  network-streamer wire format documented in the MVN User Manual.
 // ============================================================================
 
 // ============================================================================
-//  XDA wire types — copies of the opaque structs used by Xsens Device API.
-//  Layouts are verified via static_assert against the runtime ABI.
 // ============================================================================
 
 struct XsDeviceIdBlob {
@@ -580,12 +465,6 @@ enum class ConnStatus {
 const char* connStatusName(ConnStatus s);
 
 // ============================================================================
-//  XDA direct-connection thread.  Loads xsensdeviceapi64.dll and
-//  xstypes64.dll from the `dll/` folder next to the exe, scans Xsens ports,
-//  opens the first suit found, switches it to measurement mode and polls
-//  orientation quaternions per segment.  Same signals as the previous
-//  receiver so the rest of the app (MainWindow, calibration, viewport)
-//  wires up unchanged.
 // ============================================================================
 
 class MocapReceiver : public QThread {
@@ -600,10 +479,6 @@ public:
     // Safe to call any time — used by the wizard's "Connect suit" button.
     void restart();
 
-    // Try to bring up Manus gloves (loads manus.dll + CoreSdk_Initialize).
-    // Returns true if initialisation succeeded.  Currently a soft-stub: the
-    // full Manus integration is a separate layer; this just verifies the
-    // SDK is present so the UI can tell the user.
     bool connectGloves();
     bool glovesReady()     const;       // physical glove(s) visible to Core
     bool glovesCoreReady() const;       // ManusCore responded to handshake
@@ -624,19 +499,10 @@ public:
     // so future WiFi-auto-connect can reuse them without re-asking.
     void setWifiCredentials(const QString& ssid, const QString& password);
 
-    // Install sensor-to-segment alignment quaternions (one per tracker).
-    // The receiver rotates each sensor's acc / gyr / mag by inv(s2s[i])
-    // before handing them to the fusion filter (standard sensor-to-body
-    // alignment, equivalent to applying the inverse s2s offset to raw IMU
-    // samples before AHRS).
     void setS2sAlignment(const std::array<Quat, kXsensSegmentCount>& s2s);
     void resetS2sAlignment();
     Quat getS2s(int idx) const;
 
-    // Per-sensor magnetometer magnitude (mag_magn).  Each sensor reads a
-    // slightly different raw magnetic-field strength, so we scale each one
-    // by its own mean |mag| from the calibration pose before feeding it
-    // into the fusion filter.
     void setMagNormalisation(const std::array<double, kXsensSegmentCount>& magMagn);
 
     // Per-sensor accelerometer magnitude (acc_magn).  Applied as
@@ -647,14 +513,6 @@ public:
     void setMagSoftIron(const std::array<std::array<double, 9>, kXsensSegmentCount>& mat,
                         const std::array<QVector3D, kXsensSegmentCount>& offset);
 
-    // Install the post-calibration per-sensor priors into FoxKf — refQuat[i]
-    // is the world-frame orientation measured during the calibration pose;
-    // gyrBias[i] is the DC gyro bias (deg/s) estimated during stillness.
-    // The receiver calls `FoxKf::setPrior` per sensor so the filter starts
-    // from the calibrated state instead of (identity, zero), eliminating
-    // the 2-5 s re-convergence window after the wizard completes.  This
-    // also replaces the previous upstream `gyr - gyr_bias` subtraction:
-    // bias correction is now entirely FoxKf's responsibility.
     void setKfPriors(const std::array<Quat, kXsensSegmentCount>& refQuat,
                      const std::array<QVector3D, kXsensSegmentCount>& gyrBiasDegSec);
 
@@ -706,9 +564,6 @@ private:
 };
 
 // ============================================================================
-//  NewSessionWizard — single QDialog, five pages via QStackedWidget.
-//  Welcome → Mode → Dimensions → Calibration → Ready.  All pages re-translate
-//  on language change.  Calibration is gated on the suit being Streaming.
 // ============================================================================
 
 class NewSessionWizard : public QDialog {
@@ -826,15 +681,6 @@ private:
     bool   m_havePrev = false;
     bool   m_calibComplete = false;
 
-    // Double-pose calibration state machine.
-    //
-    //  Idle
-    //   → (user presses Start) → PrepT (3 s countdown, show T-pose image)
-    //   → CaptureT (accumulate for kCalibrationSamples)
-    //   → PrepN (3 s countdown, switch image to N-pose)
-    //   → CaptureN (accumulate again)
-    //   → Settle (push s2s into receiver, wait for FusionAhrs to converge)
-    //   → Done (goNext())
     enum class CalibPhase { Idle, PrepT, CaptureT, SettleT, PrepN, CaptureN, Settle, PrepK, CaptureK, Done };
     CalibPhase m_phase = CalibPhase::Idle;
 
@@ -895,10 +741,6 @@ protected:
 };
 
 // ============================================================================
-//  SensorIndicatorsPanel — replaces the old control/status side-panel.
-//  Shows current session mode (read-only), a grid of 17 suit-tracker live
-//  indicators, finger-chain indicators (when gloves are active) and a
-//  pause/resume control.
 // ============================================================================
 
 class SensorIndicatorsPanel : public QWidget {
@@ -979,12 +821,6 @@ public:
     MocapViewport(const ActorConfig& actor, const std::string& pose,
                   QWidget* parent=nullptr);
 
-    // Thread-safe: called from Qt timer on the GUI thread.  The 3-arg
-    // overload carries per-segment FoxKf orientStdDeg as a confidence
-    // gate for the drift-lock (a still-converging filter is never
-    // frozen).  The legacy 2-arg overload treats every segment as
-    // confident (stdDeg = 0) — kept for tests and any caller that
-    // doesn't have access to the filter uncertainty.
     void updatePose(const std::array<Quat, kXsensSegmentCount>& orientations,
                     const QVector3D& rootPos);
     void updatePose(const std::array<Quat, kXsensSegmentCount>& orientations,
@@ -1031,10 +867,6 @@ public:
                        const QVector3D& fkRFoot,
                        const QVector3D& fkLFoot,
                        double tSec);
-    // Phase B: heel/toe-aware loco tick.  Caller must have already
-    // refreshed contacts via tickHeelToe (with world-frame Z) so the
-    // anchor selection inside the solver picks the right point per
-    // foot.  Returns the same loco offset as the single-point tickLoco.
     QVector3D tickLocoHT(const std::array<Quat, kXsensSegmentCount>& q,
                          const QVector3D& fkRHeel,
                          const QVector3D& fkRToe,
@@ -1089,12 +921,6 @@ private:
     QVector3D m_lastRenderedPelvis{0, 0, 0};  // cached for resetSceneOrigin()
     QVector3D m_lastLocoOffset{0, 0, 0};
 
-    // Per-segment drift-lock: if a bone's angular velocity has been <0.8 deg/s
-    // for >0.5 s, replace its quat with the locked value. Drift shows up as
-    // a low, steady angular velocity (0.05-0.3 deg/s, nearly constant axis);
-    // real motion has higher peak + accelerations. We also track angular
-    // acceleration — if it's near zero (drift sig) even when speed is non-
-    // zero, we lock. Real motion has angular-accel spikes that release lock.
     std::array<Quat, kXsensSegmentCount>   m_lockQuat{};      // held output
     std::array<bool, kXsensSegmentCount>   m_locked{};
     std::array<double, kXsensSegmentCount> m_angVelPrev{};    // last |ω|
@@ -1210,10 +1036,6 @@ struct LiveSettings {
     int           port      = 9763;           // MVN default; overridden in UI
     bool          useGloves = false;
     int           fps       = 60;             // 24 / 30 / 60 — UI throttle
-    // T-pose origin position (meters) for each of 23 Xsens body segments.
-    // Plugin (LiveLinkMvnSource) кладёт это в FTransform.Scale3D и потом
-    // ULiveLinkMvnRetargetAsset делит unrealLength/xsensLength для масштаба
-    // позиции pelvis. Если оставить нули — pelvis улетает на ~47x.
     std::array<QVector3D, kXsensSegmentCount> tposeOriginM{};
     std::array<Quat, kXsensSegmentCount> defAngT{};
 };
@@ -1252,25 +1074,11 @@ public:
     void setTposeBaseline(const std::array<Quat, kXsensSegmentCount>& tposeQ,
                           const QVector3D& tposePelvis);
 
-    // The position-aware overload sends real world-frame FK positions for
-    // every body segment (MXTP02 carries per-segment absolute positions per
-    // the protocol spec — sending zeros breaks UE retargeting and Blender
-    // prop empties).  Pass kp from SkeletonXsens::computeKeypoints, offset
-    // by locomotion / scene shift.
     void pushFrame(quint32 sample,
                    const std::array<Quat, kXsensSegmentCount>& segQuat,
                    const std::array<QVector3D, kXsensSegmentCount>& segPos,
                    const QVector3D& pelvisPos);
 
-    // Glove variant — sends body segments then right+left hand fingers
-    // (20 each).  Plugins auto-detect gloves via the header's
-    // fingerSegmentCount field (Blender MVN plugin: segmentCount ≥ 32 ⇒
-    // gloves present). Safe to call every tick; if gloves data is all-
-    // zero the plugin gracefully ignores finger segments.
-    //
-    // wristPosR/L are the world-frame positions of the right/left wrist
-    // joints (kp[SEG_RHand]/kp[SEG_LHand] from FK) — used to populate the
-    // carpus slot (Manus index -1) with real positions instead of zeros.
     void pushFrameWithGloves(quint32 sample,
         const std::array<Quat, kXsensSegmentCount>& segQuat,
         const std::array<QVector3D, kXsensSegmentCount>& segPos,
@@ -1330,10 +1138,6 @@ private:
 
     bool            m_sessionRunning = true;
 
-    // v4: local skeleton instance — used by onRenderTick to compose the
-    // full world orientation of each wrist via defAngFor() before FK-ing
-    // the Manus-local finger positions.  Kept separate from the viewport's
-    // own m_skel so the render-thread math never touches the GL state.
     std::unique_ptr<SkeletonXsens> m_skel;
 
     // Recording state.
