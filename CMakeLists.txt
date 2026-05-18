@@ -52,22 +52,23 @@ find_package(Eigen3 3.4 QUIET NO_MODULE)
 if (NOT Eigen3_FOUND)
     message(STATUS "Eigen3 not installed; fetching via FetchContent")
     include(FetchContent)
-    set(EIGEN_BUILD_DOC OFF CACHE BOOL "" FORCE)
-    set(EIGEN_BUILD_PKGCONFIG OFF CACHE BOOL "" FORCE)
-    set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
     FetchContent_Declare(eigen
         GIT_REPOSITORY https://gitlab.com/libeigen/eigen.git
         GIT_TAG        3.4.0
         GIT_SHALLOW    TRUE)
-    FetchContent_MakeAvailable(eigen)
-    # FetchContent populates Eigen3::Eigen automatically via Eigen's
-    # own CMake; if it didn't, fall back to a manual interface target.
-    if (NOT TARGET Eigen3::Eigen)
-        add_library(Eigen3::Eigen INTERFACE IMPORTED)
-        target_include_directories(Eigen3::Eigen INTERFACE "${eigen_SOURCE_DIR}")
+    # IMPORTANT: do NOT add_subdirectory the Eigen tree — its blas/lapack
+    # subdirs `enable_language(Fortran)` which breaks CI Windows runners
+    # where gfortran is mingw and the toolchain otherwise is MSVC.
+    # Eigen is header-only; an INTERFACE target on its include dir is
+    # everything any consumer needs.
+    FetchContent_GetProperties(eigen)
+    if (NOT eigen_POPULATED)
+        FetchContent_Populate(eigen)
     endif()
+    add_library(Eigen3::Eigen INTERFACE IMPORTED)
+    target_include_directories(Eigen3::Eigen INTERFACE "${eigen_SOURCE_DIR}")
 endif()
-message(STATUS "Eigen3 ready: ${EIGEN3_VERSION_STRING}${eigen_SOURCE_DIR}")
+message(STATUS "Eigen3 ready")
 
 # ---- Fox Mocap executable ---------------------------------------------------
 add_executable(fox_mocap WIN32
