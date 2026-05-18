@@ -161,6 +161,28 @@ def configure_scene():
         # loading, and the file-logger writes alllog.txt next to the .blend.
         scene.mvn_auto_start_on_load = True
         scene.mvn_test_logging = True
+        # Visual mode: apply incoming poses to the MVN:Actor armature so
+        # the skeleton actually moves in the viewport. The plug-in apply
+        # path is now wrapped in try/except (receiver.py), so a single
+        # bad frame logs an [err] line into alllog.txt instead of
+        # crashing Blender.
+        scene.mvn_log_only_mode = False
+        # ---- Bind the MVN:Actor armature as the streaming source ----------
+        # Without this, the plugin tries to apply a T-pose to a None source
+        # the first time a UDP packet arrives and crashes Blender with
+        # `AttributeError: 'NoneType' object has no attribute 'data'`
+        # (rigging.py:56). Marking the armature as a streamed source also
+        # tells the plugin not to try to build its own tpose from rest-pose.
+        mvn_actor = bpy.data.objects.get("MVN:Actor")
+        if mvn_actor is not None:
+            scene.source_armature = mvn_actor
+            try:
+                mvn_actor.data.mvn_is_source = True
+                # Keep tposemode True so apply_tpose stays on the safe
+                # "clear_all_bonemaps()" branch on the first call.
+                mvn_actor.data.mvn_tposemode = True
+            except AttributeError:
+                pass
     except AttributeError:
         # Properties only exist if the MVN plugin is enabled. Save anyway.
         print("[setup] Warning: MVN plugin properties not registered; "

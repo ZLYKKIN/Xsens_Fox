@@ -2572,9 +2572,9 @@ static void __cdecl foxManusErgonomicsCb(const void* raw)
         const bool testMode = g_ergo.rawDump.load();
         auto alphaForJoint = [testMode](int idx, float delta, const char* hand) -> float {
             const bool isThumb = (idx < 4);
-            const float baseAlpha = isThumb ? 0.20f : 0.35f;
-            const float outlierAlpha = isThumb ? 0.05f : 0.10f;
-            const float outlierThresh = isThumb ? 20.0f : 30.0f;
+            const float baseAlpha = isThumb ? 0.35f : 0.35f;
+            const float outlierAlpha = isThumb ? 0.15f : 0.10f;
+            const float outlierThresh = isThumb ? 35.0f : 30.0f;
             const bool outlier = (delta > outlierThresh);
             if (outlier && testMode) {
                 static const char* kFingerName[5] = { "thumb", "index", "middle", "ring", "pinky" };
@@ -3511,17 +3511,11 @@ void MocapReceiver::run()
                     //   * recoveryTriggerPeriod=0 so we never get locked in
                     //     gyro-only mode during fast motion
                     s.gain                  = (I.segGainActive && I.segGain[targetSeg] > 0.0f)
-                                              ? I.segGain[targetSeg] : 0.7f;
+                                              ? I.segGain[targetSeg] : 0.5f;
                     s.gyroscopeRange        = 2000.0f;
-                    // Softened rejection thresholds — tight values (15°/30°)
-                    // parked the filter in gyro-only mode during static but
-                    // complex poses (sitting, arms crossed, leg-over-leg),
-                    // causing visible drift until recovery.  These values
-                    // correct gravity / mag faster while still filtering
-                    // real disturbances.
                     s.accelerationRejection = 30.0f;
                     s.magneticRejection     = 50.0f;
-                    s.recoveryTriggerPeriod = int(I.freqHz / 2);  // 0.5s recovery
+                    s.recoveryTriggerPeriod = std::max(1, int(I.freqHz / 10));
                     FusionAhrsSetSettings(&ahrs, &s);
                     // Kill the 3-second startup ramp — `startup` + `rampedGain`
                     // add real latency to the first motion after a reset.
@@ -3537,7 +3531,7 @@ void MocapReceiver::run()
                     FusionBiasInitialise(&biasRef);
                     FusionBiasSettings bs = fusionBiasDefaultSettings;
                     bs.sampleRate          = float(std::max(60.0, I.freqHz));
-                    bs.stationaryThreshold = 1.5f;
+                    bs.stationaryThreshold = 0.5f;
                     bs.stationaryPeriod    = 1.0f;
                     FusionBiasSetSettings(&biasRef, &bs);
                     I.biasReady[targetSeg] = true;
@@ -3562,14 +3556,19 @@ void MocapReceiver::run()
                 if (useMag) {
                     const float mLen = std::sqrt(float(mag.x()*mag.x() + mag.y()*mag.y() + mag.z()*mag.z()));
                     const float mErr = std::abs(mLen - 1.0f);
-                    if (mErr > 0.40f)      dynMagRej = 30.0f;
-                    else if (mErr > 0.20f) dynMagRej = 40.0f;
-                    else                   dynMagRej = 50.0f;
+                    if (mErr > 0.40f)      dynMagRej = 80.0f;
+                    else if (mErr > 0.20f) dynMagRej = 60.0f;
+                    else                   dynMagRej = 30.0f;
                 }
 
-                if (s.accelerationRejection != dynAccRej || s.magneticRejection != dynMagRej) {
+                const float gyrNormForGain = std::sqrt(g.axis.x*g.axis.x + g.axis.y*g.axis.y + g.axis.z*g.axis.z) * float(M_PI / 180.0f);
+                const float baseGain = (I.segGainActive && I.segGain[targetSeg] > 0.0f)
+                                       ? I.segGain[targetSeg] : 0.5f;
+                const float dynGain = (gyrNormForGain > 1.0f) ? std::min(0.8f, baseGain + 0.3f) : baseGain;
+                if (s.accelerationRejection != dynAccRej || s.magneticRejection != dynMagRej || s.gain != dynGain) {
                     s.accelerationRejection = dynAccRej;
                     s.magneticRejection     = dynMagRej;
+                    s.gain                  = dynGain;
                     FusionAhrsSetSettings(&ahrs, &s);
                 }
 
@@ -5463,7 +5462,7 @@ void NewSessionWizard::onCaptureTick()
                 outerAll[k] = m_magOuterAccumT[i][k] + m_magOuterAccumN[i][k] + m_magOuterAccumK[i][k];
             }
             const SoftIronFit si = fitMagSoftIron(magSumAll, outerAll, cTot);
-            if (si.valid && si.residual < 5.0) {
+            if (si.valid && si.residual < 3.0) {
                 for (int r = 0; r < 3; ++r)
                     for (int c = 0; c < 3; ++c)
                         magSoftMat[i][r * 3 + c] = si.M[r][c];
@@ -5580,17 +5579,50 @@ void NewSessionWizard::onCaptureTick()
                               << " residual=" << s2sResidual[i] << "°\n";
                 }
             } else if (meanM_N.length() > 1e-6) {
-                const QVector3D mNorm = meanM_N / float(meanM_N.length());
-                Quat qNed = ecompassNED(aN_s, mNorm);
-                const Quat nedToNwu(0, 1, 0, 0);
-                const Quat qNwu = quat_mult(nedToNwu, qNed).normalized();
-                s2sNew[i] = qNwu.inv().normalized();
+                const bool isLegSeg = (i >= SEG_RUpperLeg && i <= SEG_LToe);
+                Quat s2sFinal;
+                const char* method = "ecompass-fallback";
+                if (isLegSeg) {
+                    QVector3D aS = aN_s;
+                    if (aS.lengthSquared() < 1e-12) aS = QVector3D(0.0f, 0.0f, -1.0f);
+                    aS.normalize();
+                    QVector3D aW = gN_b;
+                    if (aW.lengthSquared() < 1e-12) aW = QVector3D(0.0f, 0.0f, -1.0f);
+                    aW.normalize();
+                    QVector3D axis = QVector3D::crossProduct(aS, aW);
+                    double dot = double(QVector3D::dotProduct(aS, aW));
+                    if (dot > 1.0)  dot = 1.0;
+                    if (dot < -1.0) dot = -1.0;
+                    Quat sTilt;
+                    if (axis.lengthSquared() < 1e-12) {
+                        sTilt = (dot > 0.0) ? Quat(1, 0, 0, 0) : Quat(0, 1, 0, 0);
+                    } else {
+                        axis.normalize();
+                        const double ang  = std::acos(dot);
+                        const double half = 0.5 * ang;
+                        const double s    = std::sin(half);
+                        sTilt = Quat(std::cos(half),
+                                     double(axis.x()) * s,
+                                     double(axis.y()) * s,
+                                     double(axis.z()) * s).normalized();
+                    }
+                    s2sFinal = sTilt;
+                    method = "tilt-only";
+                } else {
+                    const QVector3D mNorm = meanM_N / float(meanM_N.length());
+                    Quat qNed = ecompassNED(aN_s, mNorm);
+                    const Quat nedToNwu(0, 1, 0, 0);
+                    const Quat qNwu = quat_mult(nedToNwu, qNed).normalized();
+                    s2sFinal = qNwu.inv().normalized();
+                }
+                s2sNew[i] = s2sFinal;
                 s2sNewMode[i] = 1;
                 const QVector3D worldGravity(0.0f, 0.0f, -1.0f);
-                s2sResidual[i] = ecompResidualDeg(qNwu, worldGravity, aN_s);
+                s2sResidual[i] = ecompResidualDeg(s2sFinal.inv(), worldGravity, aN_s);
                 if (m_test) {
                     std::cout << "[calib K] " << kSegmentNames[i]
-                              << " ecompass-fallback residual=" << std::fixed << std::setprecision(2)
+                              << " " << method
+                              << " residual=" << std::fixed << std::setprecision(2)
                               << s2sResidual[i] << "°\n";
                 }
             }
@@ -5680,7 +5712,7 @@ void NewSessionWizard::onCaptureTick()
                     return;
                 }
 
-                if (s2sNewMode[rSeg] == 0 && s2sNewMode[lSeg] == 0) {
+                if (s2sNewMode[rSeg] == s2sNewMode[lSeg]) {
                     Quat counterpartL;
                     if (useMirror) {
                         counterpartL = mirror_y_quat(qL);
@@ -5694,8 +5726,8 @@ void NewSessionWizard::onCaptureTick()
                                             -counterpartL.y, -counterpartL.z);
                         dot = -dot;
                     }
-                    const double wR = std::max(0.0, 1.0 - s2sResidual[rSeg] / 30.0);
-                    const double wL = std::max(0.0, 1.0 - s2sResidual[lSeg] / 30.0);
+                    const double wR = std::max(0.05, 1.0 - s2sResidual[rSeg] / 30.0);
+                    const double wL = std::max(0.05, 1.0 - s2sResidual[lSeg] / 30.0);
                     const double wTot = wR + wL;
                     const double tR = (wTot > 1e-6) ? wL / wTot : 0.5;
                     const Quat qAvg = slerp_quat(qR, counterpartL, tR);
@@ -5708,7 +5740,9 @@ void NewSessionWizard::onCaptureTick()
                     if (m_test) {
                         std::cout << "[calib refine] paired " << kSegmentNames[rSeg]
                                   << "/" << kSegmentNames[lSeg]
-                                  << " averaged " << sym << ", dev was " << std::fixed << std::setprecision(2)
+                                  << " averaged " << sym
+                                  << " mode=" << s2sNewMode[rSeg]
+                                  << ", dev was " << std::fixed << std::setprecision(2)
                                   << dev << "° (R=" << s2sResidual[rSeg]
                                   << "°/wR=" << wR << ", L=" << s2sResidual[lSeg]
                                   << "°/wL=" << wL << ")\n";
@@ -5811,6 +5845,36 @@ void NewSessionWizard::onCaptureTick()
             }
         }
         m_rx->setSegmentGain(segGain);
+
+        {
+            const std::pair<int,int> diagPairs[8] = {
+                { SEG_RShoulder, SEG_LShoulder }, { SEG_RUpperArm, SEG_LUpperArm },
+                { SEG_RForearm,  SEG_LForearm  }, { SEG_RHand,     SEG_LHand     },
+                { SEG_RUpperLeg, SEG_LUpperLeg }, { SEG_RLowerLeg, SEG_LLowerLeg },
+                { SEG_RFoot,     SEG_LFoot     }, { SEG_RToe,      SEG_LToe      },
+            };
+            std::cout << "[calib INSTR K] ===== FINAL s2s symmetry check ====="
+                      << " (just before setS2sAlignment)\n";
+            for (const auto& pr : diagPairs) {
+                const Quat& qR = s2sNew[pr.first];
+                const Quat& qL = s2sNew[pr.second];
+                const double devMirr = mirrorYDeviationDeg(qR, qL);
+                const double devPar  = parallelDeviationDeg(qR, qL);
+                std::cout << "[calib INSTR K] " << kSegmentNames[pr.first]
+                          << "/" << kSegmentNames[pr.second]
+                          << " mode_R=" << int(s2sNewMode[pr.first])
+                          << " mode_L=" << int(s2sNewMode[pr.second])
+                          << " res_R=" << std::fixed << std::setprecision(2) << s2sResidual[pr.first] << "°"
+                          << " res_L=" << s2sResidual[pr.second] << "°"
+                          << " mountType=" << mountType[pr.first]
+                          << " devMirr=" << devMirr << "°"
+                          << " devPar=" << devPar << "°"
+                          << " fused=" << (s2sFused[pr.first] ? 1 : 0)
+                          << "\n";
+            }
+            std::cout << "[calib INSTR K] ====================================\n";
+        }
+
         m_rx->setS2sAlignment(s2sNew);
 
         for (int i = 0; i < kXsensSegmentCount; ++i) {
@@ -6061,7 +6125,7 @@ void NewSessionWizard::onCaptureTick()
             outerAll[k] = m_magOuterAccumT[i][k] + m_magOuterAccumN[i][k];
         }
         const SoftIronFit si = fitMagSoftIron(magSumAll, outerAll, cTot);
-        if (si.valid && si.residual < 5.0) {
+        if (si.valid && si.residual < 3.0) {
             for (int r = 0; r < 3; ++r)
                 for (int c = 0; c < 3; ++c)
                     magSoftMatN[i][r * 3 + c] = si.M[r][c];
@@ -6086,17 +6150,50 @@ void NewSessionWizard::onCaptureTick()
                           << " residual=" << std::setprecision(2) << s2sResidualN[i] << "°\n";
             }
         } else {
-            const QVector3D mNorm = meanM_N / float(meanM_N.length());
-            Quat qNed = ecompassNED(aN_s, mNorm);
-            const Quat nedToNwu(0, 1, 0, 0);
-            const Quat qNwu = quat_mult(nedToNwu, qNed).normalized();
-            s2s[i] = qNwu.inv().normalized();
+            const bool isLegSeg = (i >= SEG_RUpperLeg && i <= SEG_LToe);
+            Quat s2sFinal;
+            const char* method = "ecompass T+N";
+            if (isLegSeg) {
+                QVector3D aS = aN_s;
+                if (aS.lengthSquared() < 1e-12) aS = QVector3D(0.0f, 0.0f, -1.0f);
+                aS.normalize();
+                QVector3D aW = gN_b;
+                if (aW.lengthSquared() < 1e-12) aW = QVector3D(0.0f, 0.0f, -1.0f);
+                aW.normalize();
+                QVector3D axis = QVector3D::crossProduct(aS, aW);
+                double dot = double(QVector3D::dotProduct(aS, aW));
+                if (dot > 1.0)  dot = 1.0;
+                if (dot < -1.0) dot = -1.0;
+                Quat sTilt;
+                if (axis.lengthSquared() < 1e-12) {
+                    sTilt = (dot > 0.0) ? Quat(1, 0, 0, 0) : Quat(0, 1, 0, 0);
+                } else {
+                    axis.normalize();
+                    const double ang  = std::acos(dot);
+                    const double half = 0.5 * ang;
+                    const double s    = std::sin(half);
+                    sTilt = Quat(std::cos(half),
+                                 double(axis.x()) * s,
+                                 double(axis.y()) * s,
+                                 double(axis.z()) * s).normalized();
+                }
+                s2sFinal = sTilt;
+                method = "tilt-only T+N";
+            } else {
+                const QVector3D mNorm = meanM_N / float(meanM_N.length());
+                Quat qNed = ecompassNED(aN_s, mNorm);
+                const Quat nedToNwu(0, 1, 0, 0);
+                const Quat qNwu = quat_mult(nedToNwu, qNed).normalized();
+                s2sFinal = qNwu.inv().normalized();
+            }
+            s2s[i] = s2sFinal;
             s2sMode[i] = 1;
             const QVector3D worldGravity(0.0f, 0.0f, -1.0f);
-            s2sResidualN[i] = ecompResidualDeg(qNwu, worldGravity, aN_s);
+            s2sResidualN[i] = ecompResidualDeg(s2sFinal.inv(), worldGravity, aN_s);
             if (m_test) {
                 std::cout << "[calib] " << kSegmentNames[i]
-                          << " ecompass T+N residual=" << std::fixed << std::setprecision(2)
+                          << " " << method
+                          << " residual=" << std::fixed << std::setprecision(2)
                           << s2sResidualN[i] << "°\n";
             }
         }
@@ -6183,7 +6280,7 @@ void NewSessionWizard::onCaptureTick()
                 return;
             }
 
-            if (s2sMode[rSeg] == 0 && s2sMode[lSeg] == 0) {
+            if (s2sMode[rSeg] == s2sMode[lSeg]) {
                 Quat counterpartL;
                 if (useMirror) counterpartL = mirror_y_quat(qL);
                 else           counterpartL = qL;
@@ -6194,8 +6291,8 @@ void NewSessionWizard::onCaptureTick()
                                         -counterpartL.y, -counterpartL.z);
                     dot = -dot;
                 }
-                const double wR = std::max(0.0, 1.0 - s2sResidualN[rSeg] / 30.0);
-                const double wL = std::max(0.0, 1.0 - s2sResidualN[lSeg] / 30.0);
+                const double wR = std::max(0.05, 1.0 - s2sResidualN[rSeg] / 30.0);
+                const double wL = std::max(0.05, 1.0 - s2sResidualN[lSeg] / 30.0);
                 const double wTot = wR + wL;
                 const double tR = (wTot > 1e-6) ? wL / wTot : 0.5;
                 const Quat qAvg = slerp_quat(qR, counterpartL, tR);
@@ -6208,7 +6305,9 @@ void NewSessionWizard::onCaptureTick()
                 if (m_test) {
                     std::cout << "[calib refine] paired " << kSegmentNames[rSeg]
                               << "/" << kSegmentNames[lSeg]
-                              << " averaged " << sym << ", dev was " << std::fixed << std::setprecision(2)
+                              << " averaged " << sym
+                              << " mode=" << s2sMode[rSeg]
+                              << ", dev was " << std::fixed << std::setprecision(2)
                               << dev << "° (residuals R=" << s2sResidualN[rSeg]
                               << "° L=" << s2sResidualN[lSeg] << "°)\n";
                 }
@@ -6311,6 +6410,34 @@ void NewSessionWizard::onCaptureTick()
         }
     }
     m_rx->setSegmentGain(segGainN);
+
+    {
+        const std::pair<int,int> diagPairsN[8] = {
+            { SEG_RShoulder, SEG_LShoulder }, { SEG_RUpperArm, SEG_LUpperArm },
+            { SEG_RForearm,  SEG_LForearm  }, { SEG_RHand,     SEG_LHand     },
+            { SEG_RUpperLeg, SEG_LUpperLeg }, { SEG_RLowerLeg, SEG_LLowerLeg },
+            { SEG_RFoot,     SEG_LFoot     }, { SEG_RToe,      SEG_LToe      },
+        };
+        std::cout << "[calib INSTR N] ===== FINAL s2s symmetry check ====="
+                  << " (just before setS2sAlignment)\n";
+        for (const auto& pr : diagPairsN) {
+            const Quat& qR = s2s[pr.first];
+            const Quat& qL = s2s[pr.second];
+            const double devMirr = mirrorYDeviationDeg(qR, qL);
+            const double devPar  = parallelDeviationDeg(qR, qL);
+            std::cout << "[calib INSTR N] " << kSegmentNames[pr.first]
+                      << "/" << kSegmentNames[pr.second]
+                      << " mode_R=" << int(s2sMode[pr.first])
+                      << " mode_L=" << int(s2sMode[pr.second])
+                      << " res_R=" << std::fixed << std::setprecision(2) << s2sResidualN[pr.first] << "°"
+                      << " res_L=" << s2sResidualN[pr.second] << "°"
+                      << " devMirr=" << devMirr << "°"
+                      << " devPar=" << devPar << "°"
+                      << " fused=" << (s2sFusedN[pr.first] ? 1 : 0)
+                      << "\n";
+        }
+        std::cout << "[calib INSTR N] ====================================\n";
+    }
 
     m_rx->setS2sAlignment(s2s);
 
@@ -7631,9 +7758,12 @@ bool LiveStreamSender::start(const LiveSettings& cfg, QString* err)
 
     {
         QByteArray text = QByteArray(
-            "name:FoxMocapLive\nname:FoxMocapLive\ntimeOffset:0\ncolor:255 128 64\n");
+            "name:FoxMocapLive\ntimeOffset:0\ncolor:255 128 64\n");
         QByteArray payload;
-        appendInt32BE(payload, qint32(text.size()));
+        const bool isBlender = (cfg.target == LiveTarget::BlenderMVN);
+        if (!isBlender) {
+            appendInt32BE(payload, qint32(text.size()));
+        }
         payload.append(text);
         QByteArray hdr = buildMxtpHeader("12", 0, 0x80, 1, 0, 23, 0);
         m_impl->metaPkt = hdr + payload;
@@ -7689,7 +7819,7 @@ bool LiveStreamSender::start(const LiveSettings& cfg, QString* err)
                 appendFloatBE(payload, 0.0f);
             }
         }
-        QByteArray hdr = buildMxtpHeader("13", 0, 0x80, quint8(segCount),
+        QByteArray hdr = buildMxtpHeader("13", 0, 0, quint8(segCount),
                                          0, 23, fingerHdr);
         m_impl->scalePkt = hdr + payload;
         m_impl->sock.writeDatagram(m_impl->scalePkt, m_impl->host, m_impl->port);
