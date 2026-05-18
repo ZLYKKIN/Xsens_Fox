@@ -3558,12 +3558,18 @@ void MocapReceiver::run()
             }
 
             // Capture per-segment FoxKf 1-sigma uncertainty for the drift-
-            // lock confidence gate downstream.  Computed even when the
-            // accel update is rejected (filter's covariance keeps growing
-            // during predicts only — drift-lock sees rising stdDeg and
-            // refuses to arm).
-            const float kfStdDeg = (fuseReady && targetSeg >= 0
-                                    && targetSeg < kXsensSegmentCount)
+            // lock confidence gate downstream.  Read unconditionally —
+            // the kf state is persistent: even when this packet doesn't
+            // carry IMU data (e.g. absolute-quat-only mode), the filter's
+            // last stdDeg is still the correct confidence reading.  The
+            // ONE case where we report 0 is "no FoxKf prior installed yet"
+            // (kfReady == false) — there the orient field is identity and
+            // we'd rather report "unknown" (0 → confident gate passes,
+            // matching the legacy pre-foxkf behaviour for the pre-calibration
+            // settle window when there's nothing better to report).
+            const float kfStdDeg = (targetSeg >= 0
+                                    && targetSeg < kXsensSegmentCount
+                                    && I.kfReady[targetSeg])
                 ? I.kf[targetSeg].orientStdDeg() : 0.0f;
 
             // --- Publish into the shared frame ---------------------------
@@ -7241,11 +7247,15 @@ void MocapViewport::updatePose(const std::array<Quat, kXsensSegmentCount>& orien
             const bool steady = angAcc < steadyThresh;
             // FoxKf confidence gate.  orientStdDeg[i] = 0 (e.g. unsensored
             // spine slerp) is treated as confident: the slerp is bias-free
-            // by construction.  Otherwise the filter must report ≤1.5°
-            // 1-sigma — looser than FoxKf's typical converged value
-            // (≈0.5-1°) but tight enough to refuse a freeze during the
-            // 1-2 s right after a sensor leaves prolonged acc-rejection.
-            constexpr float kStdLockThreshDeg = 1.5f;
+            // by construction.  Otherwise the filter must report < 3.0°
+            // 1-sigma total — matches the "converged" threshold from
+            // tests/python/test_fox_kf_per_segment.py::
+            // test_orient_std_falls_per_segment, and corresponds to the
+            // setPrior(2°/axis) starting point shrinking by ~15 % after a
+            // handful of acc/mag updates.  Prolonged acc-rejection inflates
+            // stdDeg past 5° so the gate genuinely refuses to freeze a
+            // wandered filter.
+            constexpr float kStdLockThreshDeg = 3.0f;
             const bool confident = (orientStdDeg[i] <= 0.0f)
                                 || (orientStdDeg[i] < kStdLockThreshDeg);
             const bool stillFrame = slow && steady && confident;

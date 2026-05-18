@@ -122,12 +122,15 @@ private:
     FoxKfSettings m_set;
     Quat4 m_q{1.0f, 0.0f, 0.0f, 0.0f};       // world ← body quaternion
     Vec3  m_b{0.0f, 0.0f, 0.0f};             // gyro bias estimate (rad/s)
-    float m_P[36]{};                          // 6×6 covariance, row-major
-                                              // (kept as flat float[36] so
-                                              // the header has no Eigen
-                                              // dependency — the .cpp
-                                              // re-views it as Eigen::Matrix
-                                              // for all math).
+    float m_P[36]{};                          // 6×6 covariance — opaque
+                                              // storage, only read/written
+                                              // through the Eigen::Map in
+                                              // FoxKf.cpp.  The matrix is
+                                              // kept symmetric by every
+                                              // update (Joseph form + an
+                                              // explicit symmetrise step)
+                                              // so the storage order is
+                                              // invisible to consumers.
     bool  m_still           = false;
     int   m_stillTicks      = 0;
     Vec3  m_lastGyrCorrected{0.0f, 0.0f, 0.0f};
