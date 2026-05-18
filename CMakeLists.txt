@@ -8,6 +8,27 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTOUIC OFF)
 set(CMAKE_AUTORCC ON)
 
+# ---- Version stamp from git tag --------------------------------------------
+# `git describe --tags --always --dirty` gives us the shortest unique identifier:
+#   * exact tag        -> "v0.6.0"
+#   * tag + extra      -> "v0.6.0-3-gabcdef1"
+#   * dirty working    -> "v0.6.0-3-gabcdef1-dirty"
+#   * pre-CI checkout  -> short SHA fallback
+# The result is stamped into the binary via FOX_VERSION_STR.
+execute_process(
+    COMMAND git describe --tags --always --dirty
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    OUTPUT_VARIABLE FOX_VERSION
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET)
+if (NOT FOX_VERSION)
+    set(FOX_VERSION "dev")
+endif()
+# Strip the leading "v" so QApplication::applicationVersion() looks clean
+# in About boxes and crash dumps.
+string(REGEX REPLACE "^v" "" FOX_VERSION_CLEAN "${FOX_VERSION}")
+message(STATUS "Fox Mocap version: ${FOX_VERSION_CLEAN}")
+
 # All binaries land in <project>/build/bin
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build/bin")
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build/bin")
@@ -31,6 +52,8 @@ add_executable(fox_mocap WIN32
     scr/fusion/FusionCompass.c
 )
 target_include_directories(fox_mocap PRIVATE scr scr/fusion)
+target_compile_definitions(fox_mocap PRIVATE
+    FOX_VERSION_STR="${FOX_VERSION_CLEAN}")
 target_link_libraries(fox_mocap PRIVATE
     Qt6::Core Qt6::Gui Qt6::Widgets
     Qt6::OpenGL Qt6::OpenGLWidgets

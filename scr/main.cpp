@@ -3859,7 +3859,7 @@ Lang& Lang::instance() { static Lang g; return g; }
 
 struct Tr { const char* key; const char* ru; const char* en; };
 static const Tr kTr[] = {
-    {"app_title",          "Fox-Mocap — Beta 0.1",              "Fox-Mocap — Beta 0.1"},
+    {"app_title",          "Fox-Mocap",                          "Fox-Mocap"},
     {"start_new_session",  "Начать новую сессию",               "Start new session"},
     {"welcome_sub",        "Интерактивная mocap-студия для костюма Xsens Link",
                            "Interactive mocap studio for the Xsens Link suit"},
@@ -4112,7 +4112,8 @@ NewSessionWizard::NewSessionWizard(MocapReceiver* rx, bool testMode, QWidget* pa
     : QDialog(parent), m_rx(rx), m_test(testMode)
 {
     setModal(true);
-    setWindowTitle(Lang::t("app_title"));
+    setWindowTitle(QString("%1 v%2").arg(Lang::t("app_title"),
+                                                QCoreApplication::applicationVersion()));
     setMinimumSize(760, 640);
 
     buildPages();
@@ -4784,7 +4785,8 @@ void NewSessionWizard::refreshPoseImage()
 
 void NewSessionWizard::retranslate()
 {
-    setWindowTitle(Lang::t("app_title"));
+    setWindowTitle(QString("%1 v%2").arg(Lang::t("app_title"),
+                                                QCoreApplication::applicationVersion()));
     if (m_welcomeHeading) m_welcomeHeading->setText(Lang::t("start_new_session"));
     if (m_welcomeSub)     m_welcomeSub->setText(Lang::t("welcome_sub"));
     if (m_btnStart)       m_btnStart->setText(Lang::t("start_new_session"));
@@ -7721,6 +7723,12 @@ void LiveStreamSender::setTposeBaseline(
     m_impl->baselineCaptured = true;
 }
 
+// Test-mode dual-logging switch. main() sets this to true when -test is on
+// CLI so every UDP frame we send is dumped to stdout in the same format the
+// Blender plug-in's file-logger emits — enables frame-for-frame diff between
+// Fox's "what we sent" and Blender's "what we received".
+bool g_testStreamLog = false;
+
 void LiveStreamSender::pushFrame(quint32 sample,
     const std::array<Quat, kXsensSegmentCount>& segQuat,
     const QVector3D& pelvisPos)
@@ -7743,6 +7751,8 @@ void LiveStreamSender::pushFrame(quint32 sample,
 
     m_impl->maybeRetransmitHandshake();
     const quint32 ft = quint32(m_impl->timer.elapsed());
+    const double  ts = std::chrono::duration<double>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
     QByteArray body;
     for (int i = 0; i < kXsensSegmentCount; ++i) {
         appendInt32BE(body, i + 1);
@@ -7759,7 +7769,19 @@ void LiveStreamSender::pushFrame(quint32 sample,
         appendFloatBE(body, float(q.x));
         appendFloatBE(body, float(q.y));
         appendFloatBE(body, float(q.z));
+
+        if (g_testStreamLog) {
+            char buf[256];
+            std::snprintf(buf, sizeof(buf),
+                "[send] t=%.6f sample=%u seg=%d "
+                "quat=%.6f,%.6f,%.6f,%.6f pos=%.6f,%.6f,%.6f",
+                ts, unsigned(sample), i,
+                q.w, q.x, q.y, q.z,
+                double(p.x()), double(p.y()), double(p.z()));
+            std::cout << buf << '\n';
+        }
     }
+    if (g_testStreamLog) std::cout.flush();
     QByteArray hdr = buildMxtpHeader("02", sample, 0x80,
                                      quint8(kXsensSegmentCount), ft, 23, 0);
     m_impl->sock.writeDatagram(hdr + body, m_impl->host, m_impl->port);
@@ -7805,6 +7827,8 @@ void LiveStreamSender::pushFrameWithGloves(quint32 sample,
 
     m_impl->maybeRetransmitHandshake();
     const quint32 ft = quint32(m_impl->timer.elapsed());
+    const double  ts = std::chrono::duration<double>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
     const quint8  bodyCount = quint8(kXsensSegmentCount);
     const quint8  fingerCount = quint8(2 * kFingerSegmentsHand);
     QByteArray body;
@@ -7823,7 +7847,19 @@ void LiveStreamSender::pushFrameWithGloves(quint32 sample,
         appendFloatBE(body, float(q.x));
         appendFloatBE(body, float(q.y));
         appendFloatBE(body, float(q.z));
+
+        if (g_testStreamLog) {
+            char buf[256];
+            std::snprintf(buf, sizeof(buf),
+                "[send] t=%.6f sample=%u seg=%d "
+                "quat=%.6f,%.6f,%.6f,%.6f pos=%.6f,%.6f,%.6f",
+                ts, unsigned(sample), i,
+                q.w, q.x, q.y, q.z,
+                double(p.x()), double(p.y()), double(p.z()));
+            std::cout << buf << '\n';
+        }
     }
+    if (g_testStreamLog) std::cout.flush();
     static constexpr int kXsensSlotToManus[kFingerSegmentsHand] = {
         -1,  1,  2,  3,
          4,  5,  6,  7,
@@ -8746,7 +8782,8 @@ MainWindow::MainWindow(MocapReceiver* rx,
                        bool testMode)
     : m_setup(wizardResult), m_test(testMode), m_rx(rx)
 {
-    setWindowTitle(Lang::t("app_title"));
+    setWindowTitle(QString("%1 v%2").arg(Lang::t("app_title"),
+                                                QCoreApplication::applicationVersion()));
     resize(1360, 820);
 
     // Actor config derived from wizard result.
@@ -10285,7 +10322,10 @@ int main(int argc, char** argv)
     using namespace fox;
 
     const CliArgs cli = parseCli(argc, argv);
-    if (cli.test) attachTestOutput();
+    if (cli.test) {
+        attachTestOutput();
+        fox::g_testStreamLog = true;
+    }
 
     // Request a compatibility-profile OpenGL context so legacy immediate-mode
     // GL (used by the viewport line/point renderer) works.  Must be set BEFORE
@@ -10302,7 +10342,10 @@ int main(int argc, char** argv)
     QApplication app(argc, argv);
     app.setStyleSheet(kStyleSheet);
     app.setApplicationName("Fox-Mocap");
-    app.setApplicationVersion("0.1");
+#ifndef FOX_VERSION_STR
+#  define FOX_VERSION_STR "dev"
+#endif
+    app.setApplicationVersion(FOX_VERSION_STR);
     // Stylised fox icon used in title bar, taskbar, Alt+Tab, dialogs.
     const QIcon foxIcon = makeFoxAppIcon();
     app.setWindowIcon(foxIcon);

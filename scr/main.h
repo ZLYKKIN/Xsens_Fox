@@ -1214,4 +1214,9 @@ CliArgs parseCli(int argc, char** argv);
 // Logger used in -test mode (flushes immediately).
 void testLog(const std::string& msg, bool enabled);
 
+// Dual-logging switch (defined in main.cpp). main() sets this to true when
+// -test is on CLI; LiveStreamSender::pushFrame dumps each segment we send
+// to stdout in the same format the Blender plug-in's file-logger emits.
+extern bool g_testStreamLog;
+
 }  // namespace fox

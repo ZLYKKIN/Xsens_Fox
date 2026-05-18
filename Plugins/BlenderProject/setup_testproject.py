@@ -156,6 +156,11 @@ def configure_scene():
         scene.mvn_gloves_enabled = True
         scene.mvn_scene_units = "CM"
         scene.mvn_update_frequency = 240
+        # Fox Mocap dual-logging knobs: testproject.blend always opens with
+        # auto-start ON so the receiver kicks the moment the file finishes
+        # loading, and the file-logger writes alllog.txt next to the .blend.
+        scene.mvn_auto_start_on_load = True
+        scene.mvn_test_logging = True
     except AttributeError:
         # Properties only exist if the MVN plugin is enabled. Save anyway.
         print("[setup] Warning: MVN plugin properties not registered; "
