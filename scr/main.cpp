@@ -1687,6 +1687,56 @@ QVector3D LocomotionSolver::update(const Quat& qR,
         const double pelvisRotKill = std::max(0.0, std::min(1.0, (m_pelvisAngV - 0.6) / 0.8));
         const bool pelvisRotating = pelvisRotKill > 0.5;
 
+        // FIX (airborne phase): отдельная PoseAirborne фаза для прыжков.
+        // Оценка vertical velocity таза по изменению m_offsetLast.z за dt.
+        // Активация двумя путями:
+        //   (a) ballistic: feetLifted (confR/L<0.10) + zVel > 0.50 m/s
+        //   (b) drift:     feetLifted + ни одна нога не committed +
+        //                  (airborneTicks>0 || zVel>0.15) — fallback для
+        //                  низкоскоростных подскоков.
+        // Стабилизация >= 5 кадров (55ms @ 90Hz) → m_pose = PoseAirborne.
+        // Выход → m_landedTicks = 12 (133ms ramp в landing re-anchor).
+        {
+            // bestPelvisEstimate() ещё не определён в lambda, но мы можем
+            // повторить ту же логику: pelvisZ from anchor ноги, иначе offsetLast.
+            double zNow;
+            if (m_committedR && !m_committedL) zNow = m_anchorR.z() - fkR.z();
+            else if (m_committedL && !m_committedR) zNow = m_anchorL.z() - fkL.z();
+            else zNow = m_offsetLast.z();
+            if (m_havePelvisZPrev) {
+                const double rawVZ = (zNow - m_pelvisZPrev) / dt;
+                m_pelvisZVel = 0.70 * m_pelvisZVel + 0.30 * rawVZ;
+            }
+            m_pelvisZPrev = zNow;
+            m_havePelvisZPrev = true;
+
+            const bool feetLifted = (m_confR < 0.10) && (m_confL < 0.10);
+            const bool ballistic  = feetLifted && (m_pelvisZVel > 0.50);
+            const bool driftAir   = feetLifted && (!m_committedR) && (!m_committedL)
+                                  && (m_airborneTicks > 0 || m_pelvisZVel > 0.15);
+
+            if (ballistic || driftAir) {
+                m_airborneTicks = std::min(m_airborneTicks + 1, 4096);
+                if (m_airborneTicks >= 5 && m_pose != PoseLying) {
+                    // Override: PoseAirborne для последующих блоков.
+                    // _classifyPose уже отработал, m_pose установлен; меняем.
+                    if (m_pose != PoseAirborne) {
+                        m_pose = PoseAirborne;
+                        m_poseTicks = 0;
+                    } else {
+                        m_poseTicks = std::min(m_poseTicks + 1, 4096);
+                    }
+                }
+            } else {
+                if (m_airborneTicks > 0) {
+                    // Только что приземлились — взводим re-anchor ramp.
+                    m_landedTicks = 12;
+                }
+                m_airborneTicks = 0;
+            }
+            if (m_landedTicks > 0) --m_landedTicks;
+        }
+
         // FIX «walks in place»: при commit нового анкора используем
         // НАИБОЛЕЕ АКТУАЛЬНУЮ оценку pelvis_world, а не отстающий
         // m_offsetLast.  Если другая нога committed — её anchor минус её
@@ -1791,7 +1841,20 @@ QVector3D LocomotionSolver::update(const Quat& qR,
                     }
                     // else: world.z = fk.z + pelvis.z (естественный)
                 }
-                anchor = world;
+                // FIX (airborne): soft re-anchor при приземлении.
+                // m_landedTicks отсчитывается от 12 (только что landed) к 0.
+                // anchor = blend(currentEst, world, t) где t = 1 - landedTicks/12.
+                // Без этого XY-anchor мгновенно прыгает на новое место →
+                // skeleton "телепортируется" на pol 5-10cm после прыжка.
+                if (m_landedTicks > 0) {
+                    const double t = 1.0 - double(m_landedTicks) / 12.0;
+                    const QVector3D currentEst(fk.x() + m_offsetLast.x(),
+                                               fk.y() + m_offsetLast.y(),
+                                               fk.z() + m_offsetLast.z());
+                    anchor = float(1.0 - t) * currentEst + float(t) * world;
+                } else {
+                    anchor = world;
+                }
                 committed = true;
                 didCommitThisFrame = true;
             } else if (committed && conf < m_confRelease) {
@@ -1883,7 +1946,12 @@ QVector3D LocomotionSolver::update(const Quat& qR,
         }
 
         QVector3D newOff = m_offsetLast;
-        if (total > 1e-3) {
+        // FIX (airborne): когда PoseAirborne, заморозим offset (XY и Z).
+        // Безопасное приближение: персонаж "висит" на месте, ожидая
+        // landing.  Реальное movement в воздухе обычно < 0.5м, а без
+        // anchor его нельзя оценить надёжно — лучше не двигать чем
+        // ошибиться в направлении.
+        if (m_pose != PoseAirborne && total > 1e-3) {
             if (!pelvisFreeze && !yawFreeze) {
                 newOff.setX(float((1.0 - effXyRate) * m_offsetLast.x()
                                   + effXyRate * rawOff.x()));
@@ -1893,6 +1961,7 @@ QVector3D LocomotionSolver::update(const Quat& qR,
             newOff.setZ(float((1.0 - zRate) * m_offsetLast.z()
                               + zRate * rawOff.z()));
         }
+        // else: PoseAirborne — newOff = m_offsetLast (полная заморозка).
 
         {
             // Per-frame offset cap.  FIX «walks in place»: старые
