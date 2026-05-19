@@ -4633,17 +4633,38 @@ void NewSessionWizard::onCaptureTick()
     m_prevSnap = snap; m_havePrev = true;
     const double second = medianDelta;
 
-    constexpr double kStillLowRad  = 0.04;
-    constexpr double kStillHighRad = 0.10;
-    constexpr int    kFlipStreak   = 3;
+    double medianGyroDps = 0.0;
+    {
+        std::array<double, kXsensSegmentCount> gyrs{};
+        int nValid = 0;
+        for (int i = 0; i < kXsensSegmentCount; ++i) {
+            if (!fr.segValid[i]) continue;
+            const QVector3D g = fr.gyrSensor[i];
+            gyrs[nValid++] = std::sqrt(double(g.x())*g.x()
+                                     + double(g.y())*g.y()
+                                     + double(g.z())*g.z());
+        }
+        if (nValid > 0) {
+            std::sort(gyrs.begin(), gyrs.begin() + nValid);
+            medianGyroDps = gyrs[nValid / 2];
+        }
+    }
+
+    constexpr double kStillLowRad   = 0.06;
+    constexpr double kStillHighRad  = 0.14;
+    constexpr double kGyroLowDps    = 2.0;
+    constexpr double kGyroHighDps   = 6.0;
+    constexpr int    kFlipStreak    = 5;
+    const bool movedNow = (second > kStillHighRad) || (medianGyroDps > kGyroHighDps);
+    const bool stillNow = (second < kStillLowRad)  && (medianGyroDps < kGyroLowDps);
     if (m_stillState) {
-        if (second > kStillHighRad) {
+        if (movedNow) {
             if (++m_moveStreak >= kFlipStreak) { m_stillState = false; m_stillStreak = 0; }
         } else {
             m_moveStreak = 0;
         }
     } else {
-        if (second < kStillLowRad) {
+        if (stillNow) {
             if (++m_stillStreak >= kFlipStreak) { m_stillState = true; m_moveStreak = 0; }
         } else {
             m_stillStreak = 0;
