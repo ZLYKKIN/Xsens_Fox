@@ -344,14 +344,6 @@ class MocapPose:
             )
 
     def _convert_vectors(self):
-        """
-        Converts the position data in the skeleton_transform_dict to match the coordinate system of the scene.
-        """
-        try:
-            from . import file_logger
-            _log = file_logger.log if file_logger.is_open() else None
-        except Exception:
-            _log = None
         for segment_name, transform_data in self.skeleton_transform_dict.items():
             x_position, y_position, z_position, *rotation_data = transform_data
             # The wire frame (MVN MXTP02) carries positions as (x, y, z).
@@ -364,50 +356,15 @@ class MocapPose:
             # tools/diff_streams.py can show the transform applied per seg.
             converted_axis_vector = Vector((y_position, z_position, x_position))
             self.skeleton_transform_dict[segment_name] = (converted_axis_vector, *rotation_data)
-            if _log is not None:
-                try:
-                    _log(
-                        f"[axis_pos] seg={segment_name} "
-                        f"in={x_position:.6f},{y_position:.6f},{z_position:.6f} "
-                        f"out={converted_axis_vector.x:.6f},{converted_axis_vector.y:.6f},{converted_axis_vector.z:.6f} "
-                        f"rule=Vector(y,z,x)"
-                    )
-                except Exception:
-                    pass
 
     def _convert_to_quaternions(self):
-        """
-        Converts the rotation data in the skeleton_transform_dict to Quaternion format.
-        """
-        try:
-            from . import file_logger
-            _log = file_logger.log if file_logger.is_open() else None
-        except Exception:
-            _log = None
         for segment_name, transform_data in self.skeleton_transform_dict.items():
             position_vector, w_rotation, x_rotation, y_rotation, z_rotation = transform_data
-            # The quaternion is taken VERBATIM from the wire — no axis
-            # remap mirroring what _convert_vectors does to positions.
-            # If the wire frame and Blender frame differ, that's a known
-            # mismatch the diff tool can detect (positions get one
-            # transform, quaternions another).  Documented as a structural
-            # observation, not a fix — calculate_rotation in
-            # source_animator.py handles per-segment quaternion remap
-            # downstream.
             q = Quaternion((w_rotation, x_rotation, y_rotation, z_rotation))
             self.skeleton_transform_dict[segment_name] = (
                 position_vector,
                 q,
             )
-            if _log is not None:
-                try:
-                    _log(
-                        f"[converted] seg={segment_name} "
-                        f"quat={q.w:.6f},{q.x:.6f},{q.y:.6f},{q.z:.6f} "
-                        f"pos={position_vector.x:.6f},{position_vector.y:.6f},{position_vector.z:.6f}"
-                    )
-                except Exception:
-                    pass
 
 
 # *********************************************************************************************************************

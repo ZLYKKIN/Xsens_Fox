@@ -1,47 +1,30 @@
-# **********************************************************************************************************************
-# file_logger.py — append-only file logger for Fox Mocap dual-logging tests.
-#
-# The official MVN Blender plugin only logs to the Blender info bar via
-# `logger.LOGGING_OT_logger`, which is transient and useless for cross-log
-# diffing against Fox Mocap's `-test` console dump. This module adds a tiny
-# stdlib-only file logger that writes to `<blend_dir>/alllog.txt` and follows
-# exactly the same line format Fox emits, so the two logs can be joined on
-# `sample=N seg=I` and compared frame-for-frame.
-#
-# Activation:
-#   * `start_logging(path)` — open the file (or fall back to next to the .blend).
-#   * `stop_logging()` — flush + close.
-#   * `log(line)` — append one line (no newline needed).
-#
-# The logger is a module-level singleton so receiver.py and pose.py can call
-# `from . import file_logger; file_logger.log(...)` from any context (main
-# thread or socket-reader thread). All writes are guarded by a lock so the
-# socket thread and the bpy.app.timers callback can both write safely.
-# **********************************************************************************************************************
+import os
 import threading
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence, Tuple
 
 import bpy
 
 
-# ============================================================================================
-class _FileLogger:
-    """Thread-safe append-only file logger."""
+SegmentRow = Tuple[int, str, Tuple[float, float, float, float], Tuple[float, float, float]]
 
+
+class _FileLogger:
     def __init__(self) -> None:
         self._fh = None
         self._path: Optional[Path] = None
         self._lock = threading.Lock()
+        self._max_bytes: int = 10 * 1024 * 1024
+        self._rotate_index: int = 0
+        self._bytes_written: int = 0
+        self._precision: int = 3
 
-    # --------------------------------------------------------------------
-    def open(self, path: Optional[str] = None) -> Path:
-        """Open the log file. If path is None, fall back to <blend_dir>/alllog.txt."""
+    def open(self, path: Optional[str] = None,
+             max_size_mb: float = 10.0,
+             precision: int = 3) -> Path:
         with self._lock:
             if self._fh is not None:
-                # Re-open requested — close existing handle first to keep
-                # everything in a single file.
                 try:
                     self._fh.close()
                 except Exception:
@@ -50,20 +33,20 @@ class _FileLogger:
             target = Path(path) if path else self._default_path()
             target.parent.mkdir(parents=True, exist_ok=True)
             self._path = target
+            self._max_bytes = max(1, int(max_size_mb * 1024 * 1024))
+            self._precision = max(1, min(6, int(precision)))
+            self._rotate_index = 0
+            self._bytes_written = 0
             self._fh = open(target, "w", encoding="utf-8", buffering=1)
-            # Schema header — tells the diff tool (tools/diff_streams.py) how
-            # to parse lines.  Bumping SCHEMA_VERSION below is the protocol
-            # for forward/backward compat with the diff tool.
-            self._fh.write(
+            header = (
                 f"[boot] alllog opened at {target}  (host_t={time.time():.6f})\n"
-                f"[schema] version=2 events=raw,recv,converted,axis_pos,"
-                f"rule,bone_world,bone_local,rest_pose,apply,start,stop,"
-                f"err,gloves_state\n"
+                f"[schema] version=3 events=start,stop,snapshot,err,gloves_state,rest_pose,apply\n"
             )
+            self._fh.write(header)
+            self._bytes_written += len(header.encode("utf-8"))
             self._fh.flush()
             return target
 
-    # --------------------------------------------------------------------
     def close(self) -> None:
         with self._lock:
             if self._fh is not None:
@@ -77,9 +60,40 @@ class _FileLogger:
                     pass
                 self._fh = None
 
-    # --------------------------------------------------------------------
+    def _maybe_rotate_locked(self) -> None:
+        if self._fh is None or self._path is None:
+            return
+        if self._bytes_written < self._max_bytes:
+            return
+        try:
+            self._fh.flush()
+            self._fh.close()
+        except Exception:
+            pass
+        self._rotate_index += 1
+        suffix = self._path.suffix or ".txt"
+        stem = self._path.stem
+        rotated = self._path.with_name(f"{stem}.{self._rotate_index}{suffix}")
+        try:
+            if rotated.exists():
+                rotated.unlink()
+            os.replace(self._path, rotated)
+        except Exception:
+            pass
+        try:
+            self._fh = open(self._path, "w", encoding="utf-8", buffering=1)
+            header = (
+                f"[boot] alllog rotated (prev={rotated.name}) "
+                f"(host_t={time.time():.6f})\n"
+                f"[schema] version=3 events=start,stop,snapshot,err,gloves_state,rest_pose,apply\n"
+            )
+            self._fh.write(header)
+            self._bytes_written = len(header.encode("utf-8"))
+        except Exception:
+            self._fh = None
+            self._bytes_written = 0
+
     def log(self, line: str) -> None:
-        """Append a single line. Newline is added if missing."""
         with self._lock:
             if self._fh is None:
                 return
@@ -87,15 +101,42 @@ class _FileLogger:
                 if not line.endswith("\n"):
                     line = line + "\n"
                 self._fh.write(line)
+                self._bytes_written += len(line.encode("utf-8"))
+                self._maybe_rotate_locked()
             except Exception:
-                # File got pulled out from under us — silently stop logging
-                # rather than crashing the receiver thread.
                 pass
 
-    # --------------------------------------------------------------------
+    def log_snapshot(self, sample: int, t: float,
+                     segments: Sequence[SegmentRow]) -> None:
+        prec = self._precision
+        qfmt = f"{{:+.{prec}f}}"
+        pfmt = f"{{:+.{prec}f}}"
+        rows = [
+            f"========== [BLENDER SNAPSHOT] sample={sample}  t={t:.2f}s ==========\n"
+        ]
+        for idx, name, q, p in segments:
+            qw, qx, qy, qz = q
+            px, py, pz = p
+            rows.append(
+                f"  seg[{idx:2d}] {name:<14}"
+                f" quat=({qfmt.format(qw)},{qfmt.format(qx)},"
+                f"{qfmt.format(qy)},{qfmt.format(qz)})"
+                f" pos=({pfmt.format(px)},{pfmt.format(py)},"
+                f"{pfmt.format(pz)})\n"
+            )
+        rows.append("=" * 60 + "\n")
+        blob = "".join(rows)
+        with self._lock:
+            if self._fh is None:
+                return
+            try:
+                self._fh.write(blob)
+                self._bytes_written += len(blob.encode("utf-8"))
+                self._maybe_rotate_locked()
+            except Exception:
+                pass
+
     def flush(self) -> None:
-        """Force OS-level flush.  Useful before Blender quits / crashes so
-        the diff tool sees a complete trace."""
         with self._lock:
             if self._fh is not None:
                 try:
@@ -103,46 +144,43 @@ class _FileLogger:
                 except Exception:
                     pass
 
-    # --------------------------------------------------------------------
     def is_open(self) -> bool:
         return self._fh is not None
 
     def path(self) -> Optional[Path]:
         return self._path
 
-    # --------------------------------------------------------------------
+    def precision(self) -> int:
+        return self._precision
+
     @staticmethod
     def _default_path() -> Path:
-        """alllog.txt next to the currently open .blend.
-
-        Falls back to the user's home directory when Blender is started
-        without a saved scene (running --background --python from a fresh
-        Blender, before the test project gets loaded)."""
         blend = bpy.data.filepath
         if blend:
             return Path(blend).parent / "alllog.txt"
         return Path.home() / "fox_mocap_alllog.txt"
 
 
-# Module-level singleton. Import as `from . import file_logger` and call
-# `file_logger.log(...)`.
 _INSTANCE = _FileLogger()
 
 
-# ============================================================================================
-def start_logging(path: Optional[str] = None) -> Path:
-    """Open the file logger. Returns the resolved path."""
-    return _INSTANCE.open(path)
+def start_logging(path: Optional[str] = None,
+                  max_size_mb: float = 10.0,
+                  precision: int = 3) -> Path:
+    return _INSTANCE.open(path, max_size_mb=max_size_mb, precision=precision)
 
 
 def stop_logging() -> None:
-    """Close the file logger."""
     _INSTANCE.close()
 
 
 def log(line: str) -> None:
-    """Append a single line to the log (no-op if logger is closed)."""
     _INSTANCE.log(line)
+
+
+def log_snapshot(sample: int, t: float,
+                 segments: Sequence[SegmentRow]) -> None:
+    _INSTANCE.log_snapshot(sample, t, segments)
 
 
 def is_open() -> bool:
@@ -150,9 +188,12 @@ def is_open() -> bool:
 
 
 def flush() -> None:
-    """Force OS-level flush (no-op if logger is closed)."""
     _INSTANCE.flush()
 
 
 def current_path() -> Optional[Path]:
     return _INSTANCE.path()
+
+
+def precision() -> int:
+    return _INSTANCE.precision()

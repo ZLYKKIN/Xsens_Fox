@@ -65,18 +65,6 @@ def apply_vector_to_pelvis(mocap_pose: MocapPose, pelvis_bone: Bone, armature: b
     mocap_bone = mocap_pose.bone_hierarchy["Pelvis"]
     blender_bone.rotation_quaternion = calculate_rotation(mocap_bone, live_quaternion)
 
-    try:
-        from . import file_logger
-        if file_logger.is_open():
-            q = blender_bone.rotation_quaternion
-            loc = blender_bone.location
-            file_logger.log(
-                f"[bone_world] bone=Pelvis loc={loc.x:.6f},{loc.y:.6f},{loc.z:.6f} "
-                f"quat={q.w:.6f},{q.x:.6f},{q.y:.6f},{q.z:.6f}"
-            )
-    except Exception:
-        pass
-
 
 def apply_quaterion_to_children(mocap_pose: MocapPose, bone: Bone, armature: bpy.types.Object) -> bpy.types.Object:
     """
@@ -100,17 +88,6 @@ def apply_quaterion_to_children(mocap_pose: MocapPose, bone: Bone, armature: bpy
     blender_bone = bpy.data.objects[armature.name].pose.bones[bone.name]
     blender_bone.rotation_mode = "QUATERNION"
     blender_bone.rotation_quaternion = target_bone_local_quaternion
-
-    try:
-        from . import file_logger
-        if file_logger.is_open():
-            q = target_bone_local_quaternion
-            file_logger.log(
-                f"[bone_local] bone={bone.name} "
-                f"quat={q.w:.6f},{q.x:.6f},{q.y:.6f},{q.z:.6f}"
-            )
-    except Exception:
-        pass
 
 
 def apply_transform_to_prop_empty(mocap_pose: MocapPose, bone_name: str):
@@ -199,25 +176,8 @@ def calculate_rotation(mocap_bone, t_quaternion):
     Adjusts the target quaternion to match the Blender's coordinate system based on the
     bone's name. The adjusted quaternion is then returned.
     """
-    try:
-        from . import file_logger
-        _log_open = file_logger.is_open()
-    except Exception:
-        _log_open = False
-
     def _emit(rule_name: str, q_out):
-        if not _log_open:
-            return
-        try:
-            from . import file_logger
-            file_logger.log(
-                f"[rule] bone={mocap_bone.name} rule={rule_name} "
-                f"in={t_quaternion[0]:.6f},{t_quaternion[1]:.6f},"
-                f"{t_quaternion[2]:.6f},{t_quaternion[3]:.6f} "
-                f"out={q_out[0]:.6f},{q_out[1]:.6f},{q_out[2]:.6f},{q_out[3]:.6f}"
-            )
-        except Exception:
-            pass
+        return
 
     if not mocap_bone.delta_quaternion:
         new_quaternion = t_quaternion

@@ -13,6 +13,62 @@ import bpy
 from .pose import MocapPose
 from . import source_manager, source_animator, file_logger
 
+_FOX_SEG_NAMES = (
+    "pelvis", "l5", "l3", "t12", "t8", "neck", "head",
+    "r_shoulder", "r_upper_arm", "r_forearm", "r_hand",
+    "l_shoulder", "l_upper_arm", "l_forearm", "l_hand",
+    "r_upper_leg", "r_lower_leg", "r_foot", "r_toe",
+    "l_upper_leg", "l_lower_leg", "l_foot", "l_toe",
+)
+
+_LAST_SNAPSHOT_T: float = 0.0
+_SNAPSHOT_INTERVAL_SEC: float = 0.5
+
+
+def _read_logging_config() -> tuple:
+    import configparser
+    from pathlib import Path
+    interval = 0.5
+    max_mb = 10.0
+    precision_dec = 3
+    try:
+        cfg_path = Path(__file__).parent / "config.ini"
+        cfg = configparser.ConfigParser()
+        cfg.read(cfg_path)
+        if "LOGGING" in cfg:
+            section = cfg["LOGGING"]
+            interval = float(section.get("snapshot_interval_sec", "0.5"))
+            max_mb = float(section.get("max_size_mb", "10"))
+            precision_dec = int(section.get("precision", "3"))
+    except Exception:
+        pass
+    interval = max(0.05, interval)
+    max_mb = max(0.1, max_mb)
+    precision_dec = max(1, min(6, precision_dec))
+    return interval, max_mb, precision_dec
+
+
+def _emit_snapshot_if_due(quaternion_message: list, sample: int) -> None:
+    global _LAST_SNAPSHOT_T
+    if not quaternion_message:
+        return
+    if not file_logger.is_open():
+        return
+    now = time.monotonic()
+    if now - _LAST_SNAPSHOT_T < _SNAPSHOT_INTERVAL_SEC:
+        return
+    _LAST_SNAPSHOT_T = now
+    rows = []
+    for entry in quaternion_message:
+        seg_id_raw = entry[0]
+        idx = int(seg_id_raw) - 1
+        if idx < 0 or idx >= len(_FOX_SEG_NAMES):
+            continue
+        px, py, pz, qw, qx, qy, qz = (float(x) for x in entry[1:8])
+        rows.append((idx, _FOX_SEG_NAMES[idx], (qw, qx, qy, qz), (px, py, pz)))
+    if rows:
+        file_logger.log_snapshot(int(sample), time.time(), rows)
+
 # ===========================================================================================
 HEADER_LENGTH = 24
 MAX_PACKET_SIZE = 4096
@@ -139,19 +195,6 @@ def process_messages(udp_socket: socket.socket, previous_session_target_map: dic
             if not encoded_data:
                 continue
 
-            # Raw-arrival breadcrumb — proves the socket received bytes
-            # BEFORE anything in decode_* runs. Without this we cannot tell
-            # whether a quiet alllog.txt means "no UDP packets" or "decode
-            # crashed silently".
-            if file_logger.is_open():
-                head = encoded_data[:6]
-                try:
-                    msg_id = head.decode("ascii", errors="replace")
-                except Exception:
-                    msg_id = repr(head)
-                file_logger.log(
-                    f"[raw] t={time.time():.6f} bytes={len(encoded_data)} id={msg_id}")
-
             try:
                 process_message(encoded_data, previous_session_target_map)
             except Exception as exc:
@@ -196,28 +239,10 @@ def decode_quaternion_message(encoded_data: bytes, number_of_items: int) -> list
     data_layout: str = POSE_QUATERNION_DATA_LAYOUT
     segment_length: int = POSE_QUATERNION_LENGTH
 
-    # Pull the datagram counter (a.k.a. sample id) out of the header so each
-    # [recv] line in alllog.txt can be joined frame-for-frame against
-    # Fox Mocap's [send] dump.
-    sample = 0
-    try:
-        sample = struct.unpack(HEADER_DATA_LAYOUT, encoded_data[:HEADER_LENGTH])[1]
-    except Exception:
-        pass
-    ts = time.time()
-    is_logging = file_logger.is_open()
-
     for _ in range(number_of_items):
         data = encoded_data[current_byte_index : current_byte_index + segment_length]
         segment_data = struct.unpack(data_layout, data)
         quaternion_data.append(segment_data)
-        if is_logging:
-            # MXTP02 layout: segId, px, py, pz, qw, qx, qy, qz (1-based segId).
-            seg_id, px, py, pz, qw, qx, qy, qz = segment_data
-            file_logger.log(
-                f"[recv] t={ts:.6f} sample={sample} seg={seg_id - 1} "
-                f"quat={qw:.6f},{qx:.6f},{qy:.6f},{qz:.6f} "
-                f"pos={px:.6f},{py:.6f},{pz:.6f}")
         current_byte_index += segment_length
 
     return quaternion_data
@@ -239,12 +264,13 @@ def apply_quaternion_message(mocap_pose: MocapPose, quaternion_message: list) ->
     """
     mocap_pose.quaternion_message = quaternion_message
 
-    if file_logger.is_open() and quaternion_message:
-        first_seg = quaternion_message[0][0]  # raw segId of frame's first segment
-        file_logger.log(
-            f"[apply] t={time.time():.6f} char={mocap_pose.character_id} "
-            f"items={len(quaternion_message)} first_seg={first_seg} "
-            f"object_cluster={int(mocap_pose.is_object_cluster)}")
+    if quaternion_message:
+        sample_id = 0
+        try:
+            sample_id = int(getattr(mocap_pose, "sample_counter", 0) or 0)
+        except Exception:
+            sample_id = 0
+        _emit_snapshot_if_due(quaternion_message, sample_id)
 
     # Log-only mode: cross-log diff tests do not need the visual armature
     # update, and the official apply path crashes Blender when the scene
@@ -679,13 +705,19 @@ def start_receiver(ip_address: str, port_number: int, previous_session_target_ma
         pass
     if want_test_log:
         try:
-            path = file_logger.start_logging()
+            global _SNAPSHOT_INTERVAL_SEC, _LAST_SNAPSHOT_T
+            interval, max_mb, precision_dec = _read_logging_config()
+            _SNAPSHOT_INTERVAL_SEC = interval
+            _LAST_SNAPSHOT_T = 0.0
+            path = file_logger.start_logging(
+                max_size_mb=max_mb, precision=precision_dec)
             bpy.ops.logging.logger(
                 "INVOKE_DEFAULT", message_type="INFO",
                 message_text=f"alllog.txt → {path}")
             file_logger.log(
                 f"[start] host={ip_address} port={port_number} "
-                f"t={time.time():.6f}")
+                f"t={time.time():.6f} snapshot_interval={interval}s "
+                f"max_size_mb={max_mb} precision={precision_dec}")
         except Exception as e:
             bpy.ops.logging.logger(
                 "INVOKE_DEFAULT", message_type="WARNING",

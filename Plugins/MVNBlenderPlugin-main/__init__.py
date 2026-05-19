@@ -46,7 +46,7 @@ bl_info = {
     "name": "MVN Live Plugin",
     "description": "MVN Animate Blender Integration",
     "author": "SuperAlloy Interactive",
-    "version": (1, 0, 0),
+    "version": (1, 2, 0),
     "blender": (3, 6, 0),
     "location": "View3D > Sidebar > Xsens",
     # "warning": "warning info",
