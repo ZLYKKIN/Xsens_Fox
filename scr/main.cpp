@@ -8154,6 +8154,24 @@ static Quat conjugateNwuToMvn(const Quat& q, LiveTarget target)
     return q;  // UE LiveLink: identity.
 }
 
+// FIX (stream polish): hex-dump первого фрейма для verification против
+// MVN spec.  Печатается в stdout, читается совместно с логом и tcpdump.
+static void dumpFirstFrameHex(const char* tag, const QByteArray& pkt)
+{
+    std::cout << "[stream first-frame hex] " << tag << " bytes="
+              << pkt.size() << "\n";
+    const int n = std::min(pkt.size(), qsizetype(24 + 64));  // header + 2 segs max
+    std::cout << "  hex:";
+    for (int i = 0; i < n; ++i) {
+        if (i % 16 == 0) std::cout << "\n    ";
+        char buf[4];
+        std::snprintf(buf, sizeof(buf), "%02x ",
+                      static_cast<unsigned>(static_cast<unsigned char>(pkt[i])));
+        std::cout << buf;
+    }
+    std::cout << "\n";
+}
+
 struct LiveStreamSender::Impl {
     QUdpSocket   sock;
     QHostAddress host;
@@ -8161,6 +8179,7 @@ struct LiveStreamSender::Impl {
     QElapsedTimer timer;
     QByteArray   metaPkt;
     QByteArray   scalePkt;
+    bool         firstFrameDumped = false;
     quint64      framesSinceHandshake = 0;
     qint64       lastEmitMs = -1;
 
@@ -8357,7 +8376,12 @@ void LiveStreamSender::pushFrame(quint32 sample,
     }
     QByteArray hdr = buildMxtpHeader("02", sample, 0x80,
                                      quint8(kXsensSegmentCount), ft, 23, 0);
-    m_impl->sock.writeDatagram(hdr + body, m_impl->host, m_impl->port);
+    const QByteArray pkt = hdr + body;
+    if (m_cfg.debugDumpFirstFrame && !m_impl->firstFrameDumped) {
+        dumpFirstFrameHex("MXTP02 body-only", pkt);
+        m_impl->firstFrameDumped = true;
+    }
+    m_impl->sock.writeDatagram(pkt, m_impl->host, m_impl->port);
 }
 
 void LiveStreamSender::pushFrameWithGloves(quint32 sample,
@@ -8471,16 +8495,30 @@ void LiveStreamSender::pushFrameWithGloves(quint32 sample,
         QByteArray hdrBody = buildMxtpHeader("02", sample, 0x00,
                                              quint8(bodyCount),
                                              ft, bodyCount, fingerCount);
-        m_impl->sock.writeDatagram(hdrBody + bodyOnly, m_impl->host, m_impl->port);
+        const QByteArray pkt1 = hdrBody + bodyOnly;
+        if (m_cfg.debugDumpFirstFrame && !m_impl->firstFrameDumped) {
+            dumpFirstFrameHex("MXTP02 split body (1/2)", pkt1);
+        }
+        m_impl->sock.writeDatagram(pkt1, m_impl->host, m_impl->port);
         QByteArray hdrFingers = buildMxtpHeader("02", sample, 0x81,
                                                 quint8(fingerCount),
                                                 ft, bodyCount, fingerCount);
-        m_impl->sock.writeDatagram(hdrFingers + fingerOnly, m_impl->host, m_impl->port);
+        const QByteArray pkt2 = hdrFingers + fingerOnly;
+        if (m_cfg.debugDumpFirstFrame && !m_impl->firstFrameDumped) {
+            dumpFirstFrameHex("MXTP02 split fingers (2/2)", pkt2);
+            m_impl->firstFrameDumped = true;
+        }
+        m_impl->sock.writeDatagram(pkt2, m_impl->host, m_impl->port);
     } else {
         QByteArray hdr = buildMxtpHeader("02", sample, 0x80,
                                          quint8(bodyCount + fingerCount),
                                          ft, bodyCount, fingerCount);
-        m_impl->sock.writeDatagram(hdr + body, m_impl->host, m_impl->port);
+        const QByteArray pkt = hdr + body;
+        if (m_cfg.debugDumpFirstFrame && !m_impl->firstFrameDumped) {
+            dumpFirstFrameHex("MXTP02 combined", pkt);
+            m_impl->firstFrameDumped = true;
+        }
+        m_impl->sock.writeDatagram(pkt, m_impl->host, m_impl->port);
     }
 }
 
@@ -9481,6 +9519,12 @@ MainWindow::MainWindow(MocapReceiver* rx,
     if (m_test) {
         LiveSettings cfg;
         cfg.useGloves = m_setup.useGloves;
+        // FIX (stream polish): в -test режиме всегда target=BlenderMVN
+        // (соответствует требованию задачи "если -test → стримим в Blender"),
+        // и включаем одноразовый hex-dump первого фрейма для byte-уровня
+        // verification.
+        cfg.target              = LiveTarget::BlenderMVN;
+        cfg.debugDumpFirstFrame = true;
         if (m_skel) {
             std::array<Quat, kXsensSegmentCount> identity{};
             for (auto& qq : identity) qq = Quat(1, 0, 0, 0);

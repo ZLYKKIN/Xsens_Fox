@@ -1153,6 +1153,11 @@ struct LiveSettings {
     // MXTP dgCounter splitting (bit 7 = last).  Оставлено в false до verify
     // что Blender plugin handles multi-datagram reassembly.
     bool          splitGloveDatagrams = false;
+    // FIX (stream polish): однократный hex-dump первого MXTP02 фрейма в
+    // stdout — для byte-уровня проверки против MVN протокол spec.
+    // Используется в -test режиме для diff против известного хорошего
+    // MVN Animate output.
+    bool          debugDumpFirstFrame = false;
     // T-pose origin position (meters) for each of 23 Xsens body segments.
     // Plugin (LiveLinkMvnSource) кладёт это в FTransform.Scale3D и потом
     // ULiveLinkMvnRetargetAsset делит unrealLength/xsensLength для масштаба
