@@ -2394,6 +2394,18 @@ struct ManusErgoSnapshot {
 };
 static ManusErgoSnapshot g_ergo;
 
+// FIX (gloves polish): per-actor finger baseline захваченный в T-pose
+// калибровке.  parseErgoHand вычитает baseline[i] из raw[i] (signed
+// для spread, flex обрезается клампами в kFingerLimits).  Включается
+// после MainWindow ctor; если baselineValid=false — старое поведение.
+struct FingerBaselineState {
+    QMutex lock;
+    std::array<float, 20> left  {};
+    std::array<float, 20> right {};
+    std::atomic<bool> valid { false };
+};
+static FingerBaselineState g_fingerBaseline;
+
 // Per-finger bone lengths in metres — approximate adult-male anatomy.
 // kFingerBoneLen[finger][joint].  joint 0 = MCP/CMC, joint 3 = tip.
 static const double kFingerBoneLen[5][4] = {
@@ -2478,6 +2490,22 @@ static void parseErgoHand(const float* degs20, bool isLeft,
     const QVector3D spreadAx (0, 0, 1);
     const double sideSign = isLeft ? -1.0 : +1.0;
 
+    // FIX (gloves polish): finger baseline subtraction.  T-pose calibration
+    // прокапывает avg degrees когда actor стоит ладонями вниз с прямыми
+    // пальцами.  Эти значения и есть "neutral / zero".  Без вычитания
+    // glove-specific bias (например MCP=15° по умолчанию) интерпретируется
+    // как "actor с согнутыми пальцами" — отсюда визуально согнутые finger
+    // даже когда они прямые.
+    float effective[20];
+    const float* effectivePtr = degs20;
+    if (g_fingerBaseline.valid.load()) {
+        QMutexLocker lkBL(&g_fingerBaseline.lock);
+        const auto& baseline = isLeft ? g_fingerBaseline.left
+                                      : g_fingerBaseline.right;
+        for (int i = 0; i < 20; ++i) effective[i] = degs20[i] - baseline[i];
+        effectivePtr = effective;
+    }
+
     // ============================================================
     // FIX: thumb-specific pre-rotation для CMC (Carpometacarpal).
     //
@@ -2542,7 +2570,7 @@ static void parseErgoHand(const float* degs20, bool isLeft,
     ).normalized();
 
     for (int f = 0; f < 5; ++f) {
-        const float* d = degs20 + f * 4;
+        const float* d = effectivePtr + f * 4;
         const double spread = d[0] * M_PI / 180.0;
         const double a1     = d[1] * M_PI / 180.0;
         const double a2     = d[2] * M_PI / 180.0;
@@ -5228,6 +5256,12 @@ void NewSessionWizard::onCalibrationBegin()
             m_magOuterAccumK[i][k] = 0.0;
         }
     }
+    // FIX (gloves polish): finger baseline accumulator также сбросить.
+    for (int j = 0; j < 20; ++j) {
+        m_fingerAccumR[j] = 0.0;
+        m_fingerAccumL[j] = 0.0;
+    }
+    m_fingerAccumCount = 0;
 
     // Bind pointer aliases to the T-pose buffers (CaptureT writes through
     // these so the capture loop stays pose-agnostic).
@@ -5355,6 +5389,23 @@ void NewSessionWizard::onCaptureTick()
             }
         }
         ++m_goodSamples;
+        // FIX (gloves polish): копим Manus finger degrees ТОЛЬКО в T-pose.
+        // Используем уже EMA-сглаженные значения из g_ergo, чтобы не
+        // удваивать LP-фильтрацию.  Lock мьютекса g_ergo короткий.
+        if (m_phase == CalibPhase::CaptureT) {
+            QMutexLocker lkErgo(&g_ergo.lock);
+            if (g_ergo.emaLeftInit) {
+                for (int j = 0; j < 20; ++j)
+                    m_fingerAccumL[j] += double(g_ergo.emaLeft[j]);
+            }
+            if (g_ergo.emaRightInit) {
+                for (int j = 0; j < 20; ++j)
+                    m_fingerAccumR[j] += double(g_ergo.emaRight[j]);
+            }
+            if (g_ergo.emaLeftInit || g_ergo.emaRightInit) {
+                ++m_fingerAccumCount;
+            }
+        }
         m_stillLabel->setStyleSheet("color:#2EC25A; font-weight:700;");
         m_stillLabel->setText(Lang::t("motion_hint") + " "
             + Lang::t("still") + QString("  (%1°)")
@@ -5393,6 +5444,28 @@ void NewSessionWizard::onCaptureTick()
             }
             m_result.tposePelvisPos = QVector3D(0.0f, 0.0f, 0.0f);
             m_result.tposeCaptured = true;
+        }
+
+        // FIX (gloves polish): финализируем finger baseline.  Делим
+        // накопленную сумму на m_fingerAccumCount, копируем в Result.
+        // Если actor без перчаток — g_ergo.emaLeftInit/RightInit = false
+        // → counter остаётся 0 → branch скипается.
+        if (m_fingerAccumCount > 0) {
+            const double inv = 1.0 / double(m_fingerAccumCount);
+            for (int j = 0; j < 20; ++j) {
+                m_result.fingerBaselineR[j] = float(m_fingerAccumR[j] * inv);
+                m_result.fingerBaselineL[j] = float(m_fingerAccumL[j] * inv);
+            }
+            m_result.fingerBaselineCaptured = true;
+            if (m_test) {
+                std::cout << "[calib T finger baseline] count="
+                          << m_fingerAccumCount << " R thumb spread/MCP="
+                          << m_result.fingerBaselineR[0] << "/"
+                          << m_result.fingerBaselineR[1]
+                          << " L thumb spread/MCP="
+                          << m_result.fingerBaselineL[0] << "/"
+                          << m_result.fingerBaselineL[1] << "\n";
+            }
         }
 
         m_phase = CalibPhase::SettleT;
@@ -9279,6 +9352,19 @@ MainWindow::MainWindow(MocapReceiver* rx,
                 m_setup.tposeReference[SEG_RHand],
                 m_setup.tposeReference[SEG_LForearm],
                 m_setup.tposeReference[SEG_LHand]);
+        }
+
+        // FIX (gloves polish): установить per-actor finger baseline,
+        // захваченный в T-pose (расслабленные пальцы ладонями вниз).
+        // parseErgoHand читает g_fingerBaseline и вычитает baseline
+        // из raw degrees — finger "ноль" теперь анатомически правильный.
+        if (m_setup.fingerBaselineCaptured) {
+            QMutexLocker lkBL(&g_fingerBaseline.lock);
+            for (int i = 0; i < 20; ++i) {
+                g_fingerBaseline.left[i]  = m_setup.fingerBaselineL[i];
+                g_fingerBaseline.right[i] = m_setup.fingerBaselineR[i];
+            }
+            g_fingerBaseline.valid.store(true);
         }
 
         std::array<Quat, kXsensSegmentCount> baselineCand{};

@@ -654,6 +654,16 @@ public:
         std::array<Quat, kXsensSegmentCount> tposeReference{};
         QVector3D                            tposePelvisPos{};
         bool                                 tposeCaptured = false;
+        // FIX (gloves polish): finger ergonomics averaged during T-pose.
+        // Каждый float — угол в градусах: layout =
+        // [thumb spread, thumb MCP, thumb PIP, thumb DIP, index spread,
+        //  index MCP, ..., pinky DIP].  Используется в parseErgoHand как
+        // "neutral" — runtime раздаёт effective = raw - baseline, что
+        // компенсирует встроенный bias glove'а под конкретного актёра.
+        // Zero-init = baseline отсутствует = старое поведение.
+        std::array<float, 20> fingerBaselineR{};
+        std::array<float, 20> fingerBaselineL{};
+        bool                  fingerBaselineCaptured = false;
     };
 
     NewSessionWizard(MocapReceiver* rx, bool testMode, QWidget* parent=nullptr);
@@ -768,6 +778,14 @@ private:
     std::array<QVector3D, kXsensSegmentCount> m_magAccumT{};
     std::array<double,    kXsensSegmentCount> m_accMagAccumT{};
     std::array<int,       kXsensSegmentCount> m_accumCountT{};
+
+    // FIX (gloves polish): finger ergonomics accumulators (T-pose only).
+    // На каждом good-frame копится сумма Manus EMA-smoothed degrees,
+    // а в момент CaptureT-завершения делится на m_fingerAccumCount
+    // → записывается в m_result.fingerBaselineR/L.
+    std::array<double, 20> m_fingerAccumR{};
+    std::array<double, 20> m_fingerAccumL{};
+    int                    m_fingerAccumCount = 0;
 
     std::array<QVector3D, kXsensSegmentCount> m_accAccumN{};
     std::array<QVector3D, kXsensSegmentCount> m_gyrAccumN{};
