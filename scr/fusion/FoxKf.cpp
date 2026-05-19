@@ -103,6 +103,10 @@ void FoxKf::setPrior(const Quat4& qWorldBody, const Vec3& biasInit,
     Vec3  bNew = biasInit;
     if (!isFiniteQuat(qNew)) qNew = Quat4{1.0f, 0.0f, 0.0f, 0.0f};
     if (!isFiniteVec(bNew))  bNew = Vec3{0.0f, 0.0f, 0.0f};
+    const float biasLim = m_set.maxBiasRadPerSec;
+    bNew[0] = bNew[0] > biasLim ? biasLim : (bNew[0] < -biasLim ? -biasLim : bNew[0]);
+    bNew[1] = bNew[1] > biasLim ? biasLim : (bNew[1] < -biasLim ? -biasLim : bNew[1]);
+    bNew[2] = bNew[2] > biasLim ? biasLim : (bNew[2] < -biasLim ? -biasLim : bNew[2]);
     m_q = qNew;
     m_b = bNew;
     const float aDeg = (orientStdDeg < 0.0f) ? m_set.initOrientStdDeg : orientStdDeg;
@@ -169,6 +173,10 @@ void FoxKf::predict(const Vec3& gyrRadPerSec, float dt) {
     }
 }
 
+static inline float clampBiasRadPerSec(float v, float lim) {
+    return v > lim ? lim : (v < -lim ? -lim : v);
+}
+
 void FoxKf::updateAcc(const Vec3& accUnitG) {
     if (!isFiniteVec(accUnitG)) return;
     m_lastAcc = accUnitG;
@@ -200,7 +208,12 @@ void FoxKf::updateAcc(const Vec3& accUnitG) {
     const V3 dBias  = dx.tail<3>();
     if (dTheta.norm() > m_set.dthetaSanityRad) return;
     m_q = toQuat4(expSO3(dTheta) * toQf(m_q));
-    m_b = Vec3{m_b[0] + dBias.x(), m_b[1] + dBias.y(), m_b[2] + dBias.z()};
+    const float biasLim = m_set.maxBiasRadPerSec;
+    m_b = Vec3{
+        clampBiasRadPerSec(m_b[0] + dBias.x(), biasLim),
+        clampBiasRadPerSec(m_b[1] + dBias.y(), biasLim),
+        clampBiasRadPerSec(m_b[2] + dBias.z(), biasLim)
+    };
 
     const Mat6 IKH = Mat6::Identity() - K * H;
     P = IKH * P * IKH.transpose() + rA * (K * K.transpose());
@@ -265,7 +278,12 @@ void FoxKf::updateMag(const Vec3& magUnit) {
     const V3 dBias  = dx.tail<3>();
     if (dTheta.norm() > m_set.dthetaSanityRad) return;
     m_q = toQuat4(expSO3(dTheta) * toQf(m_q));
-    m_b = Vec3{m_b[0] + dBias.x(), m_b[1] + dBias.y(), m_b[2] + dBias.z()};
+    const float biasLim = m_set.maxBiasRadPerSec;
+    m_b = Vec3{
+        clampBiasRadPerSec(m_b[0] + dBias.x(), biasLim),
+        clampBiasRadPerSec(m_b[1] + dBias.y(), biasLim),
+        clampBiasRadPerSec(m_b[2] + dBias.z(), biasLim)
+    };
 
     const Mat6 IKH = Mat6::Identity() - K * H;
     P = IKH * P * IKH.transpose() + rM * (K * K.transpose());
@@ -296,7 +314,12 @@ void FoxKf::updateZupt() {
     const V3 dTheta = dx.head<3>();
     if (dTheta.norm() > m_set.dthetaSanityRad) return;
     m_q = toQuat4(expSO3(dTheta) * toQf(m_q));
-    m_b = Vec3{m_b[0] + dx[3], m_b[1] + dx[4], m_b[2] + dx[5]};
+    const float biasLim = m_set.maxBiasRadPerSec;
+    m_b = Vec3{
+        clampBiasRadPerSec(m_b[0] + dx[3], biasLim),
+        clampBiasRadPerSec(m_b[1] + dx[4], biasLim),
+        clampBiasRadPerSec(m_b[2] + dx[5], biasLim)
+    };
 
     const Mat6 IKH = Mat6::Identity() - K * H;
     P = IKH * P * IKH.transpose() + r * (K * K.transpose());

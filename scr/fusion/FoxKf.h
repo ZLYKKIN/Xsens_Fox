@@ -58,6 +58,7 @@ struct FoxKfSettings {
     float biasAnchorRate        = 0.01f;
     int   biasAnchorFrames      = 5400;
     float dthetaSanityRad       = 3.14159265f;
+    float maxBiasRadPerSec      = 0.0873f;
 };
 
 class FoxKf {
