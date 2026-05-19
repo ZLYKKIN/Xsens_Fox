@@ -55,10 +55,28 @@ struct FoxKfSettings {
     float magDisableResidualDeg = 25.0f;
     int   magDisableHoldFrames  = 30;
     float magReenableResidual   = 0.15f;
-    float biasAnchorRate        = 0.01f;
-    int   biasAnchorFrames      = 5400;
+    // Bias-anchor: when no ZUPT has fired for `biasAnchorFrames` ticks,
+    // gently pull the live bias estimate back toward the last ZUPT snapshot
+    // at `biasAnchorRate` per frame.  Previously 5400 frames (≈ 22 s at
+    // 240 Hz) was too long: active limbs that rarely satisfy the strict
+    // ZUPT thresholds never recover before their bias rails at
+    // ±maxBiasRadPerSec, which then integrates into uncorrectable yaw drift.
+    // 1800 frames (≈ 7.5 s) + rate 0.02 lets bias return to the anchor
+    // within a few seconds of mild motion without disturbing well-anchored
+    // sensors (rate is a fraction × dt, so a settled bias stays settled).
+    float biasAnchorRate        = 0.02f;
+    int   biasAnchorFrames      = 1800;
     float dthetaSanityRad       = 3.14159265f;
     float maxBiasRadPerSec      = 0.0873f;
+    // Soft-stillness thresholds: a 4× looser version of the strict ZUPT
+    // gate, used by isSoftStationary() as a hint that the segment is
+    // approximately at rest even if it hasn't satisfied the tight 0.05
+    // rad/s + 0.03 g thresholds.  Consumers (skeletal-closure / yaw-anchor
+    // second layer in main.cpp) use this to gently re-align segments
+    // without freezing them.
+    float softOmegaThresh       = 0.20f;
+    float softAccThresh         = 0.10f;
+    int   softHoldFrames        = 15;
 };
 
 class FoxKf {
@@ -85,7 +103,9 @@ public:
     float orientStdDeg() const;
     float biasStd()      const;
     bool  isStationary() const { return m_still; }
+    bool  isSoftStationary() const { return m_softStill; }
     bool  magDisabled()  const { return m_magDisabled; }
+    float magResidLp()   const { return m_magResidLp; }
     int   autoResetCount() const { return m_autoResetCount; }
 
 private:
@@ -95,6 +115,8 @@ private:
     float m_P[36]{};                          // 6×6 covariance — opaque
     bool  m_still           = false;
     int   m_stillTicks      = 0;
+    bool  m_softStill       = false;
+    int   m_softStillTicks  = 0;
     Vec3  m_lastGyrCorrected{0.0f, 0.0f, 0.0f};
     Vec3  m_lastAcc         {0.0f, 0.0f, 0.0f};
     float m_magResidLp      = 0.0f;
