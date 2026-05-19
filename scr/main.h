@@ -986,6 +986,11 @@ private:
     std::array<Quat, kXsensSegmentCount>   m_anchorLocal{};
     std::array<bool, kXsensSegmentCount>   m_anchorValid{};
     std::array<Quat, kXsensSegmentCount>   m_driftLocal{};
+    // FIX issue 11/7: время непрерывной "тишины" сегмента (allCalm).
+    // Когда сегмент 5+ секунд спокоен — применяем дополнительную damped
+    // twist коррекцию (для wrist в issue 11) или yaw-коррекцию (для foot
+    // в issue 7), чтобы убрать накопленный gyro дрейф.
+    std::array<double, kXsensSegmentCount> m_calmSeconds{};
     bool                                    m_havePrevQ = false;
     double                                  m_lastRenderT = 0.0;
 

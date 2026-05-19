@@ -7305,6 +7305,13 @@ void MocapViewport::updatePose(const std::array<Quat, kXsensSegmentCount>& orien
                 const bool calmPelvis = pelvisYawRate < 0.20;
                 const bool allCalm = calmHand && calmFA && calmPelvis;
 
+                // FIX issue 11: счётчик "спокойствия" — растёт пока allCalm
+                // держится непрерывно.  При >=5 сек применяем доп. damped
+                // twist коррекцию (она снижает накопленный yaw дрейф вокруг
+                // продольной оси предплечья).
+                if (allCalm) m_calmSeconds[i] += dt;
+                else         m_calmSeconds[i] = 0.0;
+
                 const Quat dA_h = m_skel ? m_skel->defAngFor(i)        : Quat(1, 0, 0, 0);
                 const Quat dA_f = m_skel ? m_skel->defAngFor(iForearm) : Quat(1, 0, 0, 0);
                 const Quat hWorld = quat_mult(orient[i],        dA_h).normalized();
@@ -7324,7 +7331,10 @@ void MocapViewport::updatePose(const std::array<Quat, kXsensSegmentCount>& orien
                     }
                     const double sw = std::min(1.0, std::abs(drift.w));
                     const double driftAngle = 2.0 * std::acos(sw);
-                    const double driftBudget = M_PI / 4.0;
+                    // FIX issue 11: бюджет 45°→30°.  Wrist в покое редко
+                    // отклоняется от anchor>30°; сужение даёт быстрее
+                    // отрабатывать "медленное плавание" кисти.
+                    const double driftBudget = M_PI / 6.0;
 
                     if (allCalm && driftAngle < driftBudget) {
                         const double alpha = std::min(1.0, dt / 3.0);
@@ -7343,6 +7353,20 @@ void MocapViewport::updatePose(const std::array<Quat, kXsensSegmentCount>& orien
                         const Quat correctionWorld = quat_mult(fWorld, quat_mult(dLSwingInv, fWorld.inv())).normalized();
                         const Quat hCorrectedWorld = quat_mult(correctionWorld, hWorld).normalized();
                         filtered[i] = quat_mult(hCorrectedWorld, dA_h.inv()).normalized();
+
+                        // FIX issue 11: damped twist correction при долгой
+                        // стабильности.  Берём 50% твист-коррекции —
+                        // полная может резко крутнуть thumb при дрейфе на
+                        // границе бюджета.  Только когда allCalm >= 5s.
+                        if (m_calmSeconds[i] >= 5.0) {
+                            const Quat dLTwistInv = dLTwist.inv();
+                            const Quat twistWorld = quat_mult(fWorld,
+                                                       quat_mult(dLTwistInv, fWorld.inv())).normalized();
+                            const Quat twistHalf  = slerp_quat(Quat(1,0,0,0), twistWorld, 0.5);
+                            const Quat hWithTwist = quat_mult(twistHalf,
+                                                       quat_mult(filtered[i], dA_h)).normalized();
+                            filtered[i] = quat_mult(hWithTwist, dA_h.inv()).normalized();
+                        }
                     }
                 }
                 const auto& cfg = (i == SEG_RHand) ? m_wristCfgR : m_wristCfgL;
@@ -7564,6 +7588,42 @@ void MocapViewport::drawSkeleton()
     // Cache the final on-screen pelvis so the Reset button can zero out XY
     // on the next click without guessing the loco offset.
     m_lastRenderedPelvis = kp[SEG_Pelvis];
+
+    // FIX issue 6: prayer-pose сходимость кистей.  При drift'е wrist S2S
+    // кисти могут не сходиться точно когда пользователь складывает ладони.
+    // Если запястья ближе 15 cm И ладони смотрят друг на друга (палм-нормали
+    // противоположны), мягко притягиваем оба wrist к XY-серединой.
+    // Z не трогаем (не топим руки вниз).  Сила пропорциональна близости.
+    // Триггерится только в реальном prayer'е, не в обычных жестах.
+    {
+        const QVector3D pR = kp[SEG_RHand];
+        const QVector3D pL = kp[SEG_LHand];
+        const float d = (pR - pL).length();
+        constexpr float kPrayerRange = 0.15f;
+        if (d < kPrayerRange && d > 1e-3f) {
+            const Quat qRW = quat_mult(m_orient[SEG_RHand], m_skel->defAngFor(SEG_RHand));
+            const Quat qLW = quat_mult(m_orient[SEG_LHand], m_skel->defAngFor(SEG_LHand));
+            const QVector3D nR = vec_rotate(QVector3D(0, 1, 0), qRW);
+            const QVector3D nL = vec_rotate(QVector3D(0, 1, 0), qLW);
+            if (QVector3D::dotProduct(nR, nL) < -0.5f) {
+                const QVector3D mid = 0.5f * (pR + pL);
+                const float w = 0.15f * (1.0f - d / kPrayerRange);
+                const QVector3D shiftR(w * (mid.x() - pR.x()),
+                                       w * (mid.y() - pR.y()), 0.0f);
+                const QVector3D shiftL(w * (mid.x() - pL.x()),
+                                       w * (mid.y() - pL.y()), 0.0f);
+                // Применяем тот же сдвиг к wrist и кончику пальца (24/25),
+                // чтобы вся кисть двигалась как одно целое.  Пальцы рисуются
+                // от wrist+rel, поэтому они автоматически следуют.
+                kp[SEG_RHand] += shiftR;
+                kp[SEG_LHand] += shiftL;
+                if (kXsensKeypointCount >= 26) {
+                    kp[24] += shiftR;
+                    kp[25] += shiftL;
+                }
+            }
+        }
+    }
 
     // Bones (GL_LINES).  Orange.
     glLineWidth(3.0f);
