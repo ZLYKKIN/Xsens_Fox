@@ -1,16 +1,3 @@
-// ============================================================================
-//  FoxKf — Eigen-backed Multiplicative EKF for one Awinda tracker.
-//  See FoxKf.h for the architecture overview and state/measurement equations.
-//
-//  All linalg goes through Eigen's fixed-size types (no heap, no Dynamic).
-//  Covariance update is in Joseph form
-//      P ← (I - K H) P (I - K H)ᵀ + K R Kᵀ
-//  which is numerically stable under finite-precision arithmetic — it keeps
-//  P symmetric positive-semidefinite for ANY K (not just the optimal one),
-//  whereas the naive (I-KH)P form can drift to indefiniteness after enough
-//  updates and silently break the filter.
-// ============================================================================
-
 #include "FoxKf.h"
 
 #include <Eigen/Dense>
@@ -70,6 +57,18 @@ covView(const float* P) {
     return Eigen::Map<const Mat6, Eigen::Unaligned, Eigen::Stride<6, 1>>(P);
 }
 
+bool isFiniteQuat(const Quat4& q) {
+    return std::isfinite(q[0]) && std::isfinite(q[1])
+        && std::isfinite(q[2]) && std::isfinite(q[3]);
+}
+bool isFiniteVec(const Vec3& v) {
+    return std::isfinite(v[0]) && std::isfinite(v[1]) && std::isfinite(v[2]);
+}
+bool isFiniteCov(const float* P) {
+    for (int i = 0; i < 36; ++i) if (!std::isfinite(P[i])) return false;
+    return true;
+}
+
 }  // namespace
 
 FoxKf::FoxKf() { initialise(); }
@@ -91,12 +90,21 @@ void FoxKf::initialise(const FoxKfSettings& s) {
     m_stillTicks = 0;
     m_lastGyrCorrected = Vec3{0.0f, 0.0f, 0.0f};
     m_lastAcc          = Vec3{0.0f, 0.0f, 0.0f};
+    m_magResidLp      = 0.0f;
+    m_magDisableTicks = 0;
+    m_magDisabled     = false;
+    m_bSnap           = Vec3{0.0f, 0.0f, 0.0f};
+    m_framesSinceZupt = 0;
 }
 
 void FoxKf::setPrior(const Quat4& qWorldBody, const Vec3& biasInit,
                      float orientStdDeg, float biasStd) {
-    m_q = toQuat4(toQf(qWorldBody));
-    m_b = biasInit;
+    Quat4 qNew = toQuat4(toQf(qWorldBody));
+    Vec3  bNew = biasInit;
+    if (!isFiniteQuat(qNew)) qNew = Quat4{1.0f, 0.0f, 0.0f, 0.0f};
+    if (!isFiniteVec(bNew))  bNew = Vec3{0.0f, 0.0f, 0.0f};
+    m_q = qNew;
+    m_b = bNew;
     const float aDeg = (orientStdDeg < 0.0f) ? m_set.initOrientStdDeg : orientStdDeg;
     const float bStd = (biasStd      < 0.0f) ? m_set.initBiasStd      : biasStd;
     const float aRad = aDeg * kPiF / 180.0f;
@@ -105,11 +113,19 @@ void FoxKf::setPrior(const Quat4& qWorldBody, const Vec3& biasInit,
     P.setZero();
     P.diagonal().head<3>().setConstant(aRad * aRad);
     P.diagonal().tail<3>().setConstant(bStd * bStd);
+
+    m_bSnap = m_b;
+    m_framesSinceZupt = 0;
+    m_magResidLp = 0.0f;
+    m_magDisableTicks = 0;
+    m_magDisabled = false;
 }
 
 void FoxKf::predict(const Vec3& gyrRadPerSec, float dt) {
     if (dt <= 0.0f) return;
-    if (dt > 0.5f) dt = 0.5f;          // clamp pathological gaps
+    if (dt > 0.5f) dt = 0.5f;
+
+    if (!isFiniteVec(gyrRadPerSec)) return;
 
     const V3 w = toV3(gyrRadPerSec) - toV3(m_b);
     m_lastGyrCorrected = toVec3(w);
@@ -131,20 +147,35 @@ void FoxKf::predict(const Vec3& gyrRadPerSec, float dt) {
     P.diagonal().tail<3>().array() += qb;
     P = 0.5f * (P + P.transpose().eval());
 
+    if (m_framesSinceZupt < 2000000000) ++m_framesSinceZupt;
+    if (m_framesSinceZupt > m_set.biasAnchorFrames) {
+        const float k = std::min(1.0f, m_set.biasAnchorRate * dt);
+        m_b[0] = (1.0f - k) * m_b[0] + k * m_bSnap[0];
+        m_b[1] = (1.0f - k) * m_b[1] + k * m_bSnap[1];
+        m_b[2] = (1.0f - k) * m_b[2] + k * m_bSnap[2];
+    }
+
     const float wmag = w.norm();
     const float aMag = toV3(m_lastAcc).norm();
     const bool stillNow = (wmag < m_set.zuptOmegaThresh)
                        && (std::fabs(aMag - 1.0f) < m_set.zuptAccThresh);
     m_stillTicks = stillNow ? std::min(m_stillTicks + 1, 100000) : 0;
     m_still = (m_stillTicks >= m_set.zuptHoldFrames);
+
+    if (!isFiniteQuat(m_q) || !isFiniteVec(m_b) || !isFiniteCov(m_P)) {
+        const FoxKfSettings s = m_set;
+        initialise(s);
+        ++m_autoResetCount;
+    }
 }
 
 void FoxKf::updateAcc(const Vec3& accUnitG) {
+    if (!isFiniteVec(accUnitG)) return;
     m_lastAcc = accUnitG;
     const V3 a = toV3(accUnitG);
     const float mag = a.norm();
     const float err = std::fabs(mag - 1.0f);
-    if (err > m_set.accRejectG * 2.0f) return;           // hard skip on huge shock
+    if (err > m_set.accRejectG * 2.0f) return;
 
     float rScale = 1.0f + 9.0f * std::min(1.0f, err / std::max(1e-6f, m_set.accRejectG));
     if (err > m_set.accRejectG) rScale *= 1.0f + (err - m_set.accRejectG) * 20.0f;
@@ -167,28 +198,57 @@ void FoxKf::updateAcc(const Vec3& accUnitG) {
     const Vec6 dx = K * innov;
     const V3 dTheta = dx.head<3>();
     const V3 dBias  = dx.tail<3>();
+    if (dTheta.norm() > m_set.dthetaSanityRad) return;
     m_q = toQuat4(expSO3(dTheta) * toQf(m_q));
     m_b = Vec3{m_b[0] + dBias.x(), m_b[1] + dBias.y(), m_b[2] + dBias.z()};
 
     const Mat6 IKH = Mat6::Identity() - K * H;
     P = IKH * P * IKH.transpose() + rA * (K * K.transpose());
     P = 0.5f * (P + P.transpose().eval());
+
+    if (!isFiniteQuat(m_q) || !isFiniteVec(m_b) || !isFiniteCov(m_P)) {
+        const FoxKfSettings s = m_set;
+        initialise(s);
+        ++m_autoResetCount;
+    }
 }
 
 void FoxKf::updateMag(const Vec3& magUnit) {
+    if (!isFiniteVec(magUnit)) return;
     const V3 m = toV3(magUnit);
     const float mag = m.norm();
     const float err = std::fabs(mag - 1.0f);
     if (err > m_set.magRejectUnit * 2.0f) return;
-
-    float rScale = 1.0f + 9.0f * std::min(1.0f, err / std::max(1e-6f, m_set.magRejectUnit));
-    const float rM = m_set.magNoiseStd * m_set.magNoiseStd * rScale;
 
     const float cD = std::cos(m_set.magDipRad);
     const float sD = std::sin(m_set.magDipRad);
     const V3 mRefWorld(cD, 0.0f, -sD);
     const V3 mBody = rotateInv(toQf(m_q), mRefWorld);
     const V3 innov = m - mBody;
+    const float innovNorm = innov.norm();
+
+    const float thresh = std::sin(m_set.magDisableResidualDeg * kPiF / 180.0f);
+    if (m_magDisabled) {
+        m_magResidLp = 0.95f * m_magResidLp + 0.05f * innovNorm;
+        if (m_magResidLp < m_set.magReenableResidual) {
+            m_magDisabled = false;
+            m_magDisableTicks = 0;
+        }
+        return;
+    }
+    m_magResidLp = 0.9f * m_magResidLp + 0.1f * innovNorm;
+    if (m_magResidLp > thresh) {
+        ++m_magDisableTicks;
+        if (m_magDisableTicks > m_set.magDisableHoldFrames) {
+            m_magDisabled = true;
+            return;
+        }
+    } else {
+        m_magDisableTicks = std::max(0, m_magDisableTicks - 1);
+    }
+
+    float rScale = 1.0f + 9.0f * std::min(1.0f, err / std::max(1e-6f, m_set.magRejectUnit));
+    const float rM = m_set.magNoiseStd * m_set.magNoiseStd * rScale;
 
     Mat36 H = Mat36::Zero();
     H.block<3, 3>(0, 0) = skew(mBody);
@@ -203,17 +263,24 @@ void FoxKf::updateMag(const Vec3& magUnit) {
     const Vec6 dx = K * innov;
     const V3 dTheta = dx.head<3>();
     const V3 dBias  = dx.tail<3>();
+    if (dTheta.norm() > m_set.dthetaSanityRad) return;
     m_q = toQuat4(expSO3(dTheta) * toQf(m_q));
     m_b = Vec3{m_b[0] + dBias.x(), m_b[1] + dBias.y(), m_b[2] + dBias.z()};
 
     const Mat6 IKH = Mat6::Identity() - K * H;
     P = IKH * P * IKH.transpose() + rM * (K * K.transpose());
     P = 0.5f * (P + P.transpose().eval());
+
+    if (!isFiniteQuat(m_q) || !isFiniteVec(m_b) || !isFiniteCov(m_P)) {
+        const FoxKfSettings s = m_set;
+        initialise(s);
+        ++m_autoResetCount;
+    }
 }
 
 void FoxKf::updateZupt() {
     const V3 innov = -toV3(m_lastGyrCorrected);
-    const float r = m_set.gyroNoiseStd * m_set.gyroNoiseStd * 0.1f;  // tight measurement noise
+    const float r = m_set.gyroNoiseStd * m_set.gyroNoiseStd * 0.1f;
 
     Mat36 H = Mat36::Zero();
     H.block<3, 3>(0, 3) = -Mat3::Identity();
@@ -226,12 +293,23 @@ void FoxKf::updateZupt() {
     const Mat63 K = P * H.transpose() * Sinv;
 
     const Vec6 dx = K * innov;
-    m_q = toQuat4(expSO3(dx.head<3>()) * toQf(m_q));
+    const V3 dTheta = dx.head<3>();
+    if (dTheta.norm() > m_set.dthetaSanityRad) return;
+    m_q = toQuat4(expSO3(dTheta) * toQf(m_q));
     m_b = Vec3{m_b[0] + dx[3], m_b[1] + dx[4], m_b[2] + dx[5]};
 
     const Mat6 IKH = Mat6::Identity() - K * H;
     P = IKH * P * IKH.transpose() + r * (K * K.transpose());
     P = 0.5f * (P + P.transpose().eval());
+
+    m_bSnap = m_b;
+    m_framesSinceZupt = 0;
+
+    if (!isFiniteQuat(m_q) || !isFiniteVec(m_b) || !isFiniteCov(m_P)) {
+        const FoxKfSettings s = m_set;
+        initialise(s);
+        ++m_autoResetCount;
+    }
 }
 
 float FoxKf::orientStdDeg() const {

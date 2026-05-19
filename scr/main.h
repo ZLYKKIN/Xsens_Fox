@@ -286,10 +286,11 @@ private:
         double    m_offsetRatePrimary = 0.40;   // было 0.18 — primary anchor catches up быстро
         double    m_offsetRateDouble  = 0.25;   // было 0.10 — double-support тоже бодрее
         double    m_zRatePelvisMoving = 0.40;   // pose transitions
-        double    m_zRatePelvisStill  = 0.06;   // было 0.04 — pose held
+        double    m_zRatePelvisStill  = 0.015;
         double    m_zDriveRate        = 0.02;
         int       m_poseStableTicks   = 45;     // 0.5 s @ 90 Hz
-        int       m_zuptTicksThresh   = 60;     // было 45 — ZUPT даёт срабатывать
+        int       m_zuptTicksThresh   = 30;
+        double    m_zStillDeadbandM   = 0.01;
         double    m_lieTiltCosThresh  = 0.50;   // cos(60°) — pelvis tilt
         double    m_squatKneeThresh   = 0.30;   // m — |pelvis-to-foot Z|
         double    m_sitKneeThresh     = 0.55;   // m — pelvis-to-foot Z for sit
@@ -585,6 +586,7 @@ private:
     int    m_stillStreak = 0;
     int    m_moveStreak  = 0;
     bool   m_calibComplete = false;
+    std::array<bool, kXsensSegmentCount> m_asymmetricMount{};
 
     enum class CalibPhase { Idle, PrepT, CaptureT, SettleT, PrepN, CaptureN, Settle, PrepK, CaptureK, Done };
     CalibPhase m_phase = CalibPhase::Idle;

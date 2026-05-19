@@ -44,6 +44,19 @@ TEST_MODULES = [
     "test_actor_dimensions",
     "test_pose_transition_z",
     "test_finger_anatomy",
+    "test_hemisphere_normalization",
+    "test_s2s_180_flip",
+    "test_foot_sock_orientation",
+    "test_pair_symmetry_fallback",
+    "test_ecompass_to_triad_fallback",
+    "test_static_z_drift",
+    "test_finger_adaptive_alpha",
+    "test_stream_hemisphere_canonical",
+    "test_fox_kf_nan_recovery",
+    "test_kf_bias_longterm",
+    "test_fox_kf_mag_disable",
+    "test_recap_time_based",
+    "test_calibration_log_replay",
 ]
 
 

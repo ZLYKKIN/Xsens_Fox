@@ -52,6 +52,12 @@ struct FoxKfSettings {
     int   zuptHoldFrames     = 30;         // ≈ 0.33 s at 90 Hz
     float initOrientStdDeg   = 5.0f;
     float initBiasStd        = 0.5f;       // rad/s — very loose until ZUPT
+    float magDisableResidualDeg = 25.0f;
+    int   magDisableHoldFrames  = 30;
+    float magReenableResidual   = 0.15f;
+    float biasAnchorRate        = 0.01f;
+    int   biasAnchorFrames      = 5400;
+    float dthetaSanityRad       = 3.14159265f;
 };
 
 class FoxKf {
@@ -78,6 +84,8 @@ public:
     float orientStdDeg() const;
     float biasStd()      const;
     bool  isStationary() const { return m_still; }
+    bool  magDisabled()  const { return m_magDisabled; }
+    int   autoResetCount() const { return m_autoResetCount; }
 
 private:
     FoxKfSettings m_set;
@@ -88,6 +96,12 @@ private:
     int   m_stillTicks      = 0;
     Vec3  m_lastGyrCorrected{0.0f, 0.0f, 0.0f};
     Vec3  m_lastAcc         {0.0f, 0.0f, 0.0f};
+    float m_magResidLp      = 0.0f;
+    int   m_magDisableTicks = 0;
+    bool  m_magDisabled     = false;
+    Vec3  m_bSnap           {0.0f, 0.0f, 0.0f};
+    int   m_framesSinceZupt = 0;
+    int   m_autoResetCount  = 0;
 };
 
 }  // namespace fox

@@ -229,6 +229,19 @@ static double quat_angle_deg(const Quat& q);
 static inline Quat mirror_y_quat(const Quat& q) {
     return Quat(q.w, -q.x, q.y, -q.z);
 }
+static inline Quat mirror_z_quat(const Quat& q) {
+    return Quat(q.w, q.x, -q.y, -q.z);
+}
+static inline Quat anti_parallel_quat(const Quat& q) {
+    return Quat(-q.w, q.x, q.y, q.z);
+}
+static inline Quat canonical_hemisphere(const Quat& q) {
+    return (q.w < 0.0) ? Quat(-q.w, -q.x, -q.y, -q.z) : q;
+}
+static inline double quat_dev_deg(const Quat& a, const Quat& b) {
+    const double d = std::fabs(a.w*b.w + a.x*b.x + a.y*b.y + a.z*b.z);
+    return 2.0 * std::acos(std::min(1.0, d)) * 180.0 / M_PI;
+}
 
 // ============================================================================
 // ============================================================================
@@ -1364,6 +1377,11 @@ QVector3D LocomotionSolver::update(const Quat& qR,
                               + zRate * rawOff.z()));
         }
 
+        if (m_zuptTicks > m_pelvisStillTicksThresh
+            && std::abs(double(newOff.z() - m_offsetLast.z())) < m_zStillDeadbandM) {
+            newOff.setZ(m_offsetLast.z());
+        }
+
         {
             float maxStepXY = (imbalance > 0.7) ? 0.35f : 0.20f;
             if (m_recentCommitTicks > 0) {
@@ -2196,19 +2214,33 @@ static void __cdecl foxManusErgonomicsCb(const void* raw)
         const bool testMode = g_ergo.rawDump.load();
         auto alphaForJoint = [testMode](int idx, float delta, const char* hand) -> float {
             const bool isThumb = (idx < 4);
-            const float baseAlpha = isThumb ? 0.35f : 0.35f;
-            const float outlierAlpha = isThumb ? 0.15f : 0.10f;
-            const float outlierThresh = isThumb ? 35.0f : 30.0f;
-            const bool outlier = (delta > outlierThresh);
-            if (outlier && testMode) {
+            const float alphaSlow = isThumb ? 0.15f : 0.10f;
+            const float alphaFast = isThumb ? 0.55f : 0.50f;
+            const float alphaShock = isThumb ? 0.15f : 0.10f;
+            const float slowEdge  = 5.0f;
+            const float fastEdge  = isThumb ? 35.0f : 30.0f;
+            const float shockEdge = isThumb ? 90.0f : 80.0f;
+            float a;
+            if (delta <= slowEdge) {
+                a = alphaSlow;
+            } else if (delta <= fastEdge) {
+                const float t = (delta - slowEdge) / std::max(1e-3f, fastEdge - slowEdge);
+                a = alphaSlow + t * (alphaFast - alphaSlow);
+            } else if (delta <= shockEdge) {
+                const float t = (delta - fastEdge) / std::max(1e-3f, shockEdge - fastEdge);
+                a = alphaFast + t * (alphaShock - alphaFast);
+            } else {
+                a = alphaShock;
+            }
+            if (testMode && delta > fastEdge) {
                 static const char* kFingerName[5] = { "thumb", "index", "middle", "ring", "pinky" };
                 static const char* kJointName[4]  = { "spread", "MCP", "PIP", "DIP" };
                 const int fi = idx / 4, ji = idx % 4;
                 std::cout << "[glove-outlier] " << hand << " " << kFingerName[fi]
                           << " " << kJointName[ji] << " delta=" << std::fixed << std::setprecision(1)
-                          << delta << "° → α=" << outlierAlpha << "\n";
+                          << delta << "° → α=" << std::setprecision(3) << a << "\n";
             }
-            return outlier ? outlierAlpha : baseAlpha;
+            return a;
         };
         if (anyL) {
             float smoothed[20];
@@ -2580,9 +2612,10 @@ void MocapReceiver::resetFusion()
 void MocapReceiver::setS2sAlignment(const std::array<Quat, kXsensSegmentCount>& s2s)
 {
     QMutexLocker lk(&m_impl->lock);
-    m_impl->s2s    = s2s;
-    for (int i = 0; i < kXsensSegmentCount; ++i)
-        m_impl->s2sInv[i] = s2s[i].inv();
+    for (int i = 0; i < kXsensSegmentCount; ++i) {
+        m_impl->s2s[i]    = canonical_hemisphere(s2s[i].normalized());
+        m_impl->s2sInv[i] = m_impl->s2s[i].inv();
+    }
     m_impl->s2sActive = true;
     for (auto& r : m_impl->kfReady) r = false;
     testLog("[s2s] sensor-to-segment alignment installed", m_impl->test);
@@ -5077,6 +5110,41 @@ void NewSessionWizard::onCaptureTick()
                               << " residual=" << std::fixed << std::setprecision(2)
                               << s2sResidual[i] << "°\n";
                 }
+                if (isLegSeg && s2sResidual[i] > 30.0) {
+                    float bestRes3 = 1e9f;
+                    Quat bestQ3(1.0, 0.0, 0.0, 0.0);
+                    const char* bestPair3 = "";
+                    float bestSep3 = 0.0f;
+                    struct PairCand3 { float sep; QVector3D b1, b2, s1, s2; const char* name; };
+                    const PairCand3 cands3[3] = {
+                        { sepTN, gT_b, gN_b, aT_s, aN_s, "TN" },
+                        { sepTK, gT_b, gK_b, aT_s, aK_s, "TK" },
+                        { sepNK, gN_b, gK_b, aN_s, aK_s, "NK" },
+                    };
+                    for (const auto& c : cands3) {
+                        if (c.sep <= 0.2f) continue;
+                        const Quat q = triadSolve(c.b1, c.b2, c.s1, c.s2);
+                        const double r = triadResidualDeg(q, c.b1, c.b2, c.s1, c.s2);
+                        if (r < bestRes3) {
+                            bestRes3 = float(r);
+                            bestQ3 = q;
+                            bestPair3 = c.name;
+                            bestSep3 = c.sep;
+                        }
+                    }
+                    if (double(bestRes3) + 5.0 < s2sResidual[i]) {
+                        s2sNew[i] = bestQ3.inv().normalized();
+                        s2sNewMode[i] = 0;
+                        s2sResidual[i] = double(bestRes3);
+                        if (m_test) {
+                            std::cout << "[calib K] " << kSegmentNames[i]
+                                      << " lower-leg ecompass residual high, fell back to TRIAD via "
+                                      << bestPair3 << " sep=" << bestSep3
+                                      << " residual=" << std::fixed << std::setprecision(2)
+                                      << s2sResidual[i] << "°\n";
+                        }
+                    }
+                }
             }
         }
 
@@ -5140,41 +5208,112 @@ void NewSessionWizard::onCaptureTick()
                 mountType[rSeg] = mountType[lSeg] = mType;
                 const Quat qR = s2sNew[rSeg];
                 const Quat qL = s2sNew[lSeg];
-                const double devMirr = mirrorYDeviationDeg(qR, qL);
-                const double devPar  = parallelDeviationDeg(qR, qL);
-                const bool ambiguous = (mType == 0) && (std::abs(devMirr - devPar) < 10.0);
-                const bool useMirror = (mType == 1)
-                                    || (mType == 0 && ambiguous)
-                                    || (mType == 0 && !ambiguous && devMirr <= devPar);
-                const double dev = useMirror ? devMirr : devPar;
-                const char* sym = useMirror ? "mirror-Y" : "parallel";
+
+                const Quat mY  = mirror_y_quat(qL);
+                const Quat mZ  = mirror_z_quat(qL);
+                const Quat aP  = anti_parallel_quat(qL);
+                const double devMirr  = quat_dev_deg(qR, mY);
+                const double devPar   = quat_dev_deg(qR, qL);
+                const double devMirZ  = quat_dev_deg(qR, mZ);
+                const double devAntiP = quat_dev_deg(qR, aP);
+
+                struct Mc { double dev; int mode; const char* name; };
+                Mc cands[4] = {
+                    {devMirr,  1, "mirror-Y"},
+                    {devPar,   2, "parallel"},
+                    {devMirZ,  3, "mirror-Z"},
+                    {devAntiP, 4, "anti-parallel"},
+                };
+                int bestIdx = 0;
+                for (int k = 1; k < 4; ++k) if (cands[k].dev < cands[bestIdx].dev) bestIdx = k;
+                int secondIdx = (bestIdx == 0) ? 1 : 0;
+                for (int k = 0; k < 4; ++k)
+                    if (k != bestIdx && cands[k].dev < cands[secondIdx].dev) secondIdx = k;
+                const bool clearWinner = (cands[secondIdx].dev > cands[bestIdx].dev + 10.0);
+                int useMode;
+                if (mType == 1) useMode = 1;
+                else if (mType == 2) useMode = 2;
+                else if (clearWinner) useMode = cands[bestIdx].mode;
+                else useMode = (cands[bestIdx].mode == 1 || cands[bestIdx].mode == 2) ? cands[bestIdx].mode : 1;
+                double dev = 0.0;
+                const char* sym = "mirror-Y";
+                for (int k = 0; k < 4; ++k) if (cands[k].mode == useMode) { dev = cands[k].dev; sym = cands[k].name; break; }
+
                 if (m_test) {
                     std::cout << "[calib refine] pair " << kSegmentNames[rSeg]
                               << "/" << kSegmentNames[lSeg]
-                              << " mount=" << (mType == 1 ? "mirror-Y" : mType == 2 ? "parallel"
-                                            : ambiguous ? "ambiguous→mirror-Y default" : "unknown")
                               << " devMirr=" << std::fixed << std::setprecision(2) << devMirr << "°"
                               << " devPar=" << devPar << "°"
+                              << " devMirZ=" << devMirZ << "°"
+                              << " devAntiP=" << devAntiP << "°"
                               << " using=" << sym << "\n";
                 }
+
+                auto applyCounterpart = [](const Quat& q, int mode) -> Quat {
+                    switch (mode) {
+                        case 1: return mirror_y_quat(q);
+                        case 2: return q;
+                        case 3: return mirror_z_quat(q);
+                        case 4: return anti_parallel_quat(q);
+                    }
+                    return q;
+                };
+                auto applyToL = [](const Quat& qAvg, int mode) -> Quat {
+                    switch (mode) {
+                        case 1: return mirror_y_quat(qAvg);
+                        case 2: return qAvg;
+                        case 3: return mirror_z_quat(qAvg);
+                        case 4: return anti_parallel_quat(qAvg);
+                    }
+                    return qAvg;
+                };
+
                 if (dev <= 3.0) return;
                 if (dev >= 12.0) {
+                    const double cR = std::clamp(1.0 - s2sResidual[rSeg] / 30.0, 0.0, 1.0);
+                    const double cL = std::clamp(1.0 - s2sResidual[lSeg] / 30.0, 0.0, 1.0);
+                    if (std::max(cR, cL) > 0.5 && std::min(cR, cL) < 0.2) {
+                        int srcSeg, dstSeg;
+                        if (cR > cL) { srcSeg = rSeg; dstSeg = lSeg; }
+                        else         { srcSeg = lSeg; dstSeg = rSeg; }
+                        const Quat& qSrc = s2sNew[srcSeg];
+                        s2sNew[dstSeg] = canonical_hemisphere(applyToL(qSrc, useMode));
+                        s2sFused[srcSeg] = s2sFused[dstSeg] = true;
+                        m_asymmetricMount[srcSeg] = m_asymmetricMount[dstSeg] = true;
+                        if (m_test) {
+                            std::cout << "[calib refine] paired " << kSegmentNames[rSeg]
+                                      << "/" << kSegmentNames[lSeg]
+                                      << " copied from " << kSegmentNames[srcSeg]
+                                      << " via " << sym
+                                      << " (asymmetric mount, cR=" << std::fixed << std::setprecision(2)
+                                      << cR << " cL=" << cL << ")\n";
+                        }
+                        return;
+                    }
+                    if (std::max(cR, cL) < 0.3) {
+                        s2sNewMode[rSeg] = 2;
+                        s2sNewMode[lSeg] = 2;
+                        s2sResidual[rSeg] = 99.0;
+                        s2sResidual[lSeg] = 99.0;
+                        m_asymmetricMount[rSeg] = m_asymmetricMount[lSeg] = true;
+                        if (m_test) {
+                            std::cout << "[calib refine] paired " << kSegmentNames[rSeg]
+                                      << "/" << kSegmentNames[lSeg]
+                                      << " — both sides asymmetric beyond fusion, marked identity (mode=2)\n";
+                        }
+                        return;
+                    }
                     if (m_test) {
                         std::cout << "[calib refine] paired " << kSegmentNames[rSeg]
                                   << "/" << kSegmentNames[lSeg]
                                   << " " << sym << "_dev=" << std::fixed << std::setprecision(2) << dev
-                                  << "° — too large, skipping (real asymmetry or sensor mount error)\n";
+                                  << "° — too large, skipping (real asymmetry)\n";
                     }
                     return;
                 }
 
                 if (s2sNewMode[rSeg] == s2sNewMode[lSeg]) {
-                    Quat counterpartL;
-                    if (useMirror) {
-                        counterpartL = mirror_y_quat(qL);
-                    } else {
-                        counterpartL = qL;
-                    }
+                    Quat counterpartL = applyCounterpart(qL, useMode);
                     double dot = qR.w*counterpartL.w + qR.x*counterpartL.x
                                + qR.y*counterpartL.y + qR.z*counterpartL.z;
                     if (dot < 0.0) {
@@ -5187,11 +5326,9 @@ void NewSessionWizard::onCaptureTick()
                     const double wTot = wR + wL;
                     const double tR = (wTot > 1e-6) ? wL / wTot : 0.5;
                     const Quat qAvg = slerp_quat(qR, counterpartL, tR);
-                    Quat qAvgForL;
-                    if (useMirror) qAvgForL = Quat(qAvg.w, -qAvg.x, qAvg.y, -qAvg.z);
-                    else            qAvgForL = qAvg;
-                    s2sNew[rSeg] = qAvg;
-                    s2sNew[lSeg] = qAvgForL;
+                    Quat qAvgForL = applyToL(qAvg, useMode);
+                    s2sNew[rSeg] = canonical_hemisphere(qAvg);
+                    s2sNew[lSeg] = canonical_hemisphere(qAvgForL);
                     s2sFused[rSeg] = s2sFused[lSeg] = true;
                     if (m_test) {
                         std::cout << "[calib refine] paired " << kSegmentNames[rSeg]
@@ -5211,8 +5348,7 @@ void NewSessionWizard::onCaptureTick()
                 else if (s2sNewMode[lSeg] == 0 && s2sNewMode[rSeg] != 0) { srcSeg = lSeg; dstSeg = rSeg; }
                 else return;
                 const Quat& qSrc = s2sNew[srcSeg];
-                if (useMirror) s2sNew[dstSeg] = mirror_y_quat(qSrc);
-                else            s2sNew[dstSeg] = qSrc;
+                s2sNew[dstSeg] = canonical_hemisphere(applyToL(qSrc, useMode));
                 s2sFused[srcSeg] = s2sFused[dstSeg] = true;
                 if (m_test) {
                     std::cout << "[calib refine] copied " << sym << " from " << kSegmentNames[srcSeg]
@@ -7026,6 +7162,7 @@ struct LiveStreamSender::Impl {
 
     int recapTicksLeft = 0;
     int recapSamples = 0;
+    qint64 recapDeadlineMs = -1;
     std::array<Quat,      kXsensSegmentCount> recapBodyQ{};
     std::array<QVector3D, kXsensSegmentCount> recapSegPos{};
     std::array<Quat, kFingerSegmentsHand> recapLeftGloveQ{};
@@ -7144,6 +7281,7 @@ void LiveStreamSender::stop()
     m_impl->sock.close();
     m_impl->recapTicksLeft = 0;
     m_impl->recapSamples = 0;
+    m_impl->recapDeadlineMs = -1;
     m_running = false;
 }
 
@@ -7152,6 +7290,7 @@ void LiveStreamSender::recalibrate()
     const int target = (m_cfg.fps > 0 ? m_cfg.fps : 60) * 5;
     m_impl->recapTicksLeft = std::max(60, target);
     m_impl->recapSamples = 0;
+    m_impl->recapDeadlineMs = m_impl->timer.elapsed() + 5000;
     m_impl->fingerBaselineSamples = Impl::kFingerBaselineWindow;
 }
 
@@ -7202,12 +7341,16 @@ void LiveStreamSender::pushFrame(quint32 sample,
         }
         ++m_impl->recapSamples;
         --m_impl->recapTicksLeft;
-        if (m_impl->recapTicksLeft == 0 && m_impl->recapSamples > 0) {
+        const bool deadlineHit = (m_impl->recapDeadlineMs > 0)
+                              && (m_impl->timer.elapsed() >= m_impl->recapDeadlineMs);
+        if ((m_impl->recapTicksLeft == 0 || deadlineHit) && m_impl->recapSamples > 0) {
             m_impl->baselineBodyQ = m_impl->recapBodyQ;
             m_impl->baselineSegPos = m_impl->recapSegPos;
             m_impl->baselinePelvisPos = pelvisPos;
             m_impl->baselineCaptured = true;
             m_impl->recapSamples = 0;
+            m_impl->recapTicksLeft = 0;
+            m_impl->recapDeadlineMs = -1;
         }
     }
 
@@ -7222,7 +7365,8 @@ void LiveStreamSender::pushFrame(quint32 sample,
         appendFloatBE(body, p.x());
         appendFloatBE(body, p.y());
         appendFloatBE(body, p.z());
-        const Quat q = quat_mult(segQuat[i], m_impl->baselineBodyQ[i].inv()).normalized();
+        Quat q = quat_mult(segQuat[i], m_impl->baselineBodyQ[i].inv()).normalized();
+        if (q.w < 0.0) { q.w = -q.w; q.x = -q.x; q.y = -q.y; q.z = -q.z; }
         appendFloatBE(body, float(q.w));
         appendFloatBE(body, float(q.x));
         appendFloatBE(body, float(q.y));
@@ -7293,14 +7437,18 @@ void LiveStreamSender::pushFrameWithGloves(quint32 sample,
         }
         ++m_impl->recapSamples;
         --m_impl->recapTicksLeft;
-        if (m_impl->recapTicksLeft == 0 && m_impl->recapSamples > 0) {
+        const bool deadlineHit = (m_impl->recapDeadlineMs > 0)
+                              && (m_impl->timer.elapsed() >= m_impl->recapDeadlineMs);
+        if ((m_impl->recapTicksLeft == 0 || deadlineHit) && m_impl->recapSamples > 0) {
             m_impl->baselineBodyQ = m_impl->recapBodyQ;
             m_impl->baselineSegPos = m_impl->recapSegPos;
             m_impl->baselineLeftGloveQ = m_impl->recapLeftGloveQ;
             m_impl->baselineRightGloveQ = m_impl->recapRightGloveQ;
-            m_impl->baselinePelvisPos = pelvisPos;  // pelvis pinned to current
+            m_impl->baselinePelvisPos = pelvisPos;
             m_impl->baselineCaptured = true;
             m_impl->recapSamples = 0;
+            m_impl->recapTicksLeft = 0;
+            m_impl->recapDeadlineMs = -1;
             m_impl->fingerBaselineSamples = Impl::kFingerBaselineWindow;
         }
     } else if (m_impl->fingerBaselineSamples < Impl::kFingerBaselineWindow) {
@@ -7330,7 +7478,8 @@ void LiveStreamSender::pushFrameWithGloves(quint32 sample,
         appendFloatBE(body, p.x());
         appendFloatBE(body, p.y());
         appendFloatBE(body, p.z());
-        const Quat q = quat_mult(segQuat[i], m_impl->baselineBodyQ[i].inv()).normalized();
+        Quat q = quat_mult(segQuat[i], m_impl->baselineBodyQ[i].inv()).normalized();
+        if (q.w < 0.0) { q.w = -q.w; q.x = -q.x; q.y = -q.y; q.z = -q.z; }
         appendFloatBE(body, float(q.w));
         appendFloatBE(body, float(q.x));
         appendFloatBE(body, float(q.y));
@@ -7365,7 +7514,8 @@ void LiveStreamSender::pushFrameWithGloves(quint32 sample,
         if (mIdx < 0) {
             const QVector3D p = wristWorldPos - m_impl->baselineSegPos[handSeg];
             appendFloatBE(body, p.x()); appendFloatBE(body, p.y()); appendFloatBE(body, p.z());
-            const Quat q = quat_mult(segQuat[handSeg], m_impl->baselineBodyQ[handSeg].inv()).normalized();
+            Quat q = quat_mult(segQuat[handSeg], m_impl->baselineBodyQ[handSeg].inv()).normalized();
+            if (q.w < 0.0) { q.w = -q.w; q.x = -q.x; q.y = -q.y; q.z = -q.z; }
             appendFloatBE(body, float(q.w));
             appendFloatBE(body, float(q.x));
             appendFloatBE(body, float(q.y));
@@ -7373,7 +7523,8 @@ void LiveStreamSender::pushFrameWithGloves(quint32 sample,
         } else {
             const QVector3D p = pArr[mIdx] - m_impl->baselineSegPos[handSeg];
             appendFloatBE(body, p.x()); appendFloatBE(body, p.y()); appendFloatBE(body, p.z());
-            const Quat q = quat_mult(qArr[mIdx], baseArr[mIdx].inv()).normalized();
+            Quat q = quat_mult(qArr[mIdx], baseArr[mIdx].inv()).normalized();
+            if (q.w < 0.0) { q.w = -q.w; q.x = -q.x; q.y = -q.y; q.z = -q.z; }
             appendFloatBE(body, float(q.w));
             appendFloatBE(body, float(q.x));
             appendFloatBE(body, float(q.y));

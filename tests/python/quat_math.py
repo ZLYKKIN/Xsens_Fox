@@ -46,6 +46,25 @@ def mirror_y_quat(q):
     scr/main.cpp:mirror_y_quat — flips X and Z components."""
     return np.array([q[0], -q[1], q[2], -q[3]])
 
+def mirror_z_quat(q):
+    """Matches scr/main.cpp:mirror_z_quat — flips Y and Z components."""
+    return np.array([q[0], q[1], -q[2], -q[3]])
+
+def anti_parallel_quat(q):
+    """Matches scr/main.cpp:anti_parallel_quat — flips W only."""
+    return np.array([-q[0], q[1], q[2], q[3]])
+
+def canonical_hemisphere(q):
+    """Matches scr/main.cpp:canonical_hemisphere — w >= 0."""
+    if q[0] < 0.0:
+        return -q
+    return q
+
+def quat_dev_deg(a, b):
+    """Matches scr/main.cpp:quat_dev_deg — geodesic angle between a and b in degrees."""
+    d = abs(float(np.dot(a, b)))
+    return 2.0 * float(np.degrees(np.arccos(min(1.0, d))))
+
 def yaw_only(q):
     """Extract twist about world Z.  Matches scr/main.cpp:yaw_only_quat."""
     w, z = q[0], q[3]
