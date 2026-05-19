@@ -1397,11 +1397,44 @@ static double quatAngVel(const Quat& a, const Quat& b, double dt)
 QVector3D LocomotionSolver::update(const Quat& qR,
                                        const Quat& qL,
                                        const Quat& qPelvis,
-                                       const QVector3D& fkR,
-                                       const QVector3D& fkL,
+                                       const QVector3D& fkRHeel,
+                                       const QVector3D& fkRBall,
+                                       const QVector3D& fkRTip,
+                                       const QVector3D& fkLHeel,
+                                       const QVector3D& fkLBall,
+                                       const QVector3D& fkLTip,
                                        double t)
     {
         const double dt = m_haveLast ? std::max(1e-3, t - m_lastT) : 0.01;
+
+        // FIX (heel/toe contact discrimination): pick active contact point
+        // based on foot pitch.  При pitch≈0 (плоская стопа) = lowest3 как
+        // раньше.  pitch > +15° (heel-down toe-up) → fkHeel.  pitch < -15°
+        // (heel-up toe-down) → fkBall (ball of foot = front part).
+        //
+        // m_footPitchZR/L пока что 0 на первом кадре — поэтому до тех пор
+        // пока pitch не накопится через LP, используется lowest3 (zero weights).
+        // На последующих кадрах pitch обновится сразу же.
+        auto lowest3 = [](const QVector3D& a, const QVector3D& b, const QVector3D& c){
+            const QVector3D& ab = a.z() < b.z() ? a : b;
+            return ab.z() < c.z() ? ab : c;
+        };
+        auto sstep_local = [](double x){ x = std::clamp(x,0.0,1.0); return x*x*(3.0-2.0*x); };
+        const QVector3D fkRLowest = lowest3(fkRHeel, fkRBall, fkRTip);
+        const QVector3D fkLLowest = lowest3(fkLHeel, fkLBall, fkLTip);
+        // smoothstep zone: |sin(pitch)| ∈ [0.17..0.34] = [≈10°..≈20°]
+        const double heelContactWR_pre = sstep_local((m_footPitchZR - 0.17) / 0.17);
+        const double toeContactWR_pre  = sstep_local((-m_footPitchZR - 0.17) / 0.17);
+        const double heelContactWL_pre = sstep_local((m_footPitchZL - 0.17) / 0.17);
+        const double toeContactWL_pre  = sstep_local((-m_footPitchZL - 0.17) / 0.17);
+        const double neutralR = std::max(0.0, 1.0 - heelContactWR_pre - toeContactWR_pre);
+        const double neutralL = std::max(0.0, 1.0 - heelContactWL_pre - toeContactWL_pre);
+        const QVector3D fkR = float(neutralR) * fkRLowest
+                            + float(heelContactWR_pre) * fkRHeel
+                            + float(toeContactWR_pre)  * fkRBall;
+        const QVector3D fkL = float(neutralL) * fkLLowest
+                            + float(heelContactWL_pre) * fkLHeel
+                            + float(toeContactWL_pre)  * fkLBall;
 
         // 1. Angular velocities of feet + pelvis (LP-smoothed).
         auto angVel = [](const Quat& a, const Quat& b, double dt_) {
@@ -1676,6 +1709,34 @@ QVector3D LocomotionSolver::update(const Quat& qR,
             return m_offsetLast;
         };
 
+        // FIX (heel/toe contact discrimination): при смене contact-point
+        // на той же ноге, anchor "помнит" старую точку → offset = anchor-fk
+        // делает скачок на длину стопы × sin(pitch) (~13см при 30°).
+        // Решение: soft anchor shift в сторону актуального FK + offsetLast.
+        // m_contactBlendR ∈ [-1..+1]: +1=heel, -1=toe.  Скачок > 0.05 в
+        // contact-blend = реальная смена точки контакта.
+        const double cbR_new = heelContactWR_pre - toeContactWR_pre;
+        const double cbL_new = heelContactWL_pre - toeContactWL_pre;
+        if (m_committedR && std::abs(cbR_new - m_contactBlendR) > 0.05) {
+            const double alpha = std::min(1.0, 0.40 * std::abs(cbR_new - m_contactBlendR));
+            const QVector3D pelvis = bestPelvisEstimate();
+            const QVector3D newAnchorR(fkR.x() + pelvis.x(),
+                                       fkR.y() + pelvis.y(),
+                                       m_anchorR.z());   // Z держим (zSnap-logic ниже)
+            m_anchorR = (1.0 - float(alpha)) * m_anchorR + float(alpha) * newAnchorR;
+        }
+        if (m_committedL && std::abs(cbL_new - m_contactBlendL) > 0.05) {
+            const double alpha = std::min(1.0, 0.40 * std::abs(cbL_new - m_contactBlendL));
+            const QVector3D pelvis = bestPelvisEstimate();
+            const QVector3D newAnchorL(fkL.x() + pelvis.x(),
+                                       fkL.y() + pelvis.y(),
+                                       m_anchorL.z());
+            m_anchorL = (1.0 - float(alpha)) * m_anchorL + float(alpha) * newAnchorL;
+        }
+        // LP-фильтр m_contactBlend (α=0.20, ~55ms response).
+        m_contactBlendR = 0.80 * m_contactBlendR + 0.20 * cbR_new;
+        m_contactBlendL = 0.80 * m_contactBlendL + 0.20 * cbL_new;
+
         // 7. Commit / release anchors with hysteresis.
         //    - rising edge (conf >= COMMIT && !committed): snap anchor
         //    - falling edge (conf < RELEASE): release (keep anchor memory)
@@ -1705,8 +1766,27 @@ QVector3D LocomotionSolver::update(const Quat& qR,
                     world.setZ(0.0f);
                 } else if (m_pose == PoseSquat) {
                     const int lowTicks = isRight ? m_lowZTicksR : m_lowZTicksL;
+                    const bool heelLifted = isRight ? m_heelLiftR : m_heelLiftL;
                     if (lowTicks >= m_lowZTicksRequired) {
-                        world.setZ(0.0f);
+                        if (heelLifted) {
+                            // FIX (squat heel-lift): при поднятой пятке anchor
+                            // НЕ снапим к z=0 — реальный пол под носком, а fk
+                            // (после A.2 это active-contact = ball) и так
+                            // близко к полу.  Heel-keypoint висит выше пола
+                            // на bone_foot * sin(|pitch|).  anchor.z должен
+                            // отражать ЭТО: высота над полом на ту же величину.
+                            const double bone = 0.60 * m_footLengthM;  // heel→ball
+                            const double sinp = isRight
+                                    ? std::abs(m_footPitchZR)
+                                    : std::abs(m_footPitchZL);
+                            // fk здесь — active contact point (ball-like), z
+                            // близко к полу.  Чтобы commit fkZ ≈ 0 на полу
+                            // → anchor.z = world.z уже выставлено выше (fk.z+pelvis.z).
+                            // Snapшимся как в plain squat, но не до 0:
+                            world.setZ(float(bone * sinp));
+                        } else {
+                            world.setZ(0.0f);
+                        }
                         m_zSnapBlendTicks = m_zSnapBlendFrames;
                     }
                     // else: world.z = fk.z + pelvis.z (естественный)
@@ -7929,13 +8009,18 @@ void MocapViewport::drawReferenceFrame()
 
 QVector3D MocapViewport::tickLoco(
         const std::array<Quat, kXsensSegmentCount>& q,
-        const QVector3D& fkRFoot,
-        const QVector3D& fkLFoot,
+        const QVector3D& fkRHeel,
+        const QVector3D& fkRBall,
+        const QVector3D& fkRTip,
+        const QVector3D& fkLHeel,
+        const QVector3D& fkLBall,
+        const QVector3D& fkLTip,
         double tSec)
 {
     m_lastLocoOffset = m_loco.update(
             q[SEG_RFoot], q[SEG_LFoot], q[SEG_Pelvis],
-            fkRFoot,      fkLFoot,
+            fkRHeel, fkRBall, fkRTip,
+            fkLHeel, fkLBall, fkLTip,
             tSec);
     return m_lastLocoOffset;
 }
@@ -10107,15 +10192,40 @@ void MainWindow::onRenderTick()
     if (m_skel) {
         const float pelvisZ_loco = float(m_setup.heightCm * 0.55 / 100.0);
         auto kpLoco = m_skel->computeKeypoints(qOut, QVector3D(0.0f, 0.0f, pelvisZ_loco));
-        auto lowest3 = [](const QVector3D& a, const QVector3D& b, const QVector3D& c) -> QVector3D {
-            const QVector3D& ab = a.z() < b.z() ? a : b;
-            return ab.z() < c.z() ? ab : c;
-        };
-        const QVector3D fkRFoot = lowest3(kpLoco[SEG_RFoot], kpLoco[SEG_RToe], kpLoco[26]);
-        const QVector3D fkLFoot = lowest3(kpLoco[SEG_LFoot], kpLoco[SEG_LToe], kpLoco[27]);
+        // FIX (heel/toe contact discrimination): передаём heel/ball/tip
+        // трёх точек стопы, а не lowest.  Solver сам определит active
+        // contact point по footPitchZ.
+        // kpLoco индексы: SEG_RFoot=17 (heel), SEG_RToe=18 (ball), 26 (tip);
+        //                  SEG_LFoot=21, SEG_LToe=22, 27.
         const double tSec = std::chrono::duration<double>(
                 std::chrono::steady_clock::now().time_since_epoch()).count();
-        m_viewport->tickLoco(qOut, fkRFoot, fkLFoot, tSec);
+
+        // FIX (cross-legged direction protection): determine cross-legged
+        // state in pelvis-yaw frame.  В Xsens NWU pelvis +Y = left, +X = forward.
+        // Right foot expected: rPel.y < 0; left foot: lPel.y > 0.  Cross =
+        // когда знак инвертирован.  crossConf = smoothstep(y / 0.08m) на
+        // wrong side, 0 на правильной стороне.
+        {
+            auto sstep01 = [](double x){ x = std::clamp(x,0.0,1.0); return x*x*(3.0-2.0*x); };
+            const QVector3D pelvisXY(kpLoco[SEG_Pelvis].x(),
+                                     kpLoco[SEG_Pelvis].y(), 0.0f);
+            const QVector3D rXY(kpLoco[SEG_RFoot].x() - pelvisXY.x(),
+                                kpLoco[SEG_RFoot].y() - pelvisXY.y(), 0.0f);
+            const QVector3D lXY(kpLoco[SEG_LFoot].x() - pelvisXY.x(),
+                                kpLoco[SEG_LFoot].y() - pelvisXY.y(), 0.0f);
+            const Quat qPYawInv = yaw_only_quat(qOut[SEG_Pelvis]).inv();
+            const QVector3D rPel = vec_rotate(rXY, qPYawInv);
+            const QVector3D lPel = vec_rotate(lXY, qPYawInv);
+            // Right cross when rPel.y > 0; left cross when lPel.y < 0.
+            const double cR = sstep01(double(rPel.y()) / 0.08);
+            const double cL = sstep01(double(-lPel.y()) / 0.08);
+            m_viewport->setCrossLeggedHints(cR > 0.5, cL > 0.5, cR, cL);
+        }
+
+        m_viewport->tickLoco(qOut,
+                             kpLoco[SEG_RFoot], kpLoco[SEG_RToe], kpLoco[26],
+                             kpLoco[SEG_LFoot], kpLoco[SEG_LToe], kpLoco[27],
+                             tSec);
     }
 
     // --- Live streaming --------------------------------------------------

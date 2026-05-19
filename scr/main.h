@@ -229,11 +229,23 @@ public:
     // it to detect "pelvis is actually holding still" — the master gate
     // for freezing the offset against isolated-limb motion (scenario A) and
     // preventing feet-up-on-chair from dropping the avatar (scenario C).
+    //
+    // FIX (heel/toe contact discrimination): сигнатура расширена тремя
+    // FK-точками стопы (heel/ball/tip), а не одной "lowest"-точкой.
+    // Solver сам по footPitchZ выбирает activeContact из этих точек:
+    // heel-contact (pitch>+15°) → heel; toe-contact (pitch<-15°) → ball;
+    // в середине → lowest3.  Без этой правки anchor для стояния на
+    // мыске фиксирует heel-keypoint на полу — лодыжка проваливается
+    // на ~13 см.
     QVector3D update(const Quat& rightFootQuat,
                      const Quat& leftFootQuat,
                      const Quat& pelvisQuat,
-                     const QVector3D& fkRightFoot,
-                     const QVector3D& fkLeftFoot,
+                     const QVector3D& fkRightHeel,
+                     const QVector3D& fkRightBall,
+                     const QVector3D& fkRightTip,
+                     const QVector3D& fkLeftHeel,
+                     const QVector3D& fkLeftBall,
+                     const QVector3D& fkLeftTip,
                      double tSeconds);
 
     ContactState contact() const { return m_contact; }
@@ -1029,8 +1041,12 @@ public:
     QVector3D lastRenderedPelvis() const { return m_lastRenderedPelvis; }
 
     QVector3D tickLoco(const std::array<Quat, kXsensSegmentCount>& q,
-                       const QVector3D& fkRFoot,
-                       const QVector3D& fkLFoot,
+                       const QVector3D& fkRHeel,
+                       const QVector3D& fkRBall,
+                       const QVector3D& fkRTip,
+                       const QVector3D& fkLHeel,
+                       const QVector3D& fkLBall,
+                       const QVector3D& fkLTip,
                        double tSec);
     QVector3D lastLocoOffset() const { return m_lastLocoOffset; }
 
