@@ -491,6 +491,7 @@ static Quat constrain_shoulder_cone(const Quat& q_seg, const Quat& q_pelvis,
                                      bool isRight);
 static Quat constrain_wrist_twist(const Quat& q_hand_world,
                                   const Quat& q_forearm_world,
+                                  const Quat& q_anchor_local,
                                   double maxFlexRad, double maxLatDevRad,
                                   double twistWeight, bool isRight);
 
@@ -879,19 +880,29 @@ static Quat constrain_shoulder_cone(const Quat& q_seg, const Quat& q_pelvis,
 
 static Quat constrain_wrist_twist(const Quat& q_hand_world,
                                   const Quat& q_forearm_world,
+                                  const Quat& q_anchor_local,
                                   double maxFlexRad, double maxLatDevRad,
                                   double twistWeight, bool isRight)
 {
     (void)isRight;
+    // Hand-in-forearm-local frame.
     const Quat qFAinv = q_forearm_world.inv();
     Quat qLocal = quat_mult(qFAinv, q_hand_world).normalized();
-    if (qLocal.w < 0) {
-        qLocal.w = -qLocal.w; qLocal.x = -qLocal.x;
-        qLocal.y = -qLocal.y; qLocal.z = -qLocal.z;
+
+    // FIX (gloves polish): swing/twist decompose производим относительно
+    // T-pose anchor, а не identity.  Без этого "нулевая поза" соответствует
+    // identity в hand-local frame, но анатомически T-поза ладонью вниз —
+    // НЕ identity (там defAngFor задаёт Rz(±π/2)).  Поэтому clamp
+    // flex/lat-dev раньше работал относительно неправильного нуля.
+    // Теперь clamp применяется к "отклонению от T-pose позы".
+    Quat qLocalRel = quat_mult(q_anchor_local.inv(), qLocal).normalized();
+    if (qLocalRel.w < 0) {
+        qLocalRel.w = -qLocalRel.w; qLocalRel.x = -qLocalRel.x;
+        qLocalRel.y = -qLocalRel.y; qLocalRel.z = -qLocalRel.z;
     }
 
     Quat swing, twist;
-    swingTwistDecompose(qLocal, QVector3D(1.0f, 0.0f, 0.0f), swing, twist);
+    swingTwistDecompose(qLocalRel, QVector3D(1.0f, 0.0f, 0.0f), swing, twist);
 
     double twistHalf = std::atan2(twist.x, twist.w);
     double twistAng = 2.0 * twistHalf * twistWeight;
@@ -918,7 +929,10 @@ static Quat constrain_wrist_twist(const Quat& q_hand_world,
         swingOut = Quat(std::cos(half), 0.0, flexC * s, devC * s);
     }
 
-    const Quat qLocalOut = quat_mult(swingOut, twistOut).normalized();
+    // Recompose: anchor * swing-clamped * twist-clamped — затем вернуть
+    // в world через forearm.
+    const Quat qLocalRelOut = quat_mult(swingOut, twistOut).normalized();
+    const Quat qLocalOut = quat_mult(q_anchor_local, qLocalRelOut).normalized();
     return quat_mult(q_forearm_world, qLocalOut).normalized();
 }
 
@@ -2380,6 +2394,18 @@ struct ManusErgoSnapshot {
 };
 static ManusErgoSnapshot g_ergo;
 
+// FIX (gloves polish): per-actor finger baseline захваченный в T-pose
+// калибровке.  parseErgoHand вычитает baseline[i] из raw[i] (signed
+// для spread, flex обрезается клампами в kFingerLimits).  Включается
+// после MainWindow ctor; если baselineValid=false — старое поведение.
+struct FingerBaselineState {
+    QMutex lock;
+    std::array<float, 20> left  {};
+    std::array<float, 20> right {};
+    std::atomic<bool> valid { false };
+};
+static FingerBaselineState g_fingerBaseline;
+
 // Per-finger bone lengths in metres — approximate adult-male anatomy.
 // kFingerBoneLen[finger][joint].  joint 0 = MCP/CMC, joint 3 = tip.
 static const double kFingerBoneLen[5][4] = {
@@ -2415,9 +2441,17 @@ static const double kSpreadSign[5] = { +1.0, +0.5, 0.0, -0.5, -1.0 };
 
 const FingerJointLimit kFingerLimits[5][3] = {
     {
-        { -M_PI * 0.30,  M_PI * 0.50,  -M_PI / 12.0,  M_PI * 0.50 },
-        {  0.0,          0.0,           0.0,          M_PI * 0.55 },
-        {  0.0,          0.0,           0.0,          M_PI / 3.0  }
+        // FIX (gloves polish): расширили thumb ROM.
+        // CMC: spread shifted to ±0.40π/0.60π (было ±0.30π/0.50π) — больше
+        //      opposition-к-ладони / hyper-radial.  flex от -π/5 до 0.65π
+        //      (было -π/12 до 0.50π) — больше hyperextension и сгиба.
+        // MCP: добавили small spread ±π/10 (было 0) — анатомически
+        //      thumb MCP всё-таки имеет минимальную abduction.
+        //      flex до 0.60π (было 0.55π).
+        // IP : добавили легкий hyperextension -π/20 (было 0) — реалистично.
+        { -M_PI * 0.40,  M_PI * 0.60,  -M_PI / 5.0,    M_PI * 0.65 },
+        { -M_PI / 10.0,  M_PI / 10.0,  -M_PI / 24.0,   M_PI * 0.60 },
+        {  0.0,          0.0,          -M_PI / 24.0,   M_PI * 0.40 }
     },
     {
         { -M_PI / 9.0,   M_PI / 9.0,   -M_PI / 12.0,  M_PI * 0.50 },
@@ -2463,6 +2497,22 @@ static void parseErgoHand(const float* degs20, bool isLeft,
     const QVector3D flexAxis (0, 1, 0);
     const QVector3D spreadAx (0, 0, 1);
     const double sideSign = isLeft ? -1.0 : +1.0;
+
+    // FIX (gloves polish): finger baseline subtraction.  T-pose calibration
+    // прокапывает avg degrees когда actor стоит ладонями вниз с прямыми
+    // пальцами.  Эти значения и есть "neutral / zero".  Без вычитания
+    // glove-specific bias (например MCP=15° по умолчанию) интерпретируется
+    // как "actor с согнутыми пальцами" — отсюда визуально согнутые finger
+    // даже когда они прямые.
+    float effective[20];
+    const float* effectivePtr = degs20;
+    if (g_fingerBaseline.valid.load()) {
+        QMutexLocker lkBL(&g_fingerBaseline.lock);
+        const auto& baseline = isLeft ? g_fingerBaseline.left
+                                      : g_fingerBaseline.right;
+        for (int i = 0; i < 20; ++i) effective[i] = degs20[i] - baseline[i];
+        effectivePtr = effective;
+    }
 
     // ============================================================
     // FIX: thumb-specific pre-rotation для CMC (Carpometacarpal).
@@ -2528,7 +2578,7 @@ static void parseErgoHand(const float* degs20, bool isLeft,
     ).normalized();
 
     for (int f = 0; f < 5; ++f) {
-        const float* d = degs20 + f * 4;
+        const float* d = effectivePtr + f * 4;
         const double spread = d[0] * M_PI / 180.0;
         const double a1     = d[1] * M_PI / 180.0;
         const double a2     = d[2] * M_PI / 180.0;
@@ -2668,10 +2718,14 @@ static void __cdecl foxManusErgonomicsCb(const void* raw)
         }
         const bool testMode = g_ergo.rawDump.load();
         auto alphaForJoint = [testMode](int idx, float delta, const char* hand) -> float {
+            // FIX (gloves polish): thumb base α 0.20 → 0.15 — thumb sensor
+            // на Manus традиционно шумнее остальных; больше LP-сглаживания
+            // не даёт заметной latency (15ms vs 11ms @ 90Hz) но визуально
+            // убирает джиттер большого пальца.
             const bool isThumb = (idx < 4);
-            const float baseAlpha = isThumb ? 0.20f : 0.35f;
-            const float outlierAlpha = isThumb ? 0.05f : 0.10f;
-            const float outlierThresh = isThumb ? 20.0f : 30.0f;
+            const float baseAlpha = isThumb ? 0.15f : 0.35f;
+            const float outlierAlpha = isThumb ? 0.04f : 0.10f;
+            const float outlierThresh = isThumb ? 15.0f : 30.0f;
             const bool outlier = (delta > outlierThresh);
             if (outlier && testMode) {
                 static const char* kFingerName[5] = { "thumb", "index", "middle", "ring", "pinky" };
@@ -5214,6 +5268,12 @@ void NewSessionWizard::onCalibrationBegin()
             m_magOuterAccumK[i][k] = 0.0;
         }
     }
+    // FIX (gloves polish): finger baseline accumulator также сбросить.
+    for (int j = 0; j < 20; ++j) {
+        m_fingerAccumR[j] = 0.0;
+        m_fingerAccumL[j] = 0.0;
+    }
+    m_fingerAccumCount = 0;
 
     // Bind pointer aliases to the T-pose buffers (CaptureT writes through
     // these so the capture loop stays pose-agnostic).
@@ -5341,6 +5401,23 @@ void NewSessionWizard::onCaptureTick()
             }
         }
         ++m_goodSamples;
+        // FIX (gloves polish): копим Manus finger degrees ТОЛЬКО в T-pose.
+        // Используем уже EMA-сглаженные значения из g_ergo, чтобы не
+        // удваивать LP-фильтрацию.  Lock мьютекса g_ergo короткий.
+        if (m_phase == CalibPhase::CaptureT) {
+            QMutexLocker lkErgo(&g_ergo.lock);
+            if (g_ergo.emaLeftInit) {
+                for (int j = 0; j < 20; ++j)
+                    m_fingerAccumL[j] += double(g_ergo.emaLeft[j]);
+            }
+            if (g_ergo.emaRightInit) {
+                for (int j = 0; j < 20; ++j)
+                    m_fingerAccumR[j] += double(g_ergo.emaRight[j]);
+            }
+            if (g_ergo.emaLeftInit || g_ergo.emaRightInit) {
+                ++m_fingerAccumCount;
+            }
+        }
         m_stillLabel->setStyleSheet("color:#2EC25A; font-weight:700;");
         m_stillLabel->setText(Lang::t("motion_hint") + " "
             + Lang::t("still") + QString("  (%1°)")
@@ -5379,6 +5456,28 @@ void NewSessionWizard::onCaptureTick()
             }
             m_result.tposePelvisPos = QVector3D(0.0f, 0.0f, 0.0f);
             m_result.tposeCaptured = true;
+        }
+
+        // FIX (gloves polish): финализируем finger baseline.  Делим
+        // накопленную сумму на m_fingerAccumCount, копируем в Result.
+        // Если actor без перчаток — g_ergo.emaLeftInit/RightInit = false
+        // → counter остаётся 0 → branch скипается.
+        if (m_fingerAccumCount > 0) {
+            const double inv = 1.0 / double(m_fingerAccumCount);
+            for (int j = 0; j < 20; ++j) {
+                m_result.fingerBaselineR[j] = float(m_fingerAccumR[j] * inv);
+                m_result.fingerBaselineL[j] = float(m_fingerAccumL[j] * inv);
+            }
+            m_result.fingerBaselineCaptured = true;
+            if (m_test) {
+                std::cout << "[calib T finger baseline] count="
+                          << m_fingerAccumCount << " R thumb spread/MCP="
+                          << m_result.fingerBaselineR[0] << "/"
+                          << m_result.fingerBaselineR[1]
+                          << " L thumb spread/MCP="
+                          << m_result.fingerBaselineL[0] << "/"
+                          << m_result.fingerBaselineL[1] << "\n";
+            }
         }
 
         m_phase = CalibPhase::SettleT;
@@ -7282,6 +7381,32 @@ void MocapViewport::setActor(const ActorConfig& actor)
     update();
 }
 
+// FIX (gloves polish): pin wrist drift anchor from T-pose calibration.
+// Сейчас m_anchorLocal[wrist] обновляется при каждом lock-моменте; если
+// первый lock попал на кривую позу — anchor зафиксирован неверно.
+// С T-pose anchor anchor берётся из 500-кадрового averaging T-позы
+// (actor стоит ладонями вниз), что даёт стабильный анатомический ноль.
+// После вызова — m_locked-моменты больше не перезаписывают anchor.
+void MocapViewport::setTposeHandAnchor(const Quat& fR, const Quat& hR,
+                                       const Quat& fL, const Quat& hL)
+{
+    const Quat dA_h_R = m_skel ? m_skel->defAngFor(SEG_RHand)    : Quat(1, 0, 0, 0);
+    const Quat dA_f_R = m_skel ? m_skel->defAngFor(SEG_RForearm) : Quat(1, 0, 0, 0);
+    const Quat dA_h_L = m_skel ? m_skel->defAngFor(SEG_LHand)    : Quat(1, 0, 0, 0);
+    const Quat dA_f_L = m_skel ? m_skel->defAngFor(SEG_LForearm) : Quat(1, 0, 0, 0);
+    const Quat fW_R = quat_mult(fR, dA_f_R).normalized();
+    const Quat hW_R = quat_mult(hR, dA_h_R).normalized();
+    const Quat fW_L = quat_mult(fL, dA_f_L).normalized();
+    const Quat hW_L = quat_mult(hL, dA_h_L).normalized();
+    m_anchorLocal[SEG_RHand] = quat_mult(fW_R.inv(), hW_R).normalized();
+    m_anchorLocal[SEG_LHand] = quat_mult(fW_L.inv(), hW_L).normalized();
+    m_anchorValid[SEG_RHand] = true;
+    m_anchorValid[SEG_LHand] = true;
+    m_tposeHandAnchorValid   = true;
+    m_driftLocal[SEG_RHand]  = Quat(1, 0, 0, 0);
+    m_driftLocal[SEG_LHand]  = Quat(1, 0, 0, 0);
+}
+
 void MocapViewport::updatePose(const std::array<Quat, kXsensSegmentCount>& orient,
                                const QVector3D& root)
 {
@@ -7404,8 +7529,13 @@ void MocapViewport::updatePose(const std::array<Quat, kXsensSegmentCount>& orien
                 const Quat fWorld = quat_mult(orient[iForearm], dA_f).normalized();
 
                 if (m_locked[i]) {
-                    m_anchorLocal[i] = quat_mult(fWorld.inv(), hWorld).normalized();
-                    m_anchorValid[i] = true;
+                    // FIX (gloves polish): когда T-pose anchor pinned —
+                    // НЕ перезаписываем anchor lock-моментами.  Кисть
+                    // всегда стремится к T-pose геометрии (ладонь вниз).
+                    if (!m_tposeHandAnchorValid) {
+                        m_anchorLocal[i] = quat_mult(fWorld.inv(), hWorld).normalized();
+                        m_anchorValid[i] = true;
+                    }
                     m_driftLocal[i]  = nlerpQ(m_driftLocal[i], Quat(1, 0, 0, 0),
                                               std::min(1.0, dt / 5.0));
                 } else if (m_anchorValid[i]) {
@@ -7459,8 +7589,14 @@ void MocapViewport::updatePose(const std::array<Quat, kXsensSegmentCount>& orien
                 if (cfg.enabled && !m_locked[i]) {
                     const Quat hWorldFiltered = quat_mult(filtered[i],        dA_h).normalized();
                     const Quat fWorldFiltered = quat_mult(filtered[iForearm], dA_f).normalized();
+                    // FIX (gloves polish): clamp wrist flex/lat-dev
+                    // относительно T-pose anchor (= ладонь вниз).  Если
+                    // anchor невалиден (T-pose skip) — identity = старое
+                    // поведение.
+                    const Quat anchorLocal = m_anchorValid[i]
+                            ? m_anchorLocal[i] : Quat(1, 0, 0, 0);
                     const Quat hConstrainedWorld = constrain_wrist_twist(
-                            hWorldFiltered, fWorldFiltered,
+                            hWorldFiltered, fWorldFiltered, anchorLocal,
                             cfg.maxFlexRad, cfg.maxLatDevRad, cfg.twistWeight,
                             i == SEG_RHand);
                     filtered[i] = quat_mult(hConstrainedWorld, dA_h.inv()).normalized();
@@ -9216,6 +9352,33 @@ MainWindow::MainWindow(MocapReceiver* rx,
     // wizard dialogs instead of switching the whole viewport.
     m_streamer = new LiveStreamSender(this);
     if (m_setup.tposeCaptured) {
+        // FIX (gloves polish): передаём T-pose hand-vs-forearm rotation
+        // в viewport как pinned anchor для wrist drift-correction.
+        // tposeReference[i] это сырая сенсор-ориентация во время T-позы
+        // (актёр стоит ладонями вниз); из неё computes anchor =
+        // (forearm_world).inv() * hand_world в покое.  Без вызова —
+        // anchor продолжает обновляться по lock-моментам как раньше.
+        if (m_viewport) {
+            m_viewport->setTposeHandAnchor(
+                m_setup.tposeReference[SEG_RForearm],
+                m_setup.tposeReference[SEG_RHand],
+                m_setup.tposeReference[SEG_LForearm],
+                m_setup.tposeReference[SEG_LHand]);
+        }
+
+        // FIX (gloves polish): установить per-actor finger baseline,
+        // захваченный в T-pose (расслабленные пальцы ладонями вниз).
+        // parseErgoHand читает g_fingerBaseline и вычитает baseline
+        // из raw degrees — finger "ноль" теперь анатомически правильный.
+        if (m_setup.fingerBaselineCaptured) {
+            QMutexLocker lkBL(&g_fingerBaseline.lock);
+            for (int i = 0; i < 20; ++i) {
+                g_fingerBaseline.left[i]  = m_setup.fingerBaselineL[i];
+                g_fingerBaseline.right[i] = m_setup.fingerBaselineR[i];
+            }
+            g_fingerBaseline.valid.store(true);
+        }
+
         std::array<Quat, kXsensSegmentCount> baselineCand{};
         for (int i = 0; i < kXsensSegmentCount; ++i) {
             baselineCand[i] = quat_mult(m_setup.tposeReference[i],

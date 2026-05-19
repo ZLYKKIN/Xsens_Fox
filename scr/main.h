@@ -654,6 +654,16 @@ public:
         std::array<Quat, kXsensSegmentCount> tposeReference{};
         QVector3D                            tposePelvisPos{};
         bool                                 tposeCaptured = false;
+        // FIX (gloves polish): finger ergonomics averaged during T-pose.
+        // Каждый float — угол в градусах: layout =
+        // [thumb spread, thumb MCP, thumb PIP, thumb DIP, index spread,
+        //  index MCP, ..., pinky DIP].  Используется в parseErgoHand как
+        // "neutral" — runtime раздаёт effective = raw - baseline, что
+        // компенсирует встроенный bias glove'а под конкретного актёра.
+        // Zero-init = baseline отсутствует = старое поведение.
+        std::array<float, 20> fingerBaselineR{};
+        std::array<float, 20> fingerBaselineL{};
+        bool                  fingerBaselineCaptured = false;
     };
 
     NewSessionWizard(MocapReceiver* rx, bool testMode, QWidget* parent=nullptr);
@@ -768,6 +778,14 @@ private:
     std::array<QVector3D, kXsensSegmentCount> m_magAccumT{};
     std::array<double,    kXsensSegmentCount> m_accMagAccumT{};
     std::array<int,       kXsensSegmentCount> m_accumCountT{};
+
+    // FIX (gloves polish): finger ergonomics accumulators (T-pose only).
+    // На каждом good-frame копится сумма Manus EMA-smoothed degrees,
+    // а в момент CaptureT-завершения делится на m_fingerAccumCount
+    // → записывается в m_result.fingerBaselineR/L.
+    std::array<double, 20> m_fingerAccumR{};
+    std::array<double, 20> m_fingerAccumL{};
+    int                    m_fingerAccumCount = 0;
 
     std::array<QVector3D, kXsensSegmentCount> m_accAccumN{};
     std::array<QVector3D, kXsensSegmentCount> m_gyrAccumN{};
@@ -934,6 +952,14 @@ public:
         return right ? m_wristCfgR : m_wristCfgL;
     }
 
+    // FIX (gloves polish): pin wrist drift-correction anchor to the
+    // hand-vs-forearm rotation captured during T-pose calibration.
+    // Без T-pose anchor anchor берётся от первого "lock" момента в
+    // runtime — может оказаться в кривой позе.  С anchor — кисть всегда
+    // стремится "продолжать" forearm в T-pose геометрии (ладонь вниз).
+    void setTposeHandAnchor(const Quat& forearmR_T, const Quat& handR_T,
+                            const Quat& forearmL_T, const Quat& handL_T);
+
     QSize sizeHint() const override { return QSize(800, 600); }
 
     const std::array<Quat, kXsensSegmentCount>& filteredOrient() const { return m_orient; }
@@ -1002,6 +1028,10 @@ private:
     std::array<Quat, kXsensSegmentCount>   m_anchorLocal{};
     std::array<bool, kXsensSegmentCount>   m_anchorValid{};
     std::array<Quat, kXsensSegmentCount>   m_driftLocal{};
+    // FIX (gloves polish): когда true, m_anchorLocal[SEG_RHand/LHand] было
+    // зафиксировано из T-pose calibration и больше не обновляется по
+    // lock-моментам — кисть всегда "тянется" к T-pose геометрии.
+    bool                                    m_tposeHandAnchorValid = false;
     // FIX issue 11/7: время непрерывной "тишины" сегмента (allCalm).
     // Когда сегмент 5+ секунд спокоен — применяем дополнительную damped
     // twist коррекцию (для wrist в issue 11) или yaw-коррекцию (для foot
