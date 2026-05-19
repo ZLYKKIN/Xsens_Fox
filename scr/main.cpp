@@ -4583,23 +4583,40 @@ void NewSessionWizard::onCaptureTick()
     std::array<Quat, kXsensSegmentCount> snap{};
     for (int i = 0; i < kXsensSegmentCount; ++i) snap[i] = fr.quat[i];
 
-    double maxD = 0.0, second = 0.0;
+    double medianDelta = 0.0;
     if (m_havePrev) {
+        std::array<double, kXsensSegmentCount> deltas{};
         for (int i = 0; i < kXsensSegmentCount; ++i) {
             const double dot = std::abs(snap[i].w * m_prevSnap[i].w
                                       + snap[i].x * m_prevSnap[i].x
                                       + snap[i].y * m_prevSnap[i].y
                                       + snap[i].z * m_prevSnap[i].z);
             const double c = dot > 1 ? 1 : (dot < -1 ? -1 : dot);
-            const double a = 2.0 * std::acos(c);
-            if (a > maxD)        { second = maxD; maxD = a; }
-            else if (a > second)   second = a;
+            deltas[i] = 2.0 * std::acos(c);
         }
+        std::sort(deltas.begin(), deltas.end());
+        medianDelta = deltas[kXsensSegmentCount / 2];
     }
     m_prevSnap = snap; m_havePrev = true;
+    const double second = medianDelta;
 
-    constexpr double kStillRad = 0.025;
-    const bool still = second < kStillRad;
+    constexpr double kStillLowRad  = 0.04;
+    constexpr double kStillHighRad = 0.10;
+    constexpr int    kFlipStreak   = 3;
+    if (m_stillState) {
+        if (second > kStillHighRad) {
+            if (++m_moveStreak >= kFlipStreak) { m_stillState = false; m_stillStreak = 0; }
+        } else {
+            m_moveStreak = 0;
+        }
+    } else {
+        if (second < kStillLowRad) {
+            if (++m_stillStreak >= kFlipStreak) { m_stillState = true; m_moveStreak = 0; }
+        } else {
+            m_stillStreak = 0;
+        }
+    }
+    const bool still = m_stillState;
 
     if (still) {
         m_samples.push_back(snap);

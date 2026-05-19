@@ -581,6 +581,9 @@ private:
     std::vector<std::array<Quat, kXsensSegmentCount>> m_samples;
     std::array<Quat, kXsensSegmentCount> m_prevSnap{};
     bool   m_havePrev = false;
+    bool   m_stillState = true;
+    int    m_stillStreak = 0;
+    int    m_moveStreak  = 0;
     bool   m_calibComplete = false;
 
     enum class CalibPhase { Idle, PrepT, CaptureT, SettleT, PrepN, CaptureN, Settle, PrepK, CaptureK, Done };
