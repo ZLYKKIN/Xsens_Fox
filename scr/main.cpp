@@ -7282,6 +7282,32 @@ void MocapViewport::setActor(const ActorConfig& actor)
     update();
 }
 
+// FIX (gloves polish): pin wrist drift anchor from T-pose calibration.
+// Сейчас m_anchorLocal[wrist] обновляется при каждом lock-моменте; если
+// первый lock попал на кривую позу — anchor зафиксирован неверно.
+// С T-pose anchor anchor берётся из 500-кадрового averaging T-позы
+// (actor стоит ладонями вниз), что даёт стабильный анатомический ноль.
+// После вызова — m_locked-моменты больше не перезаписывают anchor.
+void MocapViewport::setTposeHandAnchor(const Quat& fR, const Quat& hR,
+                                       const Quat& fL, const Quat& hL)
+{
+    const Quat dA_h_R = m_skel ? m_skel->defAngFor(SEG_RHand)    : Quat(1, 0, 0, 0);
+    const Quat dA_f_R = m_skel ? m_skel->defAngFor(SEG_RForearm) : Quat(1, 0, 0, 0);
+    const Quat dA_h_L = m_skel ? m_skel->defAngFor(SEG_LHand)    : Quat(1, 0, 0, 0);
+    const Quat dA_f_L = m_skel ? m_skel->defAngFor(SEG_LForearm) : Quat(1, 0, 0, 0);
+    const Quat fW_R = quat_mult(fR, dA_f_R).normalized();
+    const Quat hW_R = quat_mult(hR, dA_h_R).normalized();
+    const Quat fW_L = quat_mult(fL, dA_f_L).normalized();
+    const Quat hW_L = quat_mult(hL, dA_h_L).normalized();
+    m_anchorLocal[SEG_RHand] = quat_mult(fW_R.inv(), hW_R).normalized();
+    m_anchorLocal[SEG_LHand] = quat_mult(fW_L.inv(), hW_L).normalized();
+    m_anchorValid[SEG_RHand] = true;
+    m_anchorValid[SEG_LHand] = true;
+    m_tposeHandAnchorValid   = true;
+    m_driftLocal[SEG_RHand]  = Quat(1, 0, 0, 0);
+    m_driftLocal[SEG_LHand]  = Quat(1, 0, 0, 0);
+}
+
 void MocapViewport::updatePose(const std::array<Quat, kXsensSegmentCount>& orient,
                                const QVector3D& root)
 {
@@ -7404,8 +7430,13 @@ void MocapViewport::updatePose(const std::array<Quat, kXsensSegmentCount>& orien
                 const Quat fWorld = quat_mult(orient[iForearm], dA_f).normalized();
 
                 if (m_locked[i]) {
-                    m_anchorLocal[i] = quat_mult(fWorld.inv(), hWorld).normalized();
-                    m_anchorValid[i] = true;
+                    // FIX (gloves polish): когда T-pose anchor pinned —
+                    // НЕ перезаписываем anchor lock-моментами.  Кисть
+                    // всегда стремится к T-pose геометрии (ладонь вниз).
+                    if (!m_tposeHandAnchorValid) {
+                        m_anchorLocal[i] = quat_mult(fWorld.inv(), hWorld).normalized();
+                        m_anchorValid[i] = true;
+                    }
                     m_driftLocal[i]  = nlerpQ(m_driftLocal[i], Quat(1, 0, 0, 0),
                                               std::min(1.0, dt / 5.0));
                 } else if (m_anchorValid[i]) {
@@ -9216,6 +9247,20 @@ MainWindow::MainWindow(MocapReceiver* rx,
     // wizard dialogs instead of switching the whole viewport.
     m_streamer = new LiveStreamSender(this);
     if (m_setup.tposeCaptured) {
+        // FIX (gloves polish): передаём T-pose hand-vs-forearm rotation
+        // в viewport как pinned anchor для wrist drift-correction.
+        // tposeReference[i] это сырая сенсор-ориентация во время T-позы
+        // (актёр стоит ладонями вниз); из неё computes anchor =
+        // (forearm_world).inv() * hand_world в покое.  Без вызова —
+        // anchor продолжает обновляться по lock-моментам как раньше.
+        if (m_viewport) {
+            m_viewport->setTposeHandAnchor(
+                m_setup.tposeReference[SEG_RForearm],
+                m_setup.tposeReference[SEG_RHand],
+                m_setup.tposeReference[SEG_LForearm],
+                m_setup.tposeReference[SEG_LHand]);
+        }
+
         std::array<Quat, kXsensSegmentCount> baselineCand{};
         for (int i = 0; i < kXsensSegmentCount; ++i) {
             baselineCand[i] = quat_mult(m_setup.tposeReference[i],

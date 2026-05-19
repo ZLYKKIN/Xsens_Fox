@@ -934,6 +934,14 @@ public:
         return right ? m_wristCfgR : m_wristCfgL;
     }
 
+    // FIX (gloves polish): pin wrist drift-correction anchor to the
+    // hand-vs-forearm rotation captured during T-pose calibration.
+    // Без T-pose anchor anchor берётся от первого "lock" момента в
+    // runtime — может оказаться в кривой позе.  С anchor — кисть всегда
+    // стремится "продолжать" forearm в T-pose геометрии (ладонь вниз).
+    void setTposeHandAnchor(const Quat& forearmR_T, const Quat& handR_T,
+                            const Quat& forearmL_T, const Quat& handL_T);
+
     QSize sizeHint() const override { return QSize(800, 600); }
 
     const std::array<Quat, kXsensSegmentCount>& filteredOrient() const { return m_orient; }
@@ -1002,6 +1010,10 @@ private:
     std::array<Quat, kXsensSegmentCount>   m_anchorLocal{};
     std::array<bool, kXsensSegmentCount>   m_anchorValid{};
     std::array<Quat, kXsensSegmentCount>   m_driftLocal{};
+    // FIX (gloves polish): когда true, m_anchorLocal[SEG_RHand/LHand] было
+    // зафиксировано из T-pose calibration и больше не обновляется по
+    // lock-моментам — кисть всегда "тянется" к T-pose геометрии.
+    bool                                    m_tposeHandAnchorValid = false;
     // FIX issue 11/7: время непрерывной "тишины" сегмента (allCalm).
     // Когда сегмент 5+ секунд спокоен — применяем дополнительную damped
     // twist коррекцию (для wrist в issue 11) или yaw-коррекцию (для foot
