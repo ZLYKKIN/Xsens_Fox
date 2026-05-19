@@ -40,15 +40,16 @@ FINGER_BASE_OFFSET = [
     [0.075, -0.025,  0.000],
 ]
 SPREAD_SIGN = [+1.0, +0.5, 0.0, -0.5, -1.0]
-THUMB_CMC_RADIAL_DEG     = 40.0
-THUMB_CMC_OPPOSITION_DEG = 15.0
+# v2 anatomy constants — see scr/main.cpp parseErgoHand.
+THUMB_CMC_RADIAL_DEG          = 45.0
+THUMB_CMC_OPPOSITION_DEG      = 20.0
+THUMB_DISTAL_FLEX_TILT_DEG    =  8.0
 
-# Joint limits — from scr/main.cpp:2247-2273.  Only the thumb row matters here.
+# Joint limits — Brand & Hollister adult ROM.
 LIM = [
-    [(-np.pi*0.30,  np.pi*0.50, -np.pi/12, np.pi*0.50),  # thumb spread / MCP
-     ( 0.0,         0.0,         0.0,      np.pi*0.55),  # PIP
-     ( 0.0,         0.0,         0.0,      np.pi/3.0)],  # DIP
-    # …other fingers unused here, padded later if needed.
+    [(-np.pi/18.0,  np.pi*0.22, -np.pi/12, np.pi*0.50),  # thumb CMC
+     ( 0.0,         0.0,         0.0,      np.pi*0.50),  # MCP
+     ( 0.0,         0.0,         0.0,      np.pi*0.45)], # IP
 ]
 
 
@@ -69,8 +70,14 @@ def parse_ergo_finger(spread_deg, mcp_deg, pip_deg, dip_deg, f):
     spread_axis = np.array([0.0, 0.0, 1.0])
     q0 = qnorm(qmul(axangle(spread_axis, spread_c),
                     axangle(flex_axis, a1c)))
-    q1 = axangle(flex_axis, a2c)
-    q2 = axangle(flex_axis, a3c)
+    # Thumb distal joints (MCP, IP) tilt 8° palmar — mirror scr/main.cpp.
+    if f == 0:
+        t = np.deg2rad(THUMB_DISTAL_FLEX_TILT_DEG)
+        distal_axis = np.array([np.sin(t), np.cos(t), 0.0])
+    else:
+        distal_axis = flex_axis
+    q1 = axangle(distal_axis, a2c)
+    q2 = axangle(distal_axis, a3c)
 
     if f == 0:
         thumb_pre = qnorm(qmul(
@@ -123,9 +130,15 @@ def test_thumb_rest_radial():
     tip = thumb_rest_tip()
     base = np.array(FINGER_BASE_OFFSET[0], dtype=float)
     delta = tip - base
-    assert delta[0] > 0.0,           f"thumb tip should be forward, got {delta}"
-    assert delta[1] > 0.0,           f"thumb tip should be radial (+Y), got {delta}"
-    assert delta[0] > abs(delta[1]), f"forward should dominate over radial, got {delta}"
+    assert delta[0] > 0.0, f"thumb tip should be forward, got {delta}"
+    assert delta[1] > 0.0, f"thumb tip should be radial (+Y), got {delta}"
+    # v2 anatomy: trapezium sits at ~45° to the palm plane, so the rest
+    # thumb metacarpal is approximately equally forward + radial.  Loosened
+    # from strict-greater to within-30% (forward must still be at least
+    # 70 % of the radial magnitude — guards against runaway opposition
+    # tilt that would flip the rest pose into the ulnar half-space).
+    assert delta[0] > 0.7 * abs(delta[1]), \
+        f"forward should be ≳ 0.7 × radial at rest, got {delta}"
     # Sanity: total length within 1 mm of bone-chain length (straight line).
     L = sum(FINGER_BONE_LEN[0])
     err = abs(float(np.linalg.norm(delta)) - L)

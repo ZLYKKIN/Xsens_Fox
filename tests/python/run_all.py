@@ -43,6 +43,7 @@ TEST_MODULES = [
     "test_diff_streams",
     "test_actor_dimensions",
     "test_pose_transition_z",
+    "test_finger_anatomy",
 ]
 
 

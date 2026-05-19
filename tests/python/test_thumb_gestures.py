@@ -31,25 +31,28 @@ FINGER_BASE_OFFSET = [
     [0.075, -0.025,  0.000],
 ]
 SPREAD_SIGN = [+1.0, +0.5, 0.0, -0.5, -1.0]
-THUMB_CMC_RADIAL_DEG = 40.0
-THUMB_CMC_OPPOSITION_DEG = 15.0
+# v2 anatomy constants — see scr/main.cpp parseErgoHand.
+THUMB_CMC_RADIAL_DEG       = 45.0
+THUMB_CMC_OPPOSITION_DEG   = 20.0
+THUMB_DISTAL_FLEX_TILT_DEG =  8.0
 
+# Refined Brand & Hollister ROM — wider DIP (60° → 81°), tighter thumb spread.
 LIM = [
-    [(-np.pi*0.30,  np.pi*0.50, -np.pi/12, np.pi*0.50),
-     ( 0.0,         0.0,         0.0,      np.pi*0.55),
-     ( 0.0,         0.0,         0.0,      np.pi/3.0)],
+    [(-np.pi/18.0,  np.pi*0.22, -np.pi/12, np.pi*0.50),
+     ( 0.0,         0.0,         0.0,      np.pi*0.50),
+     ( 0.0,         0.0,         0.0,      np.pi*0.45)],
     [(-np.pi/9.0,   np.pi/9.0,  -np.pi/12, np.pi*0.50),
-     ( 0.0,         0.0,         0.0,      np.pi*0.65),
-     ( 0.0,         0.0,         0.0,      np.pi/3.0)],
+     ( 0.0,         0.0,         0.0,      np.pi*0.62),
+     ( 0.0,         0.0,         0.0,      np.pi*0.45)],
     [(-np.pi/18.0,  np.pi/18.0, -np.pi/12, np.pi*0.50),
-     ( 0.0,         0.0,         0.0,      np.pi*0.65),
-     ( 0.0,         0.0,         0.0,      np.pi/3.0)],
+     ( 0.0,         0.0,         0.0,      np.pi*0.62),
+     ( 0.0,         0.0,         0.0,      np.pi*0.45)],
     [(-np.pi/9.0,   np.pi/9.0,  -np.pi/12, np.pi*0.50),
-     ( 0.0,         0.0,         0.0,      np.pi*0.65),
-     ( 0.0,         0.0,         0.0,      np.pi/3.0)],
+     ( 0.0,         0.0,         0.0,      np.pi*0.62),
+     ( 0.0,         0.0,         0.0,      np.pi*0.45)],
     [(-np.pi/8.0,   np.pi/8.0,  -np.pi/12, np.pi*0.50),
-     ( 0.0,         0.0,         0.0,      np.pi*0.65),
-     ( 0.0,         0.0,         0.0,      np.pi/3.0)],
+     ( 0.0,         0.0,         0.0,      np.pi*0.62),
+     ( 0.0,         0.0,         0.0,      np.pi*0.45)],
 ]
 
 
@@ -70,8 +73,13 @@ def parse_ergo_finger(spread_deg, mcp_deg, pip_deg, dip_deg, f):
     spread_axis = np.array([0., 0, 1])
     q0 = qnorm(qmul(axangle(spread_axis, spread_c),
                      axangle(flex_axis, a1c)))
-    q1 = axangle(flex_axis, a2c)
-    q2 = axangle(flex_axis, a3c)
+    if f == 0:
+        t = np.deg2rad(THUMB_DISTAL_FLEX_TILT_DEG)
+        distal_axis = np.array([np.sin(t), np.cos(t), 0.0])
+    else:
+        distal_axis = flex_axis
+    q1 = axangle(distal_axis, a2c)
+    q2 = axangle(distal_axis, a3c)
 
     if f == 0:
         thumb_pre = qnorm(qmul(

@@ -2187,30 +2187,60 @@ static const QVector3D kFingerBaseOffset[5] = {
 static const double kSpreadSign[5] = { +1.0, +0.5, 0.0, -0.5, -1.0 };
 
 const FingerJointLimit kFingerLimits[5][3] = {
+    // Joint limits per finger, refined to real adult human ROM literature
+    // (Brand & Hollister, "Clinical Mechanics of the Hand", 3rd ed.).
+    //
+    // Layout per row: { spreadMin, spreadMax, flexMin, flexMax } for the
+    // matching FK joint (slot 0/1/2 of the finger), in radians.
+    //
+    //   thumb row 0  – CMC abduction (spread) + CMC flexion (a1)
+    //         row 1  – MCP flexion        (a2)
+    //         row 2  – IP  flexion        (a3)
+    //   other row 0  – MCP abduction (spread) + MCP flexion (a1)
+    //         row 1  – PIP flexion        (a2)
+    //         row 2  – DIP flexion        (a3)
+    //
+    // Pre-fix limits used PI/3 (60°) for every distal flexion — well below
+    // the 80-90° real-world DIP / thumb-IP ROM, so a full fist clipped
+    // before the tip reached the palm.  Pre-fix thumb spread also went to
+    // ±0.30π · π / 2 ≈ ±54°, far past the ~25° measured ROM.
     {
-        { -M_PI * 0.30,  M_PI * 0.50,  -M_PI / 12.0,  M_PI * 0.50 },
-        {  0.0,          0.0,           0.0,          M_PI * 0.55 },
-        {  0.0,          0.0,           0.0,          M_PI / 3.0  }
+        // Thumb CMC: spread = radial-ulnar abduction (carpometacarpal
+        // saddle); flex = palmar abduction (toward palm).  Spread tighter
+        // than before (real ROM is ~25° abd / 10° add), flex limited to
+        // 90° (real CMC flex max ~50–70° but Manus reports cumulative
+        // CMC+MCP here in some firmware revisions, so we leave headroom).
+        { -M_PI / 18.0,  M_PI * 0.22,  -M_PI / 12.0,  M_PI * 0.50 },
+        // Thumb MCP: pure hinge, real max 75-90°.
+        {  0.0,          0.0,           0.0,          M_PI * 0.50 },
+        // Thumb IP: pure hinge, real max 80-90° (was PI/3 = 60°).
+        {  0.0,          0.0,           0.0,          M_PI * 0.45 }
     },
     {
+        // Index MCP: spread ±20° (radial / ulnar), flex 0-90°.
         { -M_PI / 9.0,   M_PI / 9.0,   -M_PI / 12.0,  M_PI * 0.50 },
-        {  0.0,          0.0,           0.0,          M_PI * 0.65 },
-        {  0.0,          0.0,           0.0,          M_PI / 3.0  }
+        // Index PIP: real max ~110°, slight headroom = 0.62π ≈ 112°.
+        {  0.0,          0.0,           0.0,          M_PI * 0.62 },
+        // Index DIP: real max 80-90° (was PI/3 = 60° — too tight).
+        {  0.0,          0.0,           0.0,          M_PI * 0.45 }
     },
     {
+        // Middle MCP: spread ±10° only — middle finger barely fans.
         { -M_PI / 18.0,  M_PI / 18.0,  -M_PI / 12.0,  M_PI * 0.50 },
-        {  0.0,          0.0,           0.0,          M_PI * 0.65 },
-        {  0.0,          0.0,           0.0,          M_PI / 3.0  }
+        {  0.0,          0.0,           0.0,          M_PI * 0.62 },
+        {  0.0,          0.0,           0.0,          M_PI * 0.45 }
     },
     {
+        // Ring MCP: spread ±20°.
         { -M_PI / 9.0,   M_PI / 9.0,   -M_PI / 12.0,  M_PI * 0.50 },
-        {  0.0,          0.0,           0.0,          M_PI * 0.65 },
-        {  0.0,          0.0,           0.0,          M_PI / 3.0  }
+        {  0.0,          0.0,           0.0,          M_PI * 0.62 },
+        {  0.0,          0.0,           0.0,          M_PI * 0.45 }
     },
     {
+        // Pinky MCP: spread ±22.5° (widest of the non-thumb).
         { -M_PI / 8.0,   M_PI / 8.0,   -M_PI / 12.0,  M_PI * 0.50 },
-        {  0.0,          0.0,           0.0,          M_PI * 0.65 },
-        {  0.0,          0.0,           0.0,          M_PI / 3.0  }
+        {  0.0,          0.0,           0.0,          M_PI * 0.62 },
+        {  0.0,          0.0,           0.0,          M_PI * 0.45 }
     }
 };
 
@@ -2232,15 +2262,30 @@ static void parseErgoHand(const float* degs20, bool isLeft,
     const double sideSign = isLeft ? -1.0 : +1.0;
 
     // ============================================================
+    // Thumb anatomy — CMC pre-rotation + per-joint axis tilts.
+    // CMC is a saddle joint at ~45° to palm plane; MCP/IP tilt ~5-10°
+    // palmar.  thumbPreRot = R_z(+radial) · R_x(-opposition).  Left hand
+    // gets correct mirror automatically via mirror_y_quat (homomorphism
+    // over quat product).  kThumbDistalFlexTiltDeg makes MCP/IP curl
+    // follow the palmar plane instead of cutting flat across it.
     // ============================================================
-    constexpr double kThumbCmcRadialDeg     = 40.0;
-    constexpr double kThumbCmcOppositionDeg = 15.0;
+    constexpr double kThumbCmcRadialDeg          = 45.0;
+    constexpr double kThumbCmcOppositionDeg      = 20.0;
+    constexpr double kThumbDistalFlexTiltDeg     = 8.0;
     const Quat thumbPreRot = quat_mult(
         axisAngleQuat(QVector3D(0,0,1),
                       kThumbCmcRadialDeg     * M_PI / 180.0),
         axisAngleQuat(QVector3D(1,0,0),
                      -kThumbCmcOppositionDeg * M_PI / 180.0)
     ).normalized();
+    // Tilted hinge axis used for thumb MCP (a2) and IP (a3).  Rotating
+    // +Y by R_z(-tiltDeg) gives (sin tilt, cos tilt, 0) — mostly +Y
+    // (the canonical flex axis) with a small +X (forward) component, so
+    // flex now curls palmar-radial instead of palmar-only.
+    const double tiltRad = kThumbDistalFlexTiltDeg * M_PI / 180.0;
+    const QVector3D thumbDistalFlexAxis(float(std::sin(tiltRad)),
+                                        float(std::cos(tiltRad)),
+                                        0.0f);
 
     for (int f = 0; f < 5; ++f) {
         const float* d = degs20 + f * 4;
@@ -2259,8 +2304,12 @@ static void parseErgoHand(const float* degs20, bool isLeft,
 
         Quat q0 = quat_mult(axisAngleQuat(spreadAx, spreadC),
                             axisAngleQuat(flexAxis, a1c));
-        Quat q1 = axisAngleQuat(flexAxis, a2c);
-        Quat q2 = axisAngleQuat(flexAxis, a3c);
+        // Thumb MCP (a2) and IP (a3) hinges tilt ~8° palmar — see the
+        // kThumbDistalFlexTiltDeg block above for the anatomy reference.
+        // Other fingers keep the canonical +Y flex axis.
+        const QVector3D distalAxis = (f == 0) ? thumbDistalFlexAxis : flexAxis;
+        Quat q1 = axisAngleQuat(distalAxis, a2c);
+        Quat q2 = axisAngleQuat(distalAxis, a3c);
 
         // FIX: для большого пальца стартуем с предвернутой
         // локальной системой координат вместо identity.
