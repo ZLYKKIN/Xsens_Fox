@@ -7813,17 +7813,46 @@ void MocapViewport::updatePose(const std::array<Quat, kXsensSegmentCount>& orien
 
                 const Quat dA_f = m_skel ? m_skel->defAngFor(i) : Quat(1, 0, 0, 0);
                 const Quat dA_ll = m_skel ? m_skel->defAngFor(iLowerLeg) : Quat(1, 0, 0, 0);
+                const Quat dA_pel = m_skel ? m_skel->defAngFor(SEG_Pelvis) : Quat(1, 0, 0, 0);
                 const Quat fWorld  = quat_mult(filtered[i],         dA_f).normalized();
                 const Quat llWorld = quat_mult(filtered[iLowerLeg], dA_ll).normalized();
+                const Quat pelvisWorld = quat_mult(filtered[SEG_Pelvis], dA_pel).normalized();
+
+                // FIX (T-pose foot direction reference + cross-legged):
+                // если есть T-pose anchor → используем pelvis-yaw как
+                // stable reference (lowerLeg уезжает при flex'е колена,
+                // искажая yaw drift detection).  Cross-legged confidence
+                // (0..1) глушит коррекцию: при перекрёщенных ногах
+                // lowerLeg/pelvis-yaw геометрия "запутана" и коррекция
+                // может развернуть стопу неправильно.
+                const bool useTposeRef = m_tposeFootAnchorValid;
+                const Quat refWorld = useTposeRef
+                                    ? yaw_only_quat(pelvisWorld)
+                                    : llWorld;
+                const double crossConf = (i == SEG_RFoot) ? m_crossLeggedConfR
+                                                          : m_crossLeggedConfL;
+                const bool   crossLeg  = (i == SEG_RFoot) ? m_crossLeggedR
+                                                          : m_crossLeggedL;
+                const double gateAttn = std::max(0.0, 1.0 - crossConf);
+                const Quat tposeAnchorLocal = (i == SEG_RFoot)
+                                            ? m_tposeFootRefPelR
+                                            : m_tposeFootRefPelL;
 
                 if (m_locked[i]) {
-                    m_anchorLocal[i] = quat_mult(llWorld.inv(), fWorld).normalized();
-                    m_anchorValid[i] = true;
+                    // Анкор: если T-pose pinned — НЕ перезаписываем (как
+                    // в hand block для T-pose hand anchor).  Иначе старый
+                    // путь: lowerLeg-relative.
+                    if (!useTposeRef) {
+                        m_anchorLocal[i] = quat_mult(llWorld.inv(), fWorld).normalized();
+                        m_anchorValid[i] = true;
+                    }
                     m_driftLocal[i]  = nlerpQ(m_driftLocal[i], Quat(1, 0, 0, 0),
                                               std::min(1.0, dt / 5.0));
-                } else if (m_anchorValid[i] && m_calmSeconds[i] >= 2.0) {
-                    const Quat current_local = quat_mult(llWorld.inv(), fWorld).normalized();
-                    Quat drift = quat_mult(current_local, m_anchorLocal[i].inv()).normalized();
+                } else if ((useTposeRef || m_anchorValid[i]) && m_calmSeconds[i] >= 2.0) {
+                    const Quat anchorLocal = useTposeRef ? tposeAnchorLocal
+                                                         : m_anchorLocal[i];
+                    const Quat current_local = quat_mult(refWorld.inv(), fWorld).normalized();
+                    Quat drift = quat_mult(current_local, anchorLocal.inv()).normalized();
                     if (drift.w < 0) {
                         drift.w = -drift.w; drift.x = -drift.x;
                         drift.y = -drift.y; drift.z = -drift.z;
@@ -7837,12 +7866,13 @@ void MocapViewport::updatePose(const std::array<Quat, kXsensSegmentCount>& orien
                     // [0.7*budget .. budget].  Старый код hard-cut при
                     // driftAngle >= budget — коррекция мгновенно отключалась.
                     // Теперь плавно затухает в полосе 10.5°..15°.
-                    if (allCalm) {
+                    // FIX (cross-legged): дополнительно глушим при crossLeg.
+                    if (allCalm && !crossLeg) {
                         auto smoothstep01 = [](double x){ x = std::clamp(x,0.0,1.0); return x*x*(3.0-2.0*x); };
                         const double budgetAttn = smoothstep01(
                                 (driftBudget - driftAngle) / (driftBudget * 0.3));
                         if (budgetAttn > 0.0) {
-                            const double alpha = std::min(1.0, dt / 3.0) * budgetAttn;
+                            const double alpha = std::min(1.0, dt / 3.0) * budgetAttn * gateAttn;
                             m_driftLocal[i] = nlerpQ(m_driftLocal[i], drift, alpha);
                         }
                     }
@@ -7853,9 +7883,14 @@ void MocapViewport::updatePose(const std::array<Quat, kXsensSegmentCount>& orien
                     if (2.0 * std::acos(dw) > 1e-4) {
                         Quat dLSwing, dLTwist;
                         swingTwistDecompose(dL, QVector3D(0.0f, 0.0f, 1.0f), dLSwing, dLTwist);
-                        const Quat dLTwistInv = dLTwist.inv();
-                        const Quat correctionWorld = quat_mult(llWorld,
-                                                       quat_mult(dLTwistInv, llWorld.inv())).normalized();
+                        Quat dLTwistInv = dLTwist.inv();
+                        // FIX (cross-legged): дополнительно слегка damp
+                        // twist correction при crossConf > 0.
+                        if (crossConf > 0.0) {
+                            dLTwistInv = slerp_quat(dLTwistInv, Quat(1, 0, 0, 0), crossConf);
+                        }
+                        const Quat correctionWorld = quat_mult(refWorld,
+                                                       quat_mult(dLTwistInv, refWorld.inv())).normalized();
                         const Quat fCorrected = quat_mult(correctionWorld, fWorld).normalized();
                         filtered[i] = quat_mult(fCorrected, dA_f.inv()).normalized();
                     }
