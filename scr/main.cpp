@@ -1457,7 +1457,17 @@ QVector3D LocomotionSolver::update(const Quat& qR,
         // which is why the skeleton "walked in place" — anchors never
         // updated.  0.5 rad/s reserves yawFreeze for actual deliberate
         // turning.
-        const bool yawFreeze = (m_pelvisYawAngV > 0.50);
+        // FIX (terminator smoothing): smoothstep zone [0.35..0.65] rad/s
+        // вместо жёсткого 0.50, чтобы при ходьбе с heel-strike-yaw-oscillation
+        // ~0.4 rad/s не было flicker'а в rFKXYStable.  Bool yawFreeze
+        // оставляем для edge-handler ниже (ring buffer clear), который
+        // должен срабатывать ровно один раз на переходе.
+        auto smoothstep01 = [](double x) {
+            x = std::clamp(x, 0.0, 1.0);
+            return x * x * (3.0 - 2.0 * x);
+        };
+        const double yawFreezeW = smoothstep01((m_pelvisYawAngV - 0.35) / 0.30);
+        const bool yawFreeze = (yawFreezeW > 0.5);
 
         if (yawFreeze && !m_yawFrozenPrev) {
             m_fkxyHead  = 0;
@@ -1476,8 +1486,19 @@ QVector3D LocomotionSolver::update(const Quat& qR,
             m_fkxyCount = 0;
         }
 
-        const bool rFKXYStable = yawFreeze ? true : (xyRange(m_rFKXY) < float(m_fkxyStableRange));
-        const bool lFKXYStable = yawFreeze ? true : (xyRange(m_lFKXY) < float(m_fkxyStableRange));
+        // FIX (terminator smoothing): rFKXYStable теперь continuous weight.
+        // Smoothstep zone [stableRange*0.5 .. stableRange*1.5] = [0.02..0.06].
+        // При xy < 0.02 m → stableW=1; при xy > 0.06 → 0; в середине плавно.
+        const float xyR = xyRange(m_rFKXY);
+        const float xyL = xyRange(m_lFKXY);
+        const double stableHi = m_fkxyStableRange * 1.5;
+        const double stableDen = std::max(1e-6, m_fkxyStableRange);
+        const double rFKXYStableW = std::max(yawFreezeW,
+                smoothstep01((stableHi - double(xyR)) / stableDen));
+        const double lFKXYStableW = std::max(yawFreezeW,
+                smoothstep01((stableHi - double(xyL)) / stableDen));
+        const bool rFKXYStable = (rFKXYStableW > 0.5);
+        const bool lFKXYStable = (lFKXYStableW > 0.5);
 
         // 4. Classify pose.
         double tiltCos = 1.0;
@@ -1498,16 +1519,25 @@ QVector3D LocomotionSolver::update(const Quat& qR,
         m_lowZTicksL = (fkL.z() - fkMinZ < float(m_lowZBandM))
                        ? std::min(m_lowZTicksL + 1, 4096) : 0;
 
-        // FIX issue 10: rolling-foot detector.  Стопа быстро вращается
-        // (|angV| > 2 rad/s) при почти стоячем FK-XY (range<3cm) =
-        // перекат мыска-на-мысок.  В таком состоянии не двигаем якорь
-        // и не меняем committed/released флаги — иначе скелет смещается.
-        const float rangeR = xyRange(m_rFKXY);
-        const float rangeL = xyRange(m_lFKXY);
-        const bool rollingR = (m_rAngV > m_rollAngVThresh)
-                           && (rangeR < float(m_rollXYRangeMax));
-        const bool rollingL = (m_lAngV > m_rollAngVThresh)
-                           && (rangeL < float(m_rollXYRangeMax));
+        // FIX issue 10 + terminator smoothing: rolling-foot detector.
+        // Стопа быстро вращается (|angV| ~2 rad/s) при почти стоячем
+        // FK-XY (range ~3cm) = перекат мыска-на-мысок.
+        // Smoothstep angV [1.5..2.5] rad/s, range [stableRange/3 .. stableRange*2/3]
+        // (т.е. [0.013..0.027] вокруг 0.03), bool rollingR=W>0.5 для downstream
+        // hysteresis (replaces hard cliff at exactly 2.0 rad/s).
+        const float rangeR = xyR;   // already computed above for FK-XY-stable
+        const float rangeL = xyL;
+        const double angFastR = smoothstep01((m_rAngV - (m_rollAngVThresh - 0.5)) / 1.0);
+        const double angFastL = smoothstep01((m_lAngV - (m_rollAngVThresh - 0.5)) / 1.0);
+        const double xyHi    = m_rollXYRangeMax * 1.33;     // ~0.04
+        const double xyLo    = m_rollXYRangeMax * 0.67;     // ~0.02
+        const double xyDen   = std::max(1e-6, xyHi - xyLo);
+        const double xyTightR = smoothstep01((xyHi - double(rangeR)) / xyDen);
+        const double xyTightL = smoothstep01((xyHi - double(rangeL)) / xyDen);
+        const double rollingWR = angFastR * xyTightR;
+        const double rollingWL = angFastL * xyTightL;
+        const bool rollingR = (rollingWR > 0.5);
+        const bool rollingL = (rollingWL > 0.5);
 
         // 5. Initialisation on first frame.
         if (!m_initialised) {
@@ -1551,10 +1581,10 @@ QVector3D LocomotionSolver::update(const Quat& qR,
             double s = 1.0 - dz / std::max(m_heightMarginSlow, 1e-3);
             return std::max(0.0, std::min(1.0, s));
         };
-        const double rawCR = std::max(sStill(m_rAngV), rFKXYStable ? 1.0 : 0.0)
-                           * sLow(fkR);
-        const double rawCL = std::max(sStill(m_lAngV), lFKXYStable ? 1.0 : 0.0)
-                           * sLow(fkL);
+        // FIX (terminator smoothing): use continuous rFKXYStableW (0..1)
+        // вместо bool — плавный переход в погранзоне stable/non-stable.
+        const double rawCR = std::max(sStill(m_rAngV), rFKXYStableW) * sLow(fkR);
+        const double rawCL = std::max(sStill(m_lAngV), lFKXYStableW) * sLow(fkL);
         auto smooth = [](double prev, double raw, double rise, double fall) {
             const double r = (raw > prev) ? rise : fall;
             return (1.0 - r) * prev + r * raw;
@@ -7491,6 +7521,11 @@ void MocapViewport::updatePose(const std::array<Quat, kXsensSegmentCount>& orien
                     // Engage lock — freeze at current quat.
                     m_locked[i]   = true;
                     m_lockQuat[i] = m_prevQ[i];
+                    // FIX (terminator smoothing): start lock-in ramp at 0 → 1
+                    // over ~7 frames (77ms @90Hz).  Without this lock jumps
+                    // from orient[i] straight to m_lockQuat[i] which may
+                    // differ by 0.5°-1° → visible step.
+                    m_lockBlend[i] = 0.0;
                 }
             } else {
                 // Motion detected → release lock, reset counter.
@@ -7499,7 +7534,15 @@ void MocapViewport::updatePose(const std::array<Quat, kXsensSegmentCount>& orien
             }
 
             if (m_locked[i]) {
-                filtered[i] = m_lockQuat[i];
+                // FIX (terminator smoothing): lock-in blend — ramp от orient
+                // в сторону m_lockQuat за ~77ms.  m_lockBlend[i]==1 → full
+                // lock как раньше; <1 → linear-ish blend.
+                if (m_lockBlend[i] < 1.0) {
+                    filtered[i] = nlerpQ(orient[i], m_lockQuat[i], m_lockBlend[i]);
+                    m_lockBlend[i] = std::min(1.0, m_lockBlend[i] + 0.15);
+                } else {
+                    filtered[i] = m_lockQuat[i];
+                }
                 m_unlockBlend[i] = 0.30;
             } else if (m_unlockBlend[i] < 1.0) {
                 filtered[i] = nlerpQ(m_outPrevQ[i], orient[i], m_unlockBlend[i]);
@@ -7641,9 +7684,18 @@ void MocapViewport::updatePose(const std::array<Quat, kXsensSegmentCount>& orien
                     // Бюджет 15° — стопа в покое почти не отклоняется,
                     // ужесточаем чтобы убрать настоящий yaw drift.
                     const double driftBudget = M_PI / 12.0;
-                    if (allCalm && driftAngle < driftBudget) {
-                        const double alpha = std::min(1.0, dt / 3.0);
-                        m_driftLocal[i] = nlerpQ(m_driftLocal[i], drift, alpha);
+                    // FIX (terminator smoothing): smoothstep attenuation
+                    // [0.7*budget .. budget].  Старый код hard-cut при
+                    // driftAngle >= budget — коррекция мгновенно отключалась.
+                    // Теперь плавно затухает в полосе 10.5°..15°.
+                    if (allCalm) {
+                        auto smoothstep01 = [](double x){ x = std::clamp(x,0.0,1.0); return x*x*(3.0-2.0*x); };
+                        const double budgetAttn = smoothstep01(
+                                (driftBudget - driftAngle) / (driftBudget * 0.3));
+                        if (budgetAttn > 0.0) {
+                            const double alpha = std::min(1.0, dt / 3.0) * budgetAttn;
+                            m_driftLocal[i] = nlerpQ(m_driftLocal[i], drift, alpha);
+                        }
                     }
                     // Корректируем только TWIST вокруг мирового +Z (yaw),
                     // swing (наклон стопы) НЕ ТРОГАЕМ.
@@ -7669,6 +7721,7 @@ void MocapViewport::updatePose(const std::array<Quat, kXsensSegmentCount>& orien
             m_stillTicks[i] = 0.0;
             m_locked[i] = false;
             m_unlockBlend[i] = 1.0;
+            m_lockBlend[i] = 1.0;
             m_outPrevQ[i] = orient[i];
             m_anchorValid[i] = false;
             m_anchorLocal[i] = Quat(1, 0, 0, 0);
@@ -9793,26 +9846,39 @@ void MainWindow::onRenderTick()
             const bool gyroQuiet =
                 (f.gyrSensor[SEG_Pelvis].lengthSquared() < (25.0f * 25.0f)) &&
                 (f.gyrSensor[i].lengthSquared()          < (25.0f * 25.0f));
-            if (jumpDeg > 35.0 && gyroQuiet) {
-                if (m_test) {
-                    std::cout << "[fk-jump] seg[" << i << "] " << kSegmentNames[i]
-                              << " jump=" << std::fixed << std::setprecision(1) << jumpDeg
-                              << "° rejected (gyrQuiet, pelvisGyr="
-                              << std::sqrt(double(f.gyrSensor[SEG_Pelvis].lengthSquared()))
-                              << " segGyr=" << std::sqrt(double(f.gyrSensor[i].lengthSquared()))
-                              << ")\n";
-                }
-                cand = s_lastOut[i];
-            } else if (jumpDeg > 20.0 && m_test) {
-                static std::array<int, kXsensSegmentCount> s_lastLogTick{};
-                static int s_globalTick = 0;
-                s_globalTick++;
-                if (s_globalTick - s_lastLogTick[i] > 60) {
-                    s_lastLogTick[i] = s_globalTick;
-                    std::cout << "[fk-large] seg[" << i << "] " << kSegmentNames[i]
-                              << " jump=" << std::fixed << std::setprecision(1) << jumpDeg
-                              << "° accepted (segGyr="
-                              << std::sqrt(double(f.gyrSensor[i].lengthSquared())) << ")\n";
+            // FIX (terminator smoothing): smoothstep blend [20..35]°.
+            // Раньше: hard cliff на 35° — 34.9° принимается полностью,
+            // 35.1° отвергается полностью.  Теперь: rejectW=0 при <20°,
+            // rejectW=1 при >35°, плавный slerp_quat в середине.  Соблюдаем
+            // gyroQuiet gate — IMU должен быть тихим, иначе доверяем.
+            if (gyroQuiet && jumpDeg > 20.0) {
+                auto smoothstep01 = [](double x){ x = std::clamp(x,0.0,1.0); return x*x*(3.0-2.0*x); };
+                const double rejectW = smoothstep01((jumpDeg - 20.0) / 15.0);
+                if (rejectW > 0.999) {
+                    if (m_test) {
+                        std::cout << "[fk-jump] seg[" << i << "] " << kSegmentNames[i]
+                                  << " jump=" << std::fixed << std::setprecision(1) << jumpDeg
+                                  << "° full-reject (gyrQuiet, pelvisGyr="
+                                  << std::sqrt(double(f.gyrSensor[SEG_Pelvis].lengthSquared()))
+                                  << " segGyr=" << std::sqrt(double(f.gyrSensor[i].lengthSquared()))
+                                  << ")\n";
+                    }
+                    cand = s_lastOut[i];
+                } else if (rejectW > 0.0) {
+                    cand = slerp_quat(cand, s_lastOut[i], rejectW);
+                    if (m_test) {
+                        static std::array<int, kXsensSegmentCount> s_lastLogTick{};
+                        static int s_globalTick = 0;
+                        s_globalTick++;
+                        if (s_globalTick - s_lastLogTick[i] > 60) {
+                            s_lastLogTick[i] = s_globalTick;
+                            std::cout << "[fk-jump] seg[" << i << "] " << kSegmentNames[i]
+                                      << " jump=" << std::fixed << std::setprecision(1) << jumpDeg
+                                      << "° blend rejectW=" << std::setprecision(2) << rejectW
+                                      << " (segGyr=" << std::sqrt(double(f.gyrSensor[i].lengthSquared()))
+                                      << ")\n";
+                        }
+                    }
                 }
             }
         }

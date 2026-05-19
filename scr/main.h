@@ -1025,6 +1025,11 @@ private:
     std::array<Quat, kXsensSegmentCount>   m_prevQ{};
     std::array<Quat, kXsensSegmentCount>   m_outPrevQ{};
     std::array<double, kXsensSegmentCount> m_unlockBlend{};
+    // FIX (terminator smoothing): симметричный lock-in blend.  Раньше
+    // m_locked[i]=true моментально подставлял m_lockQuat[i] в filtered[i],
+    // что создавало visible 0.5°-1° step при входе в lock.  С этим blend
+    // 7-кадровый ramp (~77ms @ 90Hz) делает переход незаметным.
+    std::array<double, kXsensSegmentCount> m_lockBlend{};
     std::array<Quat, kXsensSegmentCount>   m_anchorLocal{};
     std::array<bool, kXsensSegmentCount>   m_anchorValid{};
     std::array<Quat, kXsensSegmentCount>   m_driftLocal{};
