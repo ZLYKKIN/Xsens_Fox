@@ -6100,11 +6100,13 @@ void NewSessionWizard::onCaptureTick()
             // FIX issue 4 (правое колено в позе цапли гнётся вбок): mount-detection
             // только по T-pose accel ненадёжна для ног — gravity почти полностью
             // вдоль сенсорного Z, Y-компонента ≈ 0 → mirrDot ≈ parDot ≈ 1.
-            // Расширяем сигналы: T+N accel + K-pose gyro (для ног — основной).
-            // K-pose поза "колено вверх" даёт сильный угловой импульс вокруг
-            // body-lateral, который однозначно различает mirror-Y vs parallel.
-            // Для рук K-pose gyro = шум (руки не двигаются между T и K), поэтому
-            // их вес 0 — поведение для рук остаётся как раньше (acc-T-only).
+            // Расширяем сигналы: T-vs-K axis (cross product гравитаций в T и K
+            // позах в сенсорной системе) — это направление body-lateral оси в
+            // сенсорной системе, mirror-Y vs parallel меняет знак Y-компоненты.
+            // Старый путь через m_gyrAccumK был мёртвым: накопитель фильтрует
+            // gMag>3°/s, а порог использования >5°/s — условие никогда не
+            // выполнялось.  Axis из cross(aT, aK) работает на статике и не
+            // требует движения во время capture.
             auto voteFromPair = [&](const QVector3D& vR, const QVector3D& vL) -> std::pair<int, double> {
                 if (vR.length() < 1e-3f || vL.length() < 1e-3f) return {0, 0.0};
                 const QVector3D nR = vR.normalized();
@@ -6137,22 +6139,47 @@ void NewSessionWizard::onCaptureTick()
                     voteN = voteFromPair(aR_N, aL_N);
                 }
 
+                // Axis from accel cross product — body-lateral direction in
+                // sensor frame.  Для НОГ используем T↔K (в K-позе бёдра
+                // горизонтально, гравитация в сегменте поворачивается ~90°
+                // вокруг ±Y body относительно T-позы).  Для РУК используем T↔N
+                // (T = руки горизонтально, N = руки вниз — два ортогональных
+                // направления гравитации в сегменте), так как T↔K для рук
+                // слабый (в K-позе руки тоже близки к горизонтальным).
+                // Mirror-Y mount меняет знак Y-компоненты этой оси между R и L;
+                // parallel mount оставляет тот же знак.
                 std::pair<int, double> voteG = {0, 0.0};
+                auto axisVote = [&](const QVector3D& aR1, const QVector3D& aL1,
+                                    const QVector3D& aR2, const QVector3D& aL2)
+                                    -> std::pair<int, double> {
+                    if (aR1.length() < 1e-3f || aL1.length() < 1e-3f
+                     || aR2.length() < 1e-3f || aL2.length() < 1e-3f) return {0, 0.0};
+                    const QVector3D axR = QVector3D::crossProduct(aR1.normalized(),
+                                                                   aR2.normalized());
+                    const QVector3D axL = QVector3D::crossProduct(aL1.normalized(),
+                                                                   aL2.normalized());
+                    if (axR.length() < 0.3f || axL.length() < 0.3f) return {0, 0.0};
+                    return voteFromPair(axR, axL);
+                };
                 if (isLeg && m_accumCountK[rSeg] >= 10 && m_accumCountK[lSeg] >= 10) {
-                    const QVector3D gR_K = m_gyrAccumK[rSeg] / float(m_accumCountK[rSeg]);
-                    const QVector3D gL_K = m_gyrAccumK[lSeg] / float(m_accumCountK[lSeg]);
-                    if (gR_K.length() > 5.0f && gL_K.length() > 5.0f) {
-                        // K-pose даёт реальный rotation — gyro magnitude > 5°/s
-                        voteG = voteFromPair(gR_K, gL_K);
-                    }
+                    const QVector3D aR_K = m_accAccumK[rSeg] / float(m_accumCountK[rSeg]);
+                    const QVector3D aL_K = m_accAccumK[lSeg] / float(m_accumCountK[lSeg]);
+                    voteG = axisVote(aR_T, aL_T, aR_K, aL_K);
+                } else if (!isLeg && m_accumCountN[rSeg] >= 10 && m_accumCountN[lSeg] >= 10) {
+                    const QVector3D aR_N = m_accAccumN[rSeg] / float(m_accumCountN[rSeg]);
+                    const QVector3D aL_N = m_accAccumN[lSeg] / float(m_accumCountN[lSeg]);
+                    voteG = axisVote(aR_T, aL_T, aR_N, aL_N);
                 }
 
-                // Per-segment weights.  Arms keep current acc-T-dominant behavior;
-                // legs lean heavily on K-pose gyro when present.
+                // Per-segment weights.  When axis vote is strong (legs via T↔K,
+                // arms via T↔N), it dominates; otherwise fall back to T+N accel
+                // (legs) or T-only (arms, original behavior).
                 double wT = 1.0, wN = 0.0, wG = 0.0;
                 if (isLeg) {
                     if (voteG.second > 0.05) { wT = 0.2; wN = 0.3; wG = 0.5; }
                     else                      { wT = 0.4; wN = 0.6; wG = 0.0; }
+                } else {
+                    if (voteG.second > 0.05) { wT = 0.4; wN = 0.0; wG = 0.6; }
                 }
 
                 double sMirr = 0.0, sPar = 0.0;
@@ -6308,34 +6335,48 @@ void NewSessionWizard::onCaptureTick()
             symYawS2S_K(SEG_RToe,       SEG_LToe);
         }
 
-        // FIX issue 1/4: yaw-anchor для ног через K-pose gyro.
-        // K-pose (колено вверх / нога согнута) — это в основном rotation
-        // вокруг body-lateral оси (±X в NWU).  Средний gyro вектор в
-        // сенсорной системе, после применения s2s, должен ложиться в
-        // латеральную плоскость.  Остаточный yaw — это ошибка установки
-        // сенсора (вращение вокруг bone axis при монтаже); убираем её
-        // per-leg независимо.  Безопасно: при |yawErr|>0.6 rad (~34°)
-        // или малом |g| возвращаем s2s as-is.
+        // FIX issue 1/4: yaw-anchor для ног через T↔K orientation diff.
+        // T-pose: гравитация вдоль -Z body; K-pose (сидя, бёдра горизонтально):
+        // гравитация в системе сегмента смещается, вектор aT × aK в сенсорной
+        // системе указывает на ось вращения = ±Y body (lateral).  Применяем
+        // s2s.inv() — получаем body-frame оценку оси.  Если итог отклоняется
+        // от ±Y, это yaw-error монтажа сенсора (поворот вокруг bone axis);
+        // компенсируем per-leg независимо.  Старая версия использовала
+        // m_gyrAccumK, но накопитель фильтровал движения (kPerSegmentGyrLimit),
+        // оставался ~bias→условие |g|>5°/s никогда не выполнялось.  Acc-based
+        // axis работает на статических данных, которые мы уже копим.
         {
             auto correctLegYaw = [&](int seg, const Quat& s2s) -> Quat {
-                const int c = m_accumCountK[seg];
-                if (c < 10) return s2s;
-                const QVector3D g = m_gyrAccumK[seg] / float(c);
-                if (g.length() < 5.0f) return s2s;            // deg/s threshold
-                const QVector3D gBody = vec_rotate(g.normalized(), s2s.inv());
-                const double yawRes = std::atan2(double(gBody.y()), double(gBody.x()));
-                const double expected = (gBody.y() > 0) ? +M_PI/2 : -M_PI/2;
+                const int cT = m_accumCountT[seg];
+                const int cK = m_accumCountK[seg];
+                if (cT < 10 || cK < 10) return s2s;
+                const QVector3D aT = m_accAccumT[seg] / float(cT);
+                const QVector3D aK = m_accAccumK[seg] / float(cK);
+                if (aT.length() < 1e-3f || aK.length() < 1e-3f) return s2s;
+                const QVector3D axisS = QVector3D::crossProduct(aT.normalized(),
+                                                                 aK.normalized());
+                if (axisS.length() < 0.3f) return s2s;        // позы коллинеарны
+                const QVector3D axisB = vec_rotate(axisS.normalized(), s2s.inv());
+                const double yawRes = std::atan2(double(axisB.y()), double(axisB.x()));
+                const double expected = (axisB.y() > 0) ? +M_PI/2 : -M_PI/2;
                 const double yawErr = std::atan2(std::sin(yawRes - expected),
                                                  std::cos(yawRes - expected));
                 if (std::abs(yawErr) > 0.6) return s2s;
-                const Quat yawCorr = axisAngleQuat(QVector3D(0,0,1), -yawErr);
+                // FIX (sign+order): для коррекции body-frame yaw ошибки нужно
+                // композировать справа: new_s2s = s2s * Rot_Z(+yawErr).  Это
+                // соответствует "сначала body-frame yawErr rotation, потом s2s".
+                // Старая версия — quat_mult(Rot_Z(-yawErr), s2s) — давала
+                // правильный результат ТОЛЬКО для чистых Z-rotation s2s; для
+                // нетривиальных tilt'ов удваивала ошибку.  Не проявлялось
+                // раньше потому что correctLegYaw был мёртв из-за gyro-порога.
+                const Quat yawCorr = axisAngleQuat(QVector3D(0,0,1), yawErr);
                 if (m_test) {
                     std::cout << "[calib K] leg yaw correction "
                               << kSegmentNames[seg]
                               << " yawErr=" << std::fixed << std::setprecision(2)
                               << yawErr * 180.0 / M_PI << "°\n";
                 }
-                return quat_mult(yawCorr, s2s).normalized();
+                return quat_mult(s2s, yawCorr).normalized();
             };
             for (int seg : { SEG_RUpperLeg, SEG_LUpperLeg,
                              SEG_RLowerLeg, SEG_LLowerLeg }) {
@@ -6706,9 +6747,11 @@ void NewSessionWizard::onCaptureTick()
     std::array<bool, kXsensSegmentCount> s2sFusedN{};
     {
         // FIX issue 4 (parallel-path в режиме без K-pose).  Расширяем
-        // mount-detection T+N accel (K-gyro здесь недоступен — K не
-        // захватывалась).  Поведение для рук остаётся acc-T-only,
-        // ноги получают двойной T+N сигнал.
+        // mount-detection T+N accel + T↔N axis cross product.  Для рук T- и
+        // N-позы дают сильно различающиеся гравитации (рука вниз vs вперёд),
+        // axis = aT × aN указывает body-lateral в сенсорной системе и хорошо
+        // различает mirror-Y vs parallel.  Для ног T- и N-позы близки (обе
+        // стоя), axis слабый — остаётся acc T+N path.
         auto voteFromPairN = [&](const QVector3D& vR, const QVector3D& vL) -> std::pair<int, double> {
             if (vR.length() < 1e-3f || vL.length() < 1e-3f) return {0, 0.0};
             const QVector3D nR = vR.normalized();
@@ -6733,20 +6776,42 @@ void NewSessionWizard::onCaptureTick()
             auto voteT = voteFromPairN(aR_T, aL_T);
 
             std::pair<int, double> voteN = {0, 0.0};
-            if (m_accumCountN[rSeg] >= 10 && m_accumCountN[lSeg] >= 10) {
-                const QVector3D aR_N = m_accAccumN[rSeg] / float(m_accumCountN[rSeg]);
-                const QVector3D aL_N = m_accAccumN[lSeg] / float(m_accumCountN[lSeg]);
+            QVector3D aR_N(0, 0, 0), aL_N(0, 0, 0);
+            const bool haveN = (m_accumCountN[rSeg] >= 10 && m_accumCountN[lSeg] >= 10);
+            if (haveN) {
+                aR_N = m_accAccumN[rSeg] / float(m_accumCountN[rSeg]);
+                aL_N = m_accAccumN[lSeg] / float(m_accumCountN[lSeg]);
                 voteN = voteFromPairN(aR_N, aL_N);
             }
 
-            double wT = 1.0, wN = 0.0;
-            if (isLeg) { wT = 0.4; wN = 0.6; }
+            // Axis vote T↔N — для рук работает (>~60° поза-разделение),
+            // для ног слабо (легs остаются вертикально в обеих позах).
+            std::pair<int, double> voteAx = {0, 0.0};
+            if (haveN && aR_T.length() > 1e-3f && aL_T.length() > 1e-3f
+                      && aR_N.length() > 1e-3f && aL_N.length() > 1e-3f) {
+                const QVector3D axR = QVector3D::crossProduct(aR_T.normalized(),
+                                                               aR_N.normalized());
+                const QVector3D axL = QVector3D::crossProduct(aL_T.normalized(),
+                                                               aL_N.normalized());
+                if (axR.length() > 0.3f && axL.length() > 0.3f) {
+                    voteAx = voteFromPairN(axR, axL);
+                }
+            }
+
+            double wT = 1.0, wN = 0.0, wAx = 0.0;
+            if (isLeg) {
+                wT = 0.4; wN = 0.6; wAx = 0.0;
+            } else if (voteAx.second > 0.05) {
+                wT = 0.4; wN = 0.0; wAx = 0.6;
+            }
 
             double sMirr = 0.0, sPar = 0.0;
             if (voteT.first == 1) sMirr += wT * voteT.second;
             if (voteT.first == 2) sPar  += wT * voteT.second;
             if (voteN.first == 1) sMirr += wN * voteN.second;
             if (voteN.first == 2) sPar  += wN * voteN.second;
+            if (voteAx.first == 1) sMirr += wAx * voteAx.second;
+            if (voteAx.first == 2) sPar  += wAx * voteAx.second;
 
             const double score = std::abs(sMirr - sPar);
             if (outScore) *outScore = score;
