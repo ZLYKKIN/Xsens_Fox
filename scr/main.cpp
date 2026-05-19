@@ -2492,11 +2492,23 @@ static void parseErgoHand(const float* degs20, bool isLeft,
     // ============================================================
     constexpr double kThumbCmcRadialDeg     = 40.0;
     constexpr double kThumbCmcOppositionDeg = 15.0;
+    // FIX issue 3: для LEFT-руки инвертируем знаки радиальной и
+    // оппозиционной осей.  Manus отдаёт обе руки в идентичной локальной
+    // системе, и хотя render-pipeline применяет yflip к ПОЗИЦИЯМ
+    // (mirrorManusL), thumbPreRot заходит в КВАТЕРНИОН outQ.  Для
+    // правой руки знаки положительные → большой палец смотрит
+    // forward-radial + opposition к ладони.  Для левой нужны
+    // отрицательные знаки в обеих компонентах, чтобы анатомия
+    // отзеркалилась симметрично.  Защитный флаг — на случай если
+    // визуально потребуется откат.
+    static constexpr bool kEnableLeftThumbVariant = true;
+    const double radSign = (isLeft && kEnableLeftThumbVariant) ? -1.0 : +1.0;
+    const double oppSign = (isLeft && kEnableLeftThumbVariant) ? -1.0 : +1.0;
     const Quat thumbPreRot = quat_mult(
         axisAngleQuat(QVector3D(0,0,1),
-                      kThumbCmcRadialDeg     * M_PI / 180.0),
+                      radSign * kThumbCmcRadialDeg     * M_PI / 180.0),
         axisAngleQuat(QVector3D(1,0,0),
-                     -kThumbCmcOppositionDeg * M_PI / 180.0)
+                      oppSign * -kThumbCmcOppositionDeg * M_PI / 180.0)
     ).normalized();
 
     for (int f = 0; f < 5; ++f) {
@@ -7378,6 +7390,64 @@ void MocapViewport::updatePose(const std::array<Quat, kXsensSegmentCount>& orien
                             cfg.maxFlexRad, cfg.maxLatDevRad, cfg.twistWeight,
                             i == SEG_RHand);
                     filtered[i] = quat_mult(hConstrainedWorld, dA_h.inv()).normalized();
+                }
+            }
+
+            // FIX issue 7: foot yaw stabilization при перекрёстных позах.
+            // Аналогично wrist-блоку, но другая ось разложения — корректируем
+            // только yaw (вокруг world-Z), бюджет 15°, активируется только
+            // когда стопа + голень + таз спокойны >= 2 сек.  Носки (RToe/LToe)
+            // слейв стоп, поэтому их направление автоматически фиксится.
+            if (i == SEG_RFoot || i == SEG_LFoot) {
+                const int iLowerLeg = (i == SEG_RFoot) ? SEG_RLowerLeg : SEG_LLowerLeg;
+                const double llAngV  = m_angVelLP[iLowerLeg];
+                const bool calmFoot   = m_angVelLP[i] < 1.5;
+                const bool calmLL     = llAngV       < 1.5;
+                const bool calmPelvis = pelvisYawRate < 0.20;
+                const bool allCalm = calmFoot && calmLL && calmPelvis;
+
+                if (allCalm) m_calmSeconds[i] += dt;
+                else         m_calmSeconds[i] = 0.0;
+
+                const Quat dA_f = m_skel ? m_skel->defAngFor(i) : Quat(1, 0, 0, 0);
+                const Quat dA_ll = m_skel ? m_skel->defAngFor(iLowerLeg) : Quat(1, 0, 0, 0);
+                const Quat fWorld  = quat_mult(filtered[i],         dA_f).normalized();
+                const Quat llWorld = quat_mult(filtered[iLowerLeg], dA_ll).normalized();
+
+                if (m_locked[i]) {
+                    m_anchorLocal[i] = quat_mult(llWorld.inv(), fWorld).normalized();
+                    m_anchorValid[i] = true;
+                    m_driftLocal[i]  = nlerpQ(m_driftLocal[i], Quat(1, 0, 0, 0),
+                                              std::min(1.0, dt / 5.0));
+                } else if (m_anchorValid[i] && m_calmSeconds[i] >= 2.0) {
+                    const Quat current_local = quat_mult(llWorld.inv(), fWorld).normalized();
+                    Quat drift = quat_mult(current_local, m_anchorLocal[i].inv()).normalized();
+                    if (drift.w < 0) {
+                        drift.w = -drift.w; drift.x = -drift.x;
+                        drift.y = -drift.y; drift.z = -drift.z;
+                    }
+                    const double sw = std::min(1.0, std::abs(drift.w));
+                    const double driftAngle = 2.0 * std::acos(sw);
+                    // Бюджет 15° — стопа в покое почти не отклоняется,
+                    // ужесточаем чтобы убрать настоящий yaw drift.
+                    const double driftBudget = M_PI / 12.0;
+                    if (allCalm && driftAngle < driftBudget) {
+                        const double alpha = std::min(1.0, dt / 3.0);
+                        m_driftLocal[i] = nlerpQ(m_driftLocal[i], drift, alpha);
+                    }
+                    // Корректируем только TWIST вокруг мирового +Z (yaw),
+                    // swing (наклон стопы) НЕ ТРОГАЕМ.
+                    const Quat& dL = m_driftLocal[i];
+                    const double dw = std::min(1.0, std::abs(dL.w));
+                    if (2.0 * std::acos(dw) > 1e-4) {
+                        Quat dLSwing, dLTwist;
+                        swingTwistDecompose(dL, QVector3D(0.0f, 0.0f, 1.0f), dLSwing, dLTwist);
+                        const Quat dLTwistInv = dLTwist.inv();
+                        const Quat correctionWorld = quat_mult(llWorld,
+                                                       quat_mult(dLTwistInv, llWorld.inv())).normalized();
+                        const Quat fCorrected = quat_mult(correctionWorld, fWorld).normalized();
+                        filtered[i] = quat_mult(fCorrected, dA_f.inv()).normalized();
+                    }
                 }
             }
 
