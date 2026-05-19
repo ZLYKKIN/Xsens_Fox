@@ -8452,14 +8452,36 @@ void LiveStreamSender::pushFrameWithGloves(quint32 sample,
             appendFloatBE(body, float(q.z));
         }
     };
+    // emitFinger lambda append'ит сегменты к `body`.  Запомним размер
+    // body-only до этого, чтобы потом split mode мог вырезать только
+    // finger-часть.
+    const int bodyOnlyBytes = body.size();
     for (int slot = 0; slot < kFingerSegmentsHand; ++slot)
         emitFinger(slot, 24, SEG_LHand, leftGloveQ, leftGloveP, m_impl->baselineLeftGloveQ);
     for (int slot = 0; slot < kFingerSegmentsHand; ++slot)
         emitFinger(slot, 44, SEG_RHand, rightGloveQ, rightGloveP, m_impl->baselineRightGloveQ);
-    QByteArray hdr = buildMxtpHeader("02", sample, 0x80,
-                                     quint8(bodyCount + fingerCount),
-                                     ft, bodyCount, fingerCount);
-    m_impl->sock.writeDatagram(hdr + body, m_impl->host, m_impl->port);
+
+    // FIX (stream polish): split-mode шлёт body и fingers как два UDP
+    // datagram'а через MXTP dgCounter splitting (bit 0..6 = index, bit 7 =
+    // last).  Single-mode (default) шлёт всё в одном datagram'е (~2040 байт)
+    // — на loopback IP fragmentation работает, на LAN risk потери.
+    if (m_cfg.splitGloveDatagrams) {
+        const QByteArray bodyOnly    = body.left(bodyOnlyBytes);
+        const QByteArray fingerOnly  = body.mid(bodyOnlyBytes);
+        QByteArray hdrBody = buildMxtpHeader("02", sample, 0x00,
+                                             quint8(bodyCount),
+                                             ft, bodyCount, fingerCount);
+        m_impl->sock.writeDatagram(hdrBody + bodyOnly, m_impl->host, m_impl->port);
+        QByteArray hdrFingers = buildMxtpHeader("02", sample, 0x81,
+                                                quint8(fingerCount),
+                                                ft, bodyCount, fingerCount);
+        m_impl->sock.writeDatagram(hdrFingers + fingerOnly, m_impl->host, m_impl->port);
+    } else {
+        QByteArray hdr = buildMxtpHeader("02", sample, 0x80,
+                                         quint8(bodyCount + fingerCount),
+                                         ft, bodyCount, fingerCount);
+        m_impl->sock.writeDatagram(hdr + body, m_impl->host, m_impl->port);
+    }
 }
 
 // ============================================================================

@@ -1141,6 +1141,12 @@ struct LiveSettings {
     int           port      = 9763;           // MVN default; overridden in UI
     bool          useGloves = false;
     int           fps       = 60;             // 24 / 30 / 60 — UI throttle
+    // FIX (stream polish): gloves frame = 24 header + 63 seg × 32 = 2040 байт,
+    // > 1500 MTU.  На loopback ядро делает IP fragmentation, на LAN risk потери.
+    // Если true — body и fingers идут в два отдельных UDP datagram'а через
+    // MXTP dgCounter splitting (bit 7 = last).  Оставлено в false до verify
+    // что Blender plugin handles multi-datagram reassembly.
+    bool          splitGloveDatagrams = false;
     // T-pose origin position (meters) for each of 23 Xsens body segments.
     // Plugin (LiveLinkMvnSource) кладёт это в FTransform.Scale3D и потом
     // ULiveLinkMvnRetargetAsset делит unrealLength/xsensLength для масштаба
