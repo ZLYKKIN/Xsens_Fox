@@ -5697,27 +5697,95 @@ void NewSessionWizard::onCaptureTick()
         std::array<bool, kXsensSegmentCount> s2sFused{};
         std::array<int,  kXsensSegmentCount> mountType{};
         {
-            auto detectMountSymmetry = [&](int rSeg, int lSeg) -> int {
-                if (m_accumCountT[rSeg] < 10 || m_accumCountT[lSeg] < 10) return 0;
-                const QVector3D aR = (m_accAccumT[rSeg] / float(m_accumCountT[rSeg])).normalized();
-                const QVector3D aL = (m_accAccumT[lSeg] / float(m_accumCountT[lSeg])).normalized();
-                const QVector3D mY_aL(aL.x(), -aL.y(), aL.z());
-                const float mirrDot = float(QVector3D::dotProduct(aR, mY_aL));
-                const float parDot  = float(QVector3D::dotProduct(aR, aL));
-                if (mirrDot > 0.85f && mirrDot >= parDot + 0.1f) return 1;
-                if (parDot  > 0.85f && parDot  >= mirrDot + 0.1f) return 2;
+            // FIX issue 4 (правое колено в позе цапли гнётся вбок): mount-detection
+            // только по T-pose accel ненадёжна для ног — gravity почти полностью
+            // вдоль сенсорного Z, Y-компонента ≈ 0 → mirrDot ≈ parDot ≈ 1.
+            // Расширяем сигналы: T+N accel + K-pose gyro (для ног — основной).
+            // K-pose поза "колено вверх" даёт сильный угловой импульс вокруг
+            // body-lateral, который однозначно различает mirror-Y vs parallel.
+            // Для рук K-pose gyro = шум (руки не двигаются между T и K), поэтому
+            // их вес 0 — поведение для рук остаётся как раньше (acc-T-only).
+            auto voteFromPair = [&](const QVector3D& vR, const QVector3D& vL) -> std::pair<int, double> {
+                if (vR.length() < 1e-3f || vL.length() < 1e-3f) return {0, 0.0};
+                const QVector3D nR = vR.normalized();
+                const QVector3D nL = vL.normalized();
+                const QVector3D mY_nL(nL.x(), -nL.y(), nL.z());
+                const double mirrDot = double(QVector3D::dotProduct(nR, mY_nL));
+                const double parDot  = double(QVector3D::dotProduct(nR, nL));
+                if (std::abs(mirrDot) < 0.05 && std::abs(parDot) < 0.05) return {0, 0.0};
+                const int type   = (std::abs(mirrDot) >= std::abs(parDot)) ? 1 : 2;
+                const double sc  = std::abs(std::abs(mirrDot) - std::abs(parDot));
+                return {type, sc};
+            };
+
+            auto detectMountSymmetry = [&](int rSeg, int lSeg, double* outScore = nullptr) -> int {
+                if (m_accumCountT[rSeg] < 10 || m_accumCountT[lSeg] < 10) {
+                    if (outScore) *outScore = 0.0;
+                    return 0;
+                }
+                const bool isLeg = (rSeg == SEG_RUpperLeg) || (rSeg == SEG_LUpperLeg)
+                                || (rSeg == SEG_RLowerLeg) || (rSeg == SEG_LLowerLeg);
+
+                const QVector3D aR_T = m_accAccumT[rSeg] / float(m_accumCountT[rSeg]);
+                const QVector3D aL_T = m_accAccumT[lSeg] / float(m_accumCountT[lSeg]);
+                auto voteT = voteFromPair(aR_T, aL_T);
+
+                std::pair<int, double> voteN = {0, 0.0};
+                if (m_accumCountN[rSeg] >= 10 && m_accumCountN[lSeg] >= 10) {
+                    const QVector3D aR_N = m_accAccumN[rSeg] / float(m_accumCountN[rSeg]);
+                    const QVector3D aL_N = m_accAccumN[lSeg] / float(m_accumCountN[lSeg]);
+                    voteN = voteFromPair(aR_N, aL_N);
+                }
+
+                std::pair<int, double> voteG = {0, 0.0};
+                if (isLeg && m_accumCountK[rSeg] >= 10 && m_accumCountK[lSeg] >= 10) {
+                    const QVector3D gR_K = m_gyrAccumK[rSeg] / float(m_accumCountK[rSeg]);
+                    const QVector3D gL_K = m_gyrAccumK[lSeg] / float(m_accumCountK[lSeg]);
+                    if (gR_K.length() > 5.0f && gL_K.length() > 5.0f) {
+                        // K-pose даёт реальный rotation — gyro magnitude > 5°/s
+                        voteG = voteFromPair(gR_K, gL_K);
+                    }
+                }
+
+                // Per-segment weights.  Arms keep current acc-T-dominant behavior;
+                // legs lean heavily on K-pose gyro when present.
+                double wT = 1.0, wN = 0.0, wG = 0.0;
+                if (isLeg) {
+                    if (voteG.second > 0.05) { wT = 0.2; wN = 0.3; wG = 0.5; }
+                    else                      { wT = 0.4; wN = 0.6; wG = 0.0; }
+                }
+
+                double sMirr = 0.0, sPar = 0.0;
+                if (voteT.first == 1) sMirr += wT * voteT.second;
+                if (voteT.first == 2) sPar  += wT * voteT.second;
+                if (voteN.first == 1) sMirr += wN * voteN.second;
+                if (voteN.first == 2) sPar  += wN * voteN.second;
+                if (voteG.first == 1) sMirr += wG * voteG.second;
+                if (voteG.first == 2) sPar  += wG * voteG.second;
+
+                const double score = std::abs(sMirr - sPar);
+                if (outScore) *outScore = score;
+                if (sMirr > sPar && score > 0.10) return 1;
+                if (sPar > sMirr && score > 0.10) return 2;
                 return 0;
             };
 
             auto procrustesPair = [&](int rSeg, int lSeg) {
                 if (s2sNewMode[rSeg] == 2 || s2sNewMode[lSeg] == 2) return;
-                const int mType = detectMountSymmetry(rSeg, lSeg);
+                double score = 0.0;
+                const int mType = detectMountSymmetry(rSeg, lSeg, &score);
                 mountType[rSeg] = mountType[lSeg] = mType;
                 const Quat qR = s2sNew[rSeg];
                 const Quat qL = s2sNew[lSeg];
                 const double devMirr = mirrorYDeviationDeg(qR, qL);
                 const double devPar  = parallelDeviationDeg(qR, qL);
-                const bool useMirror = (mType == 1) || (mType == 0 && devMirr <= devPar);
+                // FIX issue 4: trust strong vote (score >= 0.5) including
+                // explicit "parallel" — old code defaulted to mirror when
+                // mType==0 via devMirr<=devPar (which was the common case
+                // for legs because gravity dominates).
+                const bool trustVote = (score >= 0.5);
+                const bool useMirror = (mType == 1) ||
+                                       (mType == 0 && !trustVote && devMirr <= devPar);
                 const double dev = useMirror ? devMirr : devPar;
                 const char* sym = useMirror ? "mirror-Y" : "parallel";
                 if (m_test) {
@@ -5838,6 +5906,41 @@ void NewSessionWizard::onCaptureTick()
             symYawS2S_K(SEG_RLowerLeg,  SEG_LLowerLeg);
             symYawS2S_K(SEG_RFoot,      SEG_LFoot);
             symYawS2S_K(SEG_RToe,       SEG_LToe);
+        }
+
+        // FIX issue 1/4: yaw-anchor для ног через K-pose gyro.
+        // K-pose (колено вверх / нога согнута) — это в основном rotation
+        // вокруг body-lateral оси (±X в NWU).  Средний gyro вектор в
+        // сенсорной системе, после применения s2s, должен ложиться в
+        // латеральную плоскость.  Остаточный yaw — это ошибка установки
+        // сенсора (вращение вокруг bone axis при монтаже); убираем её
+        // per-leg независимо.  Безопасно: при |yawErr|>0.6 rad (~34°)
+        // или малом |g| возвращаем s2s as-is.
+        {
+            auto correctLegYaw = [&](int seg, const Quat& s2s) -> Quat {
+                const int c = m_accumCountK[seg];
+                if (c < 10) return s2s;
+                const QVector3D g = m_gyrAccumK[seg] / float(c);
+                if (g.length() < 5.0f) return s2s;            // deg/s threshold
+                const QVector3D gBody = vec_rotate(g.normalized(), s2s.inv());
+                const double yawRes = std::atan2(double(gBody.y()), double(gBody.x()));
+                const double expected = (gBody.y() > 0) ? +M_PI/2 : -M_PI/2;
+                const double yawErr = std::atan2(std::sin(yawRes - expected),
+                                                 std::cos(yawRes - expected));
+                if (std::abs(yawErr) > 0.6) return s2s;
+                const Quat yawCorr = axisAngleQuat(QVector3D(0,0,1), -yawErr);
+                if (m_test) {
+                    std::cout << "[calib K] leg yaw correction "
+                              << kSegmentNames[seg]
+                              << " yawErr=" << std::fixed << std::setprecision(2)
+                              << yawErr * 180.0 / M_PI << "°\n";
+                }
+                return quat_mult(yawCorr, s2s).normalized();
+            };
+            for (int seg : { SEG_RUpperLeg, SEG_LUpperLeg,
+                             SEG_RLowerLeg, SEG_LLowerLeg }) {
+                s2sNew[seg] = correctLegYaw(seg, s2sNew[seg]);
+            }
         }
 
         std::array<float, kXsensSegmentCount> segGain{};
@@ -6202,25 +6305,66 @@ void NewSessionWizard::onCaptureTick()
 
     std::array<bool, kXsensSegmentCount> s2sFusedN{};
     {
-        auto detectMountSymmetryN = [&](int rSeg, int lSeg) -> int {
-            if (m_accumCountT[rSeg] < 10 || m_accumCountT[lSeg] < 10) return 0;
-            const QVector3D aR = (m_accAccumT[rSeg] / float(m_accumCountT[rSeg])).normalized();
-            const QVector3D aL = (m_accAccumT[lSeg] / float(m_accumCountT[lSeg])).normalized();
-            const QVector3D mY_aL(aL.x(), -aL.y(), aL.z());
-            const float mirrDot = float(QVector3D::dotProduct(aR, mY_aL));
-            const float parDot  = float(QVector3D::dotProduct(aR, aL));
-            if (mirrDot > 0.85f && mirrDot >= parDot + 0.1f) return 1;
-            if (parDot  > 0.85f && parDot  >= mirrDot + 0.1f) return 2;
+        // FIX issue 4 (parallel-path в режиме без K-pose).  Расширяем
+        // mount-detection T+N accel (K-gyro здесь недоступен — K не
+        // захватывалась).  Поведение для рук остаётся acc-T-only,
+        // ноги получают двойной T+N сигнал.
+        auto voteFromPairN = [&](const QVector3D& vR, const QVector3D& vL) -> std::pair<int, double> {
+            if (vR.length() < 1e-3f || vL.length() < 1e-3f) return {0, 0.0};
+            const QVector3D nR = vR.normalized();
+            const QVector3D nL = vL.normalized();
+            const QVector3D mY_nL(nL.x(), -nL.y(), nL.z());
+            const double mirrDot = double(QVector3D::dotProduct(nR, mY_nL));
+            const double parDot  = double(QVector3D::dotProduct(nR, nL));
+            if (std::abs(mirrDot) < 0.05 && std::abs(parDot) < 0.05) return {0, 0.0};
+            const int type   = (std::abs(mirrDot) >= std::abs(parDot)) ? 1 : 2;
+            const double sc  = std::abs(std::abs(mirrDot) - std::abs(parDot));
+            return {type, sc};
+        };
+        auto detectMountSymmetryN = [&](int rSeg, int lSeg, double* outScore = nullptr) -> int {
+            if (m_accumCountT[rSeg] < 10 || m_accumCountT[lSeg] < 10) {
+                if (outScore) *outScore = 0.0;
+                return 0;
+            }
+            const bool isLeg = (rSeg == SEG_RUpperLeg) || (rSeg == SEG_LUpperLeg)
+                            || (rSeg == SEG_RLowerLeg) || (rSeg == SEG_LLowerLeg);
+            const QVector3D aR_T = m_accAccumT[rSeg] / float(m_accumCountT[rSeg]);
+            const QVector3D aL_T = m_accAccumT[lSeg] / float(m_accumCountT[lSeg]);
+            auto voteT = voteFromPairN(aR_T, aL_T);
+
+            std::pair<int, double> voteN = {0, 0.0};
+            if (m_accumCountN[rSeg] >= 10 && m_accumCountN[lSeg] >= 10) {
+                const QVector3D aR_N = m_accAccumN[rSeg] / float(m_accumCountN[rSeg]);
+                const QVector3D aL_N = m_accAccumN[lSeg] / float(m_accumCountN[lSeg]);
+                voteN = voteFromPairN(aR_N, aL_N);
+            }
+
+            double wT = 1.0, wN = 0.0;
+            if (isLeg) { wT = 0.4; wN = 0.6; }
+
+            double sMirr = 0.0, sPar = 0.0;
+            if (voteT.first == 1) sMirr += wT * voteT.second;
+            if (voteT.first == 2) sPar  += wT * voteT.second;
+            if (voteN.first == 1) sMirr += wN * voteN.second;
+            if (voteN.first == 2) sPar  += wN * voteN.second;
+
+            const double score = std::abs(sMirr - sPar);
+            if (outScore) *outScore = score;
+            if (sMirr > sPar && score > 0.10) return 1;
+            if (sPar > sMirr && score > 0.10) return 2;
             return 0;
         };
         auto procrustesPairN = [&](int rSeg, int lSeg) {
             if (s2sMode[rSeg] == 2 || s2sMode[lSeg] == 2) return;
-            const int mType = detectMountSymmetryN(rSeg, lSeg);
+            double score = 0.0;
+            const int mType = detectMountSymmetryN(rSeg, lSeg, &score);
             const Quat qR = s2s[rSeg];
             const Quat qL = s2s[lSeg];
             const double devMirr = mirrorYDeviationDeg(qR, qL);
             const double devPar  = parallelDeviationDeg(qR, qL);
-            const bool useMirror = (mType == 1) || (mType == 0 && devMirr <= devPar);
+            const bool trustVote = (score >= 0.5);
+            const bool useMirror = (mType == 1) ||
+                                   (mType == 0 && !trustVote && devMirr <= devPar);
             const double dev = useMirror ? devMirr : devPar;
             const char* sym = useMirror ? "mirror-Y" : "parallel";
             if (m_test) {
