@@ -179,11 +179,16 @@ extern const char* kFingerChainNames[kFingerChainCount];
 // ============================================================================
 
 struct ActorConfig {
-    double heightCm      = 175.0;
-    double footLengthCm  = 26.0;
-    double armSpanCm     = 0.0;
-    double legLengthCm   = 0.0;
-    bool   useGloves     = false;
+    double heightCm        = 175.0;
+    double footLengthCm    = 26.0;
+    double armSpanCm       = 0.0;
+    double legLengthCm     = 0.0;
+    // FIX issue 5: дополнительные анатомические размеры.  0 = вычислить
+    // из роста по дефолтной пропорции (h/1.75 × baseline).
+    double hipWidthCm      = 0.0;
+    double shoulderWidthCm = 0.0;
+    double trunkLengthCm   = 0.0;
+    bool   useGloves       = false;
 };
 
 // ============================================================================
@@ -640,6 +645,10 @@ public:
         double footLengthCm = 26.0;
         double armSpanCm = 0.0;
         double legLengthCm = 0.0;
+        // FIX issue 5: новые поля размеров.  0 = compute from height.
+        double hipWidthCm      = 0.0;
+        double shoulderWidthCm = 0.0;
+        double trunkLengthCm   = 0.0;
         std::string poseKind = "tpose";
         std::array<Quat, kXsensSegmentCount> calibReference{};
         std::array<Quat, kXsensSegmentCount> tposeReference{};
@@ -704,10 +713,17 @@ private:
     class QLabel*          m_lblFoot   = nullptr;
     class QLabel*          m_lblArm    = nullptr;   // FIX: размах рук перенесён сюда
     class QLabel*          m_lblLeg    = nullptr;   // FIX: длина ноги перенесена сюда
+    // FIX issue 5: новые опциональные поля (0 = вычислить из роста).
+    class QLabel*          m_lblHip    = nullptr;
+    class QLabel*          m_lblShoulder = nullptr;
+    class QLabel*          m_lblTrunk  = nullptr;
     class QDoubleSpinBox*  m_height = nullptr;
     class QDoubleSpinBox*  m_foot   = nullptr;
     class QDoubleSpinBox*  m_arm    = nullptr;      // FIX: arm span (опц., 0 = по росту)
     class QDoubleSpinBox*  m_leg    = nullptr;      // FIX: leg length (опц., 0 = по росту)
+    class QDoubleSpinBox*  m_hip      = nullptr;    // FIX issue 5: hip width
+    class QDoubleSpinBox*  m_shoulder = nullptr;    // FIX issue 5: shoulder width
+    class QDoubleSpinBox*  m_trunk    = nullptr;    // FIX issue 5: trunk length
     class QLabel*          m_dimsHint  = nullptr;
 
     // Page 4 (calibration)

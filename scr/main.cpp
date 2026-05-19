@@ -402,36 +402,52 @@ void SkeletonXsens::buildLengths(const ActorConfig& actor)
         const double defLegM = 0.491 * h;
         legScale = (defLegM > 1e-6) ? (legPerSideM / defLegM) : 1.0;
     }
+    // FIX issue 5: hip width / shoulder width / trunk length.
+    // hip stub L[17]/L[22] = pelvis → hip joint (полширины таза).
+    // scapular stub L[7]/L[16] = T8 → плечевой сустав (полширины плеч).
+    // trunk segments L[0..5] = pelvis→neck (6 vertebrae).
+    const double pelvisHalfM = (actor.hipWidthCm > 0.0)
+        ? std::max(0.05, actor.hipWidthCm / 200.0)
+        : 0.10 * trunkScale;
+    const double scapHalfM = (actor.shoulderWidthCm > 0.0)
+        ? std::max(0.05, actor.shoulderWidthCm / 200.0)
+        : 0.05 * trunkScale;
+    // Дефолтная сумма длин spine + head = 0.55h (по hipose).  Если actor
+    // ввёл свою длину туловища, нормируем 6 сегментов spine по этому
+    // значению (head→top-of-head не масштабируется — это часть черепа).
+    const double trunkSegScale = (actor.trunkLengthCm > 0.0)
+        ? std::max(0.30, actor.trunkLengthCm / 100.0) / (0.55 * h)
+        : trunkScale;
 
     const std::array<float, kXsensSegmentCountWithDummies> L = {
         // ----- spine + head -----
-        float(0.10 * trunkScale),   // pelvis → L5
-        float(0.10 * trunkScale),   // L5 → L3
-        float(0.10 * trunkScale),   // L3 → T12
-        float(0.15 * trunkScale),   // T12 → T8
-        float(0.10 * trunkScale),   // T8 → neck
-        float(0.05 * trunkScale),   // neck → head
-        float(0.130 * h),           // head → top-of-head (vertex)
+        float(0.10 * trunkSegScale),  // pelvis → L5
+        float(0.10 * trunkSegScale),  // L5 → L3
+        float(0.10 * trunkSegScale),  // L3 → T12
+        float(0.15 * trunkSegScale),  // T12 → T8
+        float(0.10 * trunkSegScale),  // T8 → neck
+        float(0.05 * trunkSegScale),  // neck → head
+        float(0.130 * h),             // head → top-of-head (vertex)
         // ----- right arm -----
-        float(0.05 * trunkScale),
+        float(scapHalfM),             // T8 → R-scapular stub
         float(0.10 * trunkScale),
         float(0.186 * h * armScale),
         float(0.146 * h * armScale),
         float(0.108 * h * armScale),
         // ----- left arm (mirror) -----
-        float(0.05 * trunkScale),
+        float(scapHalfM),             // T8 → L-scapular stub
         float(0.10 * trunkScale),
         float(0.186 * h * armScale),
         float(0.146 * h * armScale),
         float(0.108 * h * armScale),
         // ----- right leg -----
-        float(0.10 * trunkScale),   // pelvis stub  (pelvis → hip joint)
-        float(0.245 * h * legScale),// upper leg    (hip    → knee)
-        float(0.246 * h * legScale),// lower leg    (knee   → ankle)
-        float(0.60  * fl),          // foot (heel → ball, ~60 % of foot length)
-        float(0.40  * fl),          // toe  (ball → tip,  ~40 % of foot length)
+        float(pelvisHalfM),           // pelvis stub  (pelvis → hip joint)
+        float(0.245 * h * legScale),  // upper leg    (hip    → knee)
+        float(0.246 * h * legScale),  // lower leg    (knee   → ankle)
+        float(0.60  * fl),            // foot (heel → ball, ~60 % of foot length)
+        float(0.40  * fl),            // toe  (ball → tip,  ~40 % of foot length)
         // ----- left leg (mirror) -----
-        float(0.10 * trunkScale),
+        float(pelvisHalfM),
         float(0.245 * h * legScale),
         float(0.246 * h * legScale),
         float(0.60  * fl),
@@ -3990,6 +4006,12 @@ static const Tr kTr[] = {
     {"bk_thigh",           "Бедро",                             "Thigh"},
     {"bk_shin",            "Голень",                            "Shin"},
     {"bk_foot",            "Стопа",                             "Foot"},
+    {"bk_hip",             "Ширина таза",                       "Hip width"},
+    {"bk_shoulder",        "Ширина плеч",                       "Shoulder width"},
+    {"bk_trunk_len",       "Длина туловища",                    "Trunk length"},
+    {"body_hip_width",     "Ширина таза",                       "Hip width"},
+    {"body_shoulder_width","Ширина плеч",                       "Shoulder width"},
+    {"body_trunk_length",  "Длина туловища",                    "Trunk length"},
     {"calib_title",        "Калибровка",                        "Calibration"},
     {"tpose",              "T-поза",                            "T-Pose"},
     {"npose",              "N-поза",                            "N-Pose"},
@@ -4543,6 +4565,13 @@ void NewSessionWizard::buildPages()
         configSpin(m_arm,      0.0,   0.0, 250.0, 0.5);
         m_leg = new QDoubleSpinBox(p);
         configSpin(m_leg,      0.0,   0.0, 130.0, 0.5);
+        // FIX issue 5: новые опциональные поля.  0 = вычислить из роста.
+        m_hip      = new QDoubleSpinBox(p);
+        configSpin(m_hip,      0.0,   0.0,  60.0, 0.5);
+        m_shoulder = new QDoubleSpinBox(p);
+        configSpin(m_shoulder, 0.0,   0.0,  70.0, 0.5);
+        m_trunk    = new QDoubleSpinBox(p);
+        configSpin(m_trunk,    0.0,   0.0, 120.0, 0.5);
 
         // True "select-all-on-focus" — attached via an event filter on
         // each spin's internal QLineEdit.  Needed because QAbstractSpinBox
@@ -4557,19 +4586,26 @@ void NewSessionWizard::buildPages()
             }
         };
         static SelAllFilter s_selAll;
-        for (auto* s : { m_height, m_foot, m_arm, m_leg }) {
+        for (auto* s : { m_height, m_foot, m_arm, m_leg,
+                         m_hip, m_shoulder, m_trunk }) {
             if (auto* le = s->findChild<QLineEdit*>())
                 le->installEventFilter(&s_selAll);
         }
 
-        m_lblHeight = new QLabel(p);
-        m_lblFoot   = new QLabel(p);
-        m_lblArm    = new QLabel(p);
-        m_lblLeg    = new QLabel(p);
-        m_lblHeight->setStyleSheet("font-weight:600;");
-        m_lblFoot  ->setStyleSheet("font-weight:600;");
-        m_lblArm   ->setStyleSheet("font-weight:600;");
-        m_lblLeg   ->setStyleSheet("font-weight:600;");
+        m_lblHeight   = new QLabel(p);
+        m_lblFoot     = new QLabel(p);
+        m_lblArm      = new QLabel(p);
+        m_lblLeg      = new QLabel(p);
+        m_lblHip      = new QLabel(p);
+        m_lblShoulder = new QLabel(p);
+        m_lblTrunk    = new QLabel(p);
+        m_lblHeight  ->setStyleSheet("font-weight:600;");
+        m_lblFoot    ->setStyleSheet("font-weight:600;");
+        m_lblArm     ->setStyleSheet("font-weight:600;");
+        m_lblLeg     ->setStyleSheet("font-weight:600;");
+        m_lblHip     ->setStyleSheet("font-weight:600;");
+        m_lblShoulder->setStyleSheet("font-weight:600;");
+        m_lblTrunk   ->setStyleSheet("font-weight:600;");
 
         auto* primaryBox = new QGroupBox(p);
         primaryBox->setProperty("isPrimaryDims", true);
@@ -4581,11 +4617,17 @@ void NewSessionWizard::buildPages()
         primaryLay->addWidget(m_height,    0, 1);
         primaryLay->addWidget(m_lblFoot,   1, 0, Qt::AlignRight | Qt::AlignVCenter);
         primaryLay->addWidget(m_foot,      1, 1);
-        // FIX: добавляем размах рук и длину ноги в ту же сетку.
         primaryLay->addWidget(m_lblArm,    2, 0, Qt::AlignRight | Qt::AlignVCenter);
         primaryLay->addWidget(m_arm,       2, 1);
         primaryLay->addWidget(m_lblLeg,    3, 0, Qt::AlignRight | Qt::AlignVCenter);
         primaryLay->addWidget(m_leg,       3, 1);
+        // FIX issue 5: hip/shoulder/trunk — три новых ряда.
+        primaryLay->addWidget(m_lblHip,      4, 0, Qt::AlignRight | Qt::AlignVCenter);
+        primaryLay->addWidget(m_hip,         4, 1);
+        primaryLay->addWidget(m_lblShoulder, 5, 0, Qt::AlignRight | Qt::AlignVCenter);
+        primaryLay->addWidget(m_shoulder,    5, 1);
+        primaryLay->addWidget(m_lblTrunk,    6, 0, Qt::AlignRight | Qt::AlignVCenter);
+        primaryLay->addWidget(m_trunk,       6, 1);
 
         // --- Secondary: anthropometric breakdown (read-only, live update) ---
         // Mirrors the 27 segment_lengths that hipose SkeletonXsens consumes —
@@ -4599,9 +4641,11 @@ void NewSessionWizard::buildPages()
         bg->setHorizontalSpacing(40);
         bg->setVerticalSpacing(6);
 
-        const char* rowKeys[6] = {
+        const char* rowKeys[9] = {
             "bk_trunk", "bk_upper_arm", "bk_forearm",
-            "bk_thigh", "bk_shin", "bk_foot"
+            "bk_thigh", "bk_shin", "bk_foot",
+            // FIX issue 5: новые разбивки в breakdown.
+            "bk_hip", "bk_shoulder", "bk_trunk_len"
         };
         auto makeLabel = [&](int row, const char* captionKey) {
             auto* cap = new QLabel(p);
@@ -4616,7 +4660,7 @@ void NewSessionWizard::buildPages()
             bg->addWidget(cap, row, 0);
             bg->addWidget(val, row, 1);
         };
-        for (int i = 0; i < 6; ++i) makeLabel(i, rowKeys[i]);
+        for (int i = 0; i < 9; ++i) makeLabel(i, rowKeys[i]);
 
         auto updateBreakdown = [this, p]() {
             const double h  = m_height->value() / 100.0;
@@ -4640,15 +4684,28 @@ void NewSessionWizard::buildPages()
                 const double defLegM = 0.491 * h;
                 legScale = (defLegM > 1e-6) ? (legPerSideM / defLegM) : 1.0;
             }
-            // Same ratios SkeletonXsens + XESNSE biomech use.
+            // FIX issue 5: hip / shoulder / trunk breakdowns.
+            const double trunkScale = h / 1.75;
+            const double hipCm = m_hip ? m_hip->value() : 0.0;
+            const double hipM   = (hipCm > 0.0) ? std::max(0.05, hipCm / 200.0)
+                                                : 0.10 * trunkScale;
+            const double shldCm = m_shoulder ? m_shoulder->value() : 0.0;
+            const double shldM  = (shldCm > 0.0) ? std::max(0.05, shldCm / 200.0)
+                                                 : 0.05 * trunkScale;
+            const double trunkCm = m_trunk ? m_trunk->value() : 0.0;
+            const double trunkM  = (trunkCm > 0.0) ? std::max(0.30, trunkCm / 100.0)
+                                                   : 0.55 * h;
             struct V { const char* k; double m; };
-            V vals[6] = {
+            V vals[9] = {
                 { "bk_trunk",     0.288 * h               },
                 { "bk_upper_arm", 0.186 * h * armScale    },
                 { "bk_forearm",   0.146 * h * armScale    },
                 { "bk_thigh",     0.245 * h * legScale    },
                 { "bk_shin",      0.246 * h * legScale    },
                 { "bk_foot",      fl                      },
+                { "bk_hip",       hipM * 2.0              },  // показываем full width
+                { "bk_shoulder",  shldM * 2.0             },
+                { "bk_trunk_len", trunkM                  },
             };
             for (auto* lab : p->findChildren<QLabel*>()) {
                 if (!lab->property("isBreakdownVal").toBool()) continue;
@@ -4664,6 +4721,12 @@ void NewSessionWizard::buildPages()
         connect(m_arm,    QOverload<double>::of(&QDoubleSpinBox::valueChanged),
                 p, [updateBreakdown](double){ updateBreakdown(); });
         connect(m_leg,    QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+                p, [updateBreakdown](double){ updateBreakdown(); });
+        connect(m_hip,    QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+                p, [updateBreakdown](double){ updateBreakdown(); });
+        connect(m_shoulder, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+                p, [updateBreakdown](double){ updateBreakdown(); });
+        connect(m_trunk,  QOverload<double>::of(&QDoubleSpinBox::valueChanged),
                 p, [updateBreakdown](double){ updateBreakdown(); });
         updateBreakdown();
 
@@ -4884,6 +4947,10 @@ void NewSessionWizard::retranslate()
     // FIX: переведённые подписи к новым полям размаха рук и длины ноги.
     if (m_lblArm)         m_lblArm->setText(Lang::t("body_arm_span") + ":");
     if (m_lblLeg)         m_lblLeg->setText(Lang::t("body_leg_length") + ":");
+    // FIX issue 5: подписи для трёх новых полей.
+    if (m_lblHip)         m_lblHip->setText(Lang::t("body_hip_width") + ":");
+    if (m_lblShoulder)    m_lblShoulder->setText(Lang::t("body_shoulder_width") + ":");
+    if (m_lblTrunk)       m_lblTrunk->setText(Lang::t("body_trunk_length") + ":");
     if (m_dimsHint)       m_dimsHint->setText(Lang::t("dims_hint"));
     for (QGroupBox* gb : findChildren<QGroupBox*>()) {
         if (gb->property("isPrimaryDims"  ).toBool()) gb->setTitle(Lang::t("dims_primary"));
@@ -5033,8 +5100,12 @@ void NewSessionWizard::goNext()
         // FIX: размах рук и длина ноги теперь захватываются здесь же,
         // а не во вьюпорте.  0 → SkeletonXsens::buildLengths использует
         // антропометрический фоллбэк по росту.
-        m_result.armSpanCm    = m_arm  ? m_arm->value()  : 0.0;
-        m_result.legLengthCm  = m_leg  ? m_leg->value()  : 0.0;
+        m_result.armSpanCm        = m_arm      ? m_arm->value()      : 0.0;
+        m_result.legLengthCm      = m_leg      ? m_leg->value()      : 0.0;
+        // FIX issue 5: hip width / shoulder width / trunk length.
+        m_result.hipWidthCm       = m_hip      ? m_hip->value()      : 0.0;
+        m_result.shoulderWidthCm  = m_shoulder ? m_shoulder->value() : 0.0;
+        m_result.trunkLengthCm    = m_trunk    ? m_trunk->value()    : 0.0;
     }
     if (m_pageIdx < m_pages->count() - 1) {
         ++m_pageIdx;
@@ -7197,6 +7268,9 @@ void MocapViewport::setActor(const ActorConfig& actor)
         && m_actor.footLengthCm == actor.footLengthCm
         && m_actor.armSpanCm == actor.armSpanCm
         && m_actor.legLengthCm == actor.legLengthCm
+        && m_actor.hipWidthCm == actor.hipWidthCm
+        && m_actor.shoulderWidthCm == actor.shoulderWidthCm
+        && m_actor.trunkLengthCm == actor.trunkLengthCm
         && m_actor.useGloves == actor.useGloves)
         return;
     m_actor = actor;
@@ -9069,11 +9143,14 @@ MainWindow::MainWindow(MocapReceiver* rx,
 
     // Actor config derived from wizard result.
     ActorConfig actor;
-    actor.heightCm     = m_setup.heightCm;
-    actor.footLengthCm = m_setup.footLengthCm;
-    actor.armSpanCm    = m_setup.armSpanCm;
-    actor.legLengthCm  = m_setup.legLengthCm;
-    actor.useGloves    = m_setup.useGloves;
+    actor.heightCm        = m_setup.heightCm;
+    actor.footLengthCm    = m_setup.footLengthCm;
+    actor.armSpanCm       = m_setup.armSpanCm;
+    actor.legLengthCm     = m_setup.legLengthCm;
+    actor.hipWidthCm      = m_setup.hipWidthCm;
+    actor.shoulderWidthCm = m_setup.shoulderWidthCm;
+    actor.trunkLengthCm   = m_setup.trunkLengthCm;
+    actor.useGloves       = m_setup.useGloves;
 
     m_viewport = new MocapViewport(actor, m_setup.poseKind, this);
     m_skel     = std::make_unique<SkeletonXsens>(actor, m_setup.poseKind);
@@ -9103,25 +9180,33 @@ MainWindow::MainWindow(MocapReceiver* rx,
 
     {
         ActorConfig defaults;
-        defaults.heightCm     = m_setup.heightCm;
-        defaults.footLengthCm = m_setup.footLengthCm;
-        defaults.armSpanCm    = m_setup.armSpanCm;
-        defaults.legLengthCm  = m_setup.legLengthCm;
-        defaults.useGloves    = m_setup.useGloves;
+        defaults.heightCm        = m_setup.heightCm;
+        defaults.footLengthCm    = m_setup.footLengthCm;
+        defaults.armSpanCm       = m_setup.armSpanCm;
+        defaults.legLengthCm     = m_setup.legLengthCm;
+        defaults.hipWidthCm      = m_setup.hipWidthCm;
+        defaults.shoulderWidthCm = m_setup.shoulderWidthCm;
+        defaults.trunkLengthCm   = m_setup.trunkLengthCm;
+        defaults.useGloves       = m_setup.useGloves;
         m_panel->setActorDefaults(defaults);
     }
     connect(m_panel, &SensorIndicatorsPanel::actorChanged,
             this, [this](ActorConfig a) {
-        m_setup.heightCm     = a.heightCm;
-        m_setup.footLengthCm = a.footLengthCm;
-        m_setup.armSpanCm    = a.armSpanCm;
-        m_setup.legLengthCm  = a.legLengthCm;
-        a.useGloves          = m_setup.useGloves;
+        m_setup.heightCm        = a.heightCm;
+        m_setup.footLengthCm    = a.footLengthCm;
+        m_setup.armSpanCm       = a.armSpanCm;
+        m_setup.legLengthCm     = a.legLengthCm;
+        m_setup.hipWidthCm      = a.hipWidthCm;
+        m_setup.shoulderWidthCm = a.shoulderWidthCm;
+        m_setup.trunkLengthCm   = a.trunkLengthCm;
+        a.useGloves             = m_setup.useGloves;
         if (m_viewport) m_viewport->setActor(a);
         if (m_skel) m_skel = std::make_unique<SkeletonXsens>(a, m_setup.poseKind);
         std::ostringstream ss;
         ss << "[actor] h=" << a.heightCm << " foot=" << a.footLengthCm
-           << " arm=" << a.armSpanCm << " leg=" << a.legLengthCm;
+           << " arm=" << a.armSpanCm << " leg=" << a.legLengthCm
+           << " hip=" << a.hipWidthCm << " shld=" << a.shoulderWidthCm
+           << " trunk=" << a.trunkLengthCm;
         logTest(ss.str());
     });
 
