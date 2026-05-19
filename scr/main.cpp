@@ -47,13 +47,8 @@
 
 #include <QtGui/QSurfaceFormat>
 
-// FoxKf — unified per-sensor MEKF (replaces xio Fusion).  C++ class in
-// namespace fox; no extern "C" wrapper (it's not C linkage).
 #include "fusion/FoxKf.h"
 
-// Legacy immediate-mode GL symbols (glBegin/glVertex3f/…) live in the system
-// OpenGL library on Windows.  We include the header explicitly because Qt's
-// QOpenGLFunctions does not expose them.
 #ifdef _WIN32
 #  include <windows.h>
 #  include <io.h>
@@ -148,7 +143,6 @@ QIcon makeFoxAppIcon()
 }
 
 // ============================================================================
-//  Segment names (for console/test output)
 // ============================================================================
 
 const char* kSegmentNames[kXsensSegmentCount] = {
@@ -171,12 +165,10 @@ const char* kFingerChainNames[kFingerChainCount] = {
 };
 
 // ============================================================================
-//  Quaternion math  (WXYZ, scalar-first), Hamilton / scipy convention.
 // ============================================================================
 
 Quat quat_mult(const Quat& a, const Quat& b)
 {
-    // Hamilton product: matches scipy.spatial.transform.Rotation composition.
     return Quat(
         a.w*b.w - a.x*b.x - a.y*b.y - a.z*b.z,
         a.w*b.x + a.x*b.w + a.y*b.z - a.z*b.y,
@@ -186,7 +178,6 @@ Quat quat_mult(const Quat& a, const Quat& b)
 
 QVector3D vec_rotate(const QVector3D& v, const Quat& q)
 {
-    // Efficient formulation: v' = v + 2w(qv × v) + 2(qv × (qv × v))
     const QVector3D qv(float(q.x), float(q.y), float(q.z));
     const QVector3D t = 2.0f * QVector3D::crossProduct(qv, v);
     return v + float(q.w) * t + QVector3D::crossProduct(qv, t);
@@ -240,7 +231,6 @@ static inline Quat mirror_y_quat(const Quat& q) {
 }
 
 // ============================================================================
-//  SkeletonXsens — topology, lengths, default angles, FK.
 // ============================================================================
 
 SkeletonXsens::SkeletonXsens(const ActorConfig& actor, const std::string& pose)
@@ -253,9 +243,6 @@ SkeletonXsens::SkeletonXsens(const ActorConfig& actor, const std::string& pose)
 
 void SkeletonXsens::buildTopology()
 {
-    // Xsens-skeleton segment tables (T-pose reference orientations):
-    //   seg_start_pts / seg_end_pts  (27 entries including 4 dummy stubs).
-    //            | pelvis->head(7) |   right arm(5)  |    left arm(5)   |    right leg(5)  |   left leg(5)
     static const int S[kXsensSegmentCountWithDummies] = {
         0, 1, 2, 3, 4, 5, 6,    5, 7, 8, 9, 10,    5, 11, 12, 13, 14,
         0, 15, 16, 17, 18,      0, 19, 20, 21, 22,
@@ -268,9 +255,6 @@ void SkeletonXsens::buildTopology()
     std::copy(std::begin(E), std::end(E), m_end.begin());
 }
 
-// Free-function view of SkeletonXsens.default_seg_angles for a given pose.
-// Used by the double-pose calibrator to compute gravity_in_body for both
-// T and N references without instantiating a full skeleton.
 std::array<Quat, kXsensSegmentCount>
 defaultSegAnglesFor(const std::string& pose)
 {
@@ -314,9 +298,6 @@ defaultSegAnglesFor(const std::string& pose)
 
 void SkeletonXsens::buildDefaultAngles()
 {
-    // T-pose / N-pose reference orientations for the 23 Xsens segments.
-    // Both presets use seq="XYZ".  23 entries (no dummies — dummy angles
-    // are derived from T8 and Pelvis at FK time in addDummySegments).
     const double P = M_PI;
 
     auto E = [](double x, double y, double z) {
@@ -327,29 +308,20 @@ void SkeletonXsens::buildDefaultAngles()
         m_defAng = {
             E(0, -P/2, 0), E(0, -P/2, 0), E(0, -P/2, 0), E(0, -P/2, 0),
             E(0, -P/2, 0), E(0, -P/2, 0), E(0, -P/2, 0),
-            // right arm
             E(0, 0, -P/2), E(0, 0, -P/2), E(0, 0, -P/2), E(0, 0, -P/2),
-            // left arm
             E(0, 0,  P/2), E(0, 0,  P/2), E(0, 0,  P/2), E(0, 0,  P/2),
-            // right leg
             E(0,  P/2, 0), E(0,  P/2, 0), E(0, 0, 0),     E(0, 0, 0),
-            // left leg
             E(0,  P/2, 0), E(0,  P/2, 0), E(0, 0, 0),     E(0, 0, 0),
         };
     } else {
-        // npose
         m_defAng = {
             E(0, -P/2, 0), E(0, -P/2, 0), E(0, -P/2, 0), E(0, -P/2, 0),
             E(0, -P/2, 0), E(0, -P/2, 0), E(0, -P/2, 0),
-            // right arm — shoulder remains along -Z, then arm bends down (N-pose)
             E(0,    0, -P/2),
             E( P/2, 0, -P/2), E( P/2, 0, -P/2), E( P/2, 0, -P/2),
-            // left arm
             E(0,    0,  P/2),
             E(-P/2, 0,  P/2), E(-P/2, 0,  P/2), E(-P/2, 0,  P/2),
-            // right leg
             E(0,  P/2, 0), E(0,  P/2, 0), E(0, 0, 0), E(0, 0, 0),
-            // left leg
             E(0,  P/2, 0), E(0,  P/2, 0), E(0, 0, 0), E(0, 0, 0),
         };
     }
@@ -361,15 +333,10 @@ void SkeletonXsens::buildLengths(const ActorConfig& actor)
     const double fl = actor.footLengthCm  / 100.0;
     const double trunkScale = h / 1.75;   // spine & stubs scale with height
 
-    // Bi-acromial breadth: user override OR Drillis-Contini 0.259·h.
-    // Half-width is the lateral distance from spine to acromion (shoulder
-    // tip) — that's exactly what the FK shoulder bone needs.
     const double shoulderWidthM = (actor.shoulderWidthCm > 0.0)
         ? (actor.shoulderWidthCm / 100.0) : (0.259 * h);
     const double shoulderHalfM = std::max(0.05, 0.5 * shoulderWidthM);
 
-    // Bi-iliac breadth.  Pelvis dummy stub goes from pelvis centre to hip
-    // joint = half of bi-iliac.
     const double hipWidthM = (actor.hipWidthCm > 0.0)
         ? (actor.hipWidthCm / 100.0) : (0.191 * h);
     const double hipHalfM = std::max(0.05, 0.5 * hipWidthM);
@@ -388,8 +355,6 @@ void SkeletonXsens::buildLengths(const ActorConfig& actor)
         legScale = (defLegM > 1e-6) ? (legPerSideM / defLegM) : 1.0;
     }
 
-    // Hand length: user override OR Drillis-Contini 0.108·h scaled by arm
-    // (long-armed actors typically have proportionally longer hands).
     const double handLenM = (actor.handLengthCm > 0.0)
         ? (actor.handLengthCm / 100.0) : (0.108 * h * armScale);
 
@@ -455,7 +420,6 @@ SkeletonXsens::addDummySegments(const std::array<Quat, kXsensSegmentCount>& s) c
     return out;
 }
 
-// Forward declarations — the helpers themselves live near LocomotionSolver.
 static Quat slerp_quat(const Quat& a, const Quat& b, double t);
 static Quat constrain_shoulder_cone(const Quat& q_seg, const Quat& q_pelvis,
                                      bool isRight);
@@ -480,25 +444,20 @@ SkeletonXsens::computeKeypoints(const std::array<Quat, kXsensSegmentCount>& raw,
         oriented[i] = quat_mult(safeRaw, m_defAng[i]);
     }
 
-    // Step 1b: anatomical soft-constraint on the shoulder joints only.
-    // Keeps a glitched mag yaw from throwing an arm "behind the back".
     const Quat& q_pelvis_world = oriented[SEG_Pelvis];
     oriented[SEG_RUpperArm] = constrain_shoulder_cone(
         oriented[SEG_RUpperArm], q_pelvis_world, /*isRight=*/true);
     oriented[SEG_LUpperArm] = constrain_shoulder_cone(
         oriented[SEG_LUpperArm], q_pelvis_world, /*isRight=*/false);
 
-    // Step 2: expand to 27 (add dummy stubs).
     const auto global = addDummySegments(oriented);
 
-    // Step 3: rotate each segment's [L, 0, 0] bone vector into world.
     std::array<QVector3D, kXsensSegmentCountWithDummies> boneVec{};
     for (int s = 0; s < kXsensSegmentCountWithDummies; ++s) {
         const QVector3D local(m_len[s], 0.0f, 0.0f);
         boneVec[s] = vec_rotate(local, global[s]);
     }
 
-    // Step 4: walk kinematic chain from root (pelvis, index 0).
     std::array<QVector3D, kXsensKeypointCount> kp{};
     std::array<bool,      kXsensKeypointCount> seen{};
     kp[0]   = rootPos;
@@ -516,16 +475,11 @@ SkeletonXsens::computeKeypoints(const std::array<Quat, kXsensSegmentCount>& raw,
 // ============================================================================
 // ============================================================================
 
-// ecompass analytical init — from acc (gravity) + mag (horizontal north).
-// Returns an NED quaternion identical to ahrs.common.orientation.ecompass
-// with frame="NED", representation="quaternion".
 static Quat ecompassNED(const QVector3D& a, const QVector3D& m)
 {
-    // Build rotation matrix whose rows are sensor-axes expressed in NED.
     QVector3D down = -a.normalized();                 // gravity points up in sensor
     QVector3D east = QVector3D::crossProduct(down, m).normalized();
     QVector3D north = QVector3D::crossProduct(east, down).normalized();
-    // R: rows = north, east, down  (NED) — world basis in sensor frame.
     const double m00 = north.x(), m01 = north.y(), m02 = north.z();
     const double m10 = east.x(),  m11 = east.y(),  m12 = east.z();
     const double m20 = down.x(),  m21 = down.y(),  m22 = down.z();
@@ -566,11 +520,9 @@ static Quat ecompassNED(const QVector3D& a, const QVector3D& m)
 static Quat yaw_only_quat(const Quat& q)
 {
     double w = q.w, z = q.z;
-    // Hemisphere fix — берём ветвь с положительным w для непрерывности.
     if (w < 0.0) { w = -w; z = -z; }
     const double n2 = w*w + z*z;
     if (n2 < 1e-12) {
-        // Оба компонента нулевые: yaw неопределён, возвращаем identity.
         return Quat(1, 0, 0, 0);
     }
     const double n = 1.0 / std::sqrt(n2);
@@ -600,12 +552,10 @@ static Quat slerp_quat(const Quat& a, const Quat& b, double t)
                 s0*a.y + s1*b2.y, s0*a.z + s1*b2.z).normalized();
 }
 
-
 // ---------- [C] shoulder cone soft-constraint ----------
 static Quat constrain_shoulder_cone(const Quat& q_seg, const Quat& q_pelvis,
                                     bool isRight)
 {
-    // Направление сегмента-кости в мире.
     const QVector3D boneWorld = vec_rotate(QVector3D(1.0f, 0.0f, 0.0f), q_seg);
 
     const QVector3D pelvisFrame = vec_rotate(boneWorld, q_pelvis.inv());
@@ -621,14 +571,11 @@ static Quat constrain_shoulder_cone(const Quat& q_seg, const Quat& q_pelvis,
 
     const bool clearlyBehind = backN > 0.60f;
 
-    // (3) ТОЛЬКО В ГЛЕНО-ГУМЕРАЛЬНОЙ ГОРИЗОНТАЛИ — |upN| < 0.55.
-    //     Исключает overhead-замах и удары сверху вниз из зоны клампа.
     const bool inHorizBand = std::abs(upN) < 0.55f;
 
     if (!(acrossMid && clearlyBehind && inHorizBand))
         return q_seg;
 
-    // Цель: завернуть кость обратно к плечевой плоскости, сохраняя длину.
     constexpr float kBackMax = 0.30f;
     QVector3D targetPelvis(upN, latN, std::min(backN, kBackMax));
     const float tLen = targetPelvis.length();
@@ -656,7 +603,6 @@ static Quat constrain_shoulder_cone(const Quat& q_seg, const Quat& q_pelvis,
                        .normalized();
     }
 
-    // Кубический ramp: производная 0 на границе зоны, максимум 0.30.
     float violation = std::max(0.0f, backN - kBackMax);
     violation = std::min(violation, 0.60f);
     const float t        = violation / 0.60f;
@@ -719,7 +665,6 @@ static double quat_angle_deg(const Quat& q)
 }
 
 // ---------- Matrix → quaternion helper ----------
-// Pass 3x3 rotation matrix by rows m00,m01,m02,m10,m11,m12,m20,m21,m22.
 static Quat matToQuat(double m00, double m01, double m02,
                       double m10, double m11, double m12,
                       double m20, double m21, double m22)
@@ -768,7 +713,6 @@ static Quat triadSolve(const QVector3D& v1b, const QVector3D& v2b,
     const QVector3D s2 = s2raw.normalized();
     const QVector3D s3 = QVector3D::crossProduct(s1, s2).normalized();
 
-    // R = r1 s1^T + r2 s2^T + r3 s3^T — rotation mapping s_k → r_k.
     const double m00 = r1.x()*s1.x() + r2.x()*s2.x() + r3.x()*s3.x();
     const double m01 = r1.x()*s1.y() + r2.x()*s2.y() + r3.x()*s3.y();
     const double m02 = r1.x()*s1.z() + r2.x()*s2.z() + r3.x()*s3.z();
@@ -1083,9 +1027,6 @@ static QVector3D gravityInBodyFrame(const Quat& defAng)
     return vec_rotate(QVector3D(0.0f, 0.0f, -1.0f), defAng.inv());
 }
 
-// Legacy reset hook — the solver no longer carries any file-scoped
-// state, so the function is kept as a no-op purely for ABI compat with
-// older call sites that might still invoke it.
 void foxLocoResetStatics() { /* no-op — state is now per-instance */ }
 
     void LocomotionSolver::reset()
@@ -1102,7 +1043,6 @@ void foxLocoResetStatics() { /* no-op — state is now per-instance */ }
         m_offsetPrev = QVector3D(0, 0, 0);
         m_offsetReady = false;
 
-        // v3 state
         m_prevPelvisQ     = Quat(1, 0, 0, 0);
         m_pelvisAngV      = 0.0;
         m_pelvisYawAngV   = 0.0;
@@ -1127,7 +1067,6 @@ void foxLocoResetStatics() { /* no-op — state is now per-instance */ }
         foxLocoResetStatics();
     }
 
-// Angular velocity (rad/s) between two unit quaternions at given dt.
 static double quatAngVel(const Quat& a, const Quat& b, double dt)
 {
     if (dt < 1e-6) return 0.0;
@@ -1145,7 +1084,6 @@ QVector3D LocomotionSolver::update(const Quat& qR,
     {
         const double dt = m_haveLast ? std::max(1e-3, t - m_lastT) : 0.01;
 
-        // 1. Angular velocities of feet + pelvis (LP-smoothed).
         auto angVel = [](const Quat& a, const Quat& b, double dt_) {
             if (dt_ < 1e-6) return 0.0;
             double d = std::abs(a.w*b.w + a.x*b.x + a.y*b.y + a.z*b.z);
@@ -1181,13 +1119,11 @@ QVector3D LocomotionSolver::update(const Quat& qR,
         m_contact.rightAngV = m_rAngV;
         m_contact.leftAngV  = m_lAngV;
 
-        // 2. Pelvis-stillness counter.
         if (m_pelvisAngV < m_pelvisStillRad)
             m_pelvisStillTicks = std::min(m_pelvisStillTicks + 1, 4096);
         else
             m_pelvisStillTicks = 0;
 
-        // 3. FK-XY ring buffers + stability check.
         m_rFKXY[m_fkxyHead] = QVector2D(fkR.x(), fkR.y());
         m_lFKXY[m_fkxyHead] = QVector2D(fkL.x(), fkL.y());
         m_fkxyHead  = (m_fkxyHead + 1) % kFKXYWindow;
@@ -1205,9 +1141,6 @@ QVector3D LocomotionSolver::update(const Quat& qR,
             return std::sqrt(dx*dx + dy*dy);
         };
         const bool yawFreezeGlobal = (m_pelvisYawAngV > 0.50);
-        // F4: per-foot yaw freeze.  Only freeze the foot that is also
-        // moving (swinging in a pirouette).  The pivoting foot keeps
-        // committing and provides a stable anchor through the turn.
         const bool yawFreezeR = yawFreezeGlobal && (m_rAngV > 0.50);
         const bool yawFreezeL = yawFreezeGlobal && (m_lAngV > 0.50);
 
@@ -1218,9 +1151,6 @@ QVector3D LocomotionSolver::update(const Quat& qR,
             m_fkxyHead  = 0;
             m_fkxyCount = 0;
         }
-        // Per-foot rebase on falling edge — restore the anchor at the foot's
-        // current world XY so the post-rotation pelvis matches the live
-        // tracker, then clear the ring buffer for a clean restart.
         if (!yawFreezeR && m_yawFrozenPrevR && m_initialised && m_committedR) {
             m_anchorR.setX(fkR.x() + m_offsetLast.x());
             m_anchorR.setY(fkR.y() + m_offsetLast.y());
@@ -1249,7 +1179,6 @@ QVector3D LocomotionSolver::update(const Quat& qR,
 
         const float fkMinZ = std::min(fkR.z(), fkL.z());
 
-        // 5. Initialisation on first frame.
         if (!m_initialised) {
             if (std::abs(fkMinZ) < 0.05f
                 && (m_pose == PoseUnknown
@@ -1257,8 +1186,6 @@ QVector3D LocomotionSolver::update(const Quat& qR,
                     || m_pose == PoseSquat)) {
                 m_pose = PoseStand;
             }
-            // Put pelvis at the pose-expected world height; anchor feet at
-            // fk + offset (floor-snapped for stand/squat).
             const double pelvisZ_loco_init = 0.55 * m_actorHeightM;
             float targetZ = -fkMinZ;
             if (m_pose == PoseLying) targetZ = float(-pelvisZ_loco_init);
@@ -1308,7 +1235,6 @@ QVector3D LocomotionSolver::update(const Quat& qR,
         const bool pelvisRotating = pelvisRotKill > 0.5;
 
         auto bestPelvisEstimate = [&]() -> QVector3D {
-            // Ищем committed-ногу с другой стороны и считаем по ней.
             if (m_committedR && !m_committedL)
                 return QVector3D(m_anchorR.x() - fkR.x(),
                                  m_anchorR.y() - fkR.y(),
@@ -1318,8 +1244,6 @@ QVector3D LocomotionSolver::update(const Quat& qR,
                                  m_anchorL.y() - fkL.y(),
                                  m_offsetLast.z());
             const QVector3D vel = m_offsetLast - m_offsetPrev;
-            // Cap extrapolation to ±5 cm/frame so a single noisy frame can't
-            // explode the prediction.
             QVector3D predicted = m_offsetLast + vel;
             const float dx = predicted.x() - m_offsetLast.x();
             const float dy = predicted.y() - m_offsetLast.y();
@@ -1333,9 +1257,6 @@ QVector3D LocomotionSolver::update(const Quat& qR,
             return predicted;
         };
 
-        // 7. Commit / release anchors with hysteresis.
-        //    - rising edge (conf >= COMMIT && !committed): snap anchor
-        //    - falling edge (conf < RELEASE): release (keep anchor memory)
         bool didCommitThisFrame = false;
         const bool wasCommittedR = m_committedR;
         const bool wasCommittedL = m_committedL;
@@ -1343,8 +1264,6 @@ QVector3D LocomotionSolver::update(const Quat& qR,
                                       QVector3D& anchor, const QVector3D& fk) {
             if (pelvisRotating || yawFreeze) return;
             if (!committed && conf >= m_confCommit) {
-                // FIX: оценка таза от ДРУГОЙ committed-ноги (мгновенная),
-                // а не от LP-сглаженного m_offsetLast.
                 const QVector3D pelvis = bestPelvisEstimate();
                 QVector3D world(fk.x() + pelvis.x(),
                                 fk.y() + pelvis.y(),
@@ -1363,9 +1282,6 @@ QVector3D LocomotionSolver::update(const Quat& qR,
         if (didCommitThisFrame) m_recentCommitTicks = 12;
         else if (m_recentCommitTicks > 0) --m_recentCommitTicks;
 
-        // Phase C: airborne-phase guard.  Both feet released ≥ N frames →
-        // jump or both-feet-up state.  Counts up monotonically while not
-        // committed; any commit resets and lands us back on the floor.
         if (!m_committedR && !m_committedL)
             m_airTicks = std::min(m_airTicks + 1, 4096);
         else
@@ -1395,16 +1311,9 @@ QVector3D LocomotionSolver::update(const Quat& qR,
             }
         }
 
-        // 8. ZUPT: all still → full freeze.
-        // FIX: ужесточили пороги — старые (0.25 rad/s = ~14°/s, и обычный
-        // pelvisStillRad = 0.12 rad/s) триггерили ZUPT во время медленной
-        // ходьбы и держали персонаж на месте.  Новые пороги:
-        //   • feet ang vel < 0.15 rad/s (было 0.25) — реальная неподвижность
         //   • pelvis ang vel < m_pelvisStillRad — это ужесточено выше
         const bool allStill = (m_pelvisAngV < m_pelvisStillRad)
                            && (m_rAngV < 0.15) && (m_lAngV < 0.15);
-        // Phase C: airborne suppresses ZUPT — actor is in motion even if
-        // angular velocity briefly dips below thresholds mid-flight.
         m_zuptTicks = (allStill && !m_airborne) ? (m_zuptTicks + 1) : 0;
         if (m_zuptTicks >= m_zuptTicksThresh && m_offsetReady) {
             m_contact.rightDown = m_committedR;
@@ -1412,13 +1321,10 @@ QVector3D LocomotionSolver::update(const Quat& qR,
             return m_offsetLast;
         }
 
-        // 9. Pelvis-stillness XY freeze (short-window version).
-        //    Allows pose-aware Z drift-kill to still act, but XY locked.
         const bool feetReasonablyStill = (m_rAngV < 0.15) && (m_lAngV < 0.15);
         (void)feetReasonablyStill;
         const bool pelvisFreeze = false;
 
-        // 10. Weighted dual-anchor raw offset.
         const double effR = m_committedR ? m_confR : 0.0;
         const double effL = m_committedL ? m_confL : 0.0;
         const double total = effR + effL;
@@ -1432,21 +1338,12 @@ QVector3D LocomotionSolver::update(const Quat& qR,
                 float((effR*contribR.y() + effL*contribL.y()) / total),
                 float((effR*contribR.z() + effL*contribL.z()) / total));
         }
-        // else: no committed anchor → keep offset_last (freeze).
 
-        // 11. Apply adaptive LP rates.  XY gets the imbalance-weighted rate;
-        //     Z gets the pelvis-motion-dependent rate.
         const double imbalance = (total > 1e-3) ? std::abs(effR - effL) / total : 0.0;
         const double xyRate = m_offsetRateDouble
                             + (m_offsetRatePrimary - m_offsetRateDouble) * imbalance;
         const double effXyRate = xyRate * (1.0 - pelvisRotKill);
-        // S14: blended zRate.  Previously a hard switch on
         // m_pelvisAngV > m_pelvisStillRad jumped the Z-blend rate
-        // 6.7× in a single frame (0.06 → 0.40), producing a visible
-        // few-cm Z jerk when the user paused mid-sit-down.  The
-        // blend window spans 0.5·thresh to 1.5·thresh so the
-        // transition takes ~10 frames at 90 Hz instead of one.  See
-        // tests/python/test_z_rate_smoothness.py.
         const double zRateLo = 0.5 * m_pelvisStillRad;
         const double zRateHi = 1.5 * m_pelvisStillRad;
         const double zRateW  = std::clamp(
@@ -1485,29 +1382,19 @@ QVector3D LocomotionSolver::update(const Quat& qR,
         }
 
         // 12. Pose-aware Z drift-kill — continuous + stillness-gated.
-        //     See plan-fix-10cm-drop: target is per-pose in OFFSET coords
-        //     (pre-fix had a units bug comparing world-Z target against
-        //     offset-Z, plus a ±10cm deadzone that left a visible drop on
-        //     stand→sit).  Rate scales with pelvis stillness so the kill
-        //     never fights an active sit/stand motion; per-frame step is
-        //     capped at 3 cm so even a pathological gap can't snap.
         if (!m_airborne && m_poseTicks >= m_poseStableTicks) {
             double targetOffsetZ = 0.0;
             bool   haveTarget    = false;
             switch (m_pose) {
                 case PoseStand:
-                    // Pelvis world Z ≈ 0.55·h ⇒ offset.z target = 0.
                     targetOffsetZ = 0.0;
                     haveTarget    = true;
                     break;
                 case PoseSit:
-                    // Pelvis world Z ≈ 0.45·h (typical chair) ⇒ offset.z
-                    // target ≈ -0.10·h.
                     targetOffsetZ = -0.10 * m_actorHeightM;
                     haveTarget    = true;
                     break;
                 case PoseLying:
-                    // Pelvis world Z ≈ 0 ⇒ offset.z target = -0.55·h.
                     targetOffsetZ = -0.55 * m_actorHeightM;
                     haveTarget    = true;
                     break;
@@ -1549,7 +1436,6 @@ QVector3D LocomotionSolver::update(const Quat& qR,
         m_yawFrozenPrevR = yawFreezeR;
         m_yawFrozenPrevL = yawFreezeL;
 
-        // Legacy: for UI / debugging, expose which foot is currently dominant.
         m_contact.rightDown = m_committedR;
         m_contact.leftDown  = m_committedL;
         m_support = (effR >= effL) ? RIGHT : LEFT;
@@ -1558,9 +1444,6 @@ QVector3D LocomotionSolver::update(const Quat& qR,
         return newOff;
     }
 
-    // Phase B: heel/toe-aware overload.  Picks the per-foot anchor
-    // candidate from the current contact state, then delegates to the
-    // single-point update above so the rest of the solver is untouched.
     QVector3D LocomotionSolver::update(const Quat& qR,
                                        const Quat& qL,
                                        const Quat& qPelvis,
@@ -1583,9 +1466,6 @@ QVector3D LocomotionSolver::update(const Quat& qR,
             const float tc = certainty(toe.z());
             const float total = hc + tc;
             if (total < 1e-3f) {
-                // Both fully airborne — fall back to the boolean state
-                // (legacy behaviour: pick whichever the contact detector
-                // says is down, or the lower of the two if neither).
                 if (heelDownFallback && !toeDownFallback) return heel;
                 if (!heelDownFallback && toeDownFallback) return toe;
                 return (heel.z() <= toe.z()) ? heel : toe;
@@ -1607,7 +1487,6 @@ QVector3D LocomotionSolver::update(const Quat& qR,
                                                  const QVector3D& fkLHeel,
                                                  const QVector3D& fkLToe)
     {
-        // Schmitt-trigger style: drop down at <= thresh, release at > thresh+hyst.
         auto update = [&](float z, bool prev) -> bool {
             if (z <= float(m_heelToeThreshM)) return true;
             if (z >  float(m_heelToeThreshM + m_heelToeReleaseHystM)) return false;
@@ -1626,8 +1505,6 @@ QVector3D LocomotionSolver::update(const Quat& qR,
                                     PoseKind prevPose,
                                     double& outTiltCos) const
     {
-        // Pelvis body +Z direction → world.  If world-Z component < ~0.5,
-        // pelvis is tilted ≥ 60° from vertical → lying.
         const double ux = 2.0 * (qPelvis.x*qPelvis.z + qPelvis.w*qPelvis.y);
         const double uy = 2.0 * (qPelvis.y*qPelvis.z - qPelvis.w*qPelvis.x);
         const double uz = 1.0 - 2.0 * (qPelvis.x*qPelvis.x + qPelvis.y*qPelvis.y);
@@ -1650,9 +1527,7 @@ QVector3D LocomotionSolver::update(const Quat& qR,
         return PoseStand;
     }
 
-
 // ============================================================================
-//  ConnStatus name
 // ============================================================================
 
 const char* connStatusName(ConnStatus s)
@@ -1679,7 +1554,6 @@ static double monotonicSec()
 // ============================================================================
 // ============================================================================
 
-// --- Sensor location-ID → SkeletonXsens segment index --------------------
 static int segmentFromLocationId(int loc)
 {
     switch (loc) {
@@ -1704,7 +1578,6 @@ static int segmentFromLocationId(int loc)
     }
 }
 
-// --- XsArray is 5 pointer-size fields (<= 64 bytes on 64-bit) ------------
 namespace xda {
 
 using FnControlConstruct              = void*(*)();
@@ -1752,7 +1625,6 @@ using FnDataPacketOrientationIncrement    =
     XsQuaternionBlob*(*)(const XsDataPacketBlob*, XsQuaternionBlob*);
 using FnDeviceUpdateRate                  = int (*)(void*);
 
-// Calibrated IMU data — the inputs the Madgwick filter wants.
 using FnDataPacketContainsAcc    = int (*)(const XsDataPacketBlob*);
 using FnDataPacketAcc            = XsVectorBlob*(*)(const XsDataPacketBlob*, XsVectorBlob*);
 using FnDataPacketContainsGyro   = int (*)(const XsDataPacketBlob*);
@@ -1761,8 +1633,6 @@ using FnDataPacketContainsMag    = int (*)(const XsDataPacketBlob*);
 using FnDataPacketMag            = XsVectorBlob*(*)(const XsDataPacketBlob*, XsVectorBlob*);
 using FnVectorDestruct           = void(*)(XsVectorBlob*);
 
-// SDI (Strap-down Integration) fallbacks — what Body Pack V2 actually
-// sends instead of absolute acc/gyr.
 using FnDataPacketContainsVelocityIncrement = int (*)(const XsDataPacketBlob*);
 using FnDataPacketVelocityIncrement         =
     XsVectorBlob*(*)(const XsDataPacketBlob*, XsVectorBlob*);
@@ -1777,7 +1647,6 @@ struct Api {
     HMODULE xst = nullptr;
     HMODULE iomp = nullptr;            // OpenMP runtime required by XDA
 
-    // XsControl
     FnControlConstruct               controlConstruct = nullptr;
     FnControlClose                   controlClose     = nullptr;
     FnControlDestruct                controlDestruct  = nullptr;
@@ -1789,7 +1658,6 @@ struct Api {
     FnControlSetOptions              controlSetOptions         = nullptr;
     FnEnableNetworkScanning          enableNetworkScanning     = nullptr;
 
-    // XsDevice
     FnDeviceGotoConfig               deviceGotoConfig       = nullptr;
     FnDeviceGotoMeasurement          deviceGotoMeasurement  = nullptr;
     FnDeviceLocationId               deviceLocationId       = nullptr;
@@ -1799,8 +1667,6 @@ struct Api {
     FnDeviceLastAvailableLiveData    deviceLastAvailableLiveData = nullptr;
     FnDevicePacketErrorRate          devicePacketErrorRate  = nullptr;
 
-    // XsScanner + arrays (scanPorts/enumerateNetworkDevices in xsensdeviceapi64,
-    // arrays in xstypes64 — see loadApi).
     FnScanPorts                      scanPorts              = nullptr;
     using FnEnumerateNetworkDevices  = void(*)(void*);     // fills XsArray*
     FnEnumerateNetworkDevices        enumerateNetworkDevices = nullptr;
@@ -1809,7 +1675,6 @@ struct Api {
     FnPortInfoArrayConstruct         portInfoArrayConstruct = nullptr;
     FnDeviceIdArrayConstruct         deviceIdArrayConstruct = nullptr;
 
-    // XsDataPacket (xstypes64.dll)
     FnDataPacketConstruct                 dataPacketConstruct          = nullptr;
     FnDataPacketDestruct                  dataPacketDestruct           = nullptr;
     FnDataPacketContainsOrientation       dataPacketContainsOrientation= nullptr;
@@ -1836,9 +1701,6 @@ struct Api {
     FnDataPacketContainsSampleTimeFine    dataPacketContainsSTF    = nullptr;
     FnDataPacketSampleTimeFine            dataPacketSTF            = nullptr;
 
-    // Diagnostic: generic contains-* probes. All have identical signature
-    // int(*)(const XsDataPacketBlob*).  We resolve every possible channel
-    // so we can dump a single-frame snapshot of "what Body Pack V2 streams".
     struct ContainsProbe {
         const char* name;
         FnDataPacketContainsAcc fn = nullptr;   // reusing same signature
@@ -1878,8 +1740,6 @@ static bool resolveProc(HMODULE mod, const char* name, T& out)
     return true;
 }
 
-// Locate the XDA DLL folder.  We look next to the exe (build/bin/), then in
-// a sibling `dll/` folder, then on PATH (last-chance fallback).
 static QString locateDllDir()
 {
     const QString exeDir = QCoreApplication::applicationDirPath();
@@ -1928,8 +1788,6 @@ static bool loadApi(Api& api, QString& errDetail)
     ok &= resolveProc(api.xda, "XsControl_deviceIds",               api.controlDeviceIds);
     ok &= resolveProc(api.xda, "XsControl_device",                  api.controlDevice);
     resolveProc (api.xda, "XsControl_broadcast",                    api.controlBroadcast);
-    // Control init helpers — called right after construction and
-    // they are what turns on USB-NCM network scanning for Body Pack V2.
     resolveProc (api.xda, "XsControl_loadFilterProfiles",           api.controlLoadFilterProfiles);
     resolveProc (api.xda, "XsControl_setOptions",                   api.controlSetOptions);
     resolveProc (api.xda, "xdaEnableNetworkScanning",               api.enableNetworkScanning);
@@ -1946,7 +1804,6 @@ static bool loadApi(Api& api, QString& errDetail)
 
     ok &= resolveProc(api.xda, "XsScanner_scanPorts",               api.scanPorts);
     resolveProc (api.xda, "XsScanner_enumerateNetworkDevices",      api.enumerateNetworkDevices);
-    // Array helpers live in xstypes64.dll.
     ok &= resolveProc(api.xst, "XsArray_at",                        api.arrayAt);
     ok &= resolveProc(api.xst, "XsArray_destruct",                  api.arrayDestruct);
     ok &= resolveProc(api.xst, "XsPortInfoArray_construct",         api.portInfoArrayConstruct);
@@ -1965,7 +1822,6 @@ static bool loadApi(Api& api, QString& errDetail)
     resolveProc (api.xst, "XsDataPacket_containsPacketCounter",     api.dataPacketContainsPacketCounter);
     resolveProc (api.xst, "XsDataPacket_packetCounter",             api.dataPacketPacketCounter);
 
-    // Calibrated IMU channels (exact names taken from xstypes64 exports).
     resolveProc (api.xst, "XsDataPacket_containsCalibratedAcceleration",
                  api.dataPacketContainsAcc);
     resolveProc (api.xst, "XsDataPacket_calibratedAcceleration",
@@ -1980,7 +1836,6 @@ static bool loadApi(Api& api, QString& errDetail)
                  api.dataPacketMag);
     resolveProc (api.xst, "XsVector_destruct",                      api.vectorDestruct);
 
-    // SDI-mode extras used by Body Pack V2.
     resolveProc (api.xst, "XsDataPacket_containsVelocityIncrement", api.dataPacketContainsVelInc);
     resolveProc (api.xst, "XsDataPacket_velocityIncrement",         api.dataPacketVelInc);
     resolveProc (api.xst, "XsDataPacket_containsFreeAcceleration",  api.dataPacketContainsFreeAcc);
@@ -1988,17 +1843,13 @@ static bool loadApi(Api& api, QString& errDetail)
     resolveProc (api.xst, "XsDataPacket_containsSampleTimeFine",    api.dataPacketContainsSTF);
     resolveProc (api.xst, "XsDataPacket_sampleTimeFine",            api.dataPacketSTF);
 
-    // Orientation increment (SDI delta-q) — we need dataPacketOrientationIncrement
-    // too, not just the "contains".
     resolveProc (api.xst, "XsDataPacket_containsOrientationIncrement",
                  api.dataPacketContainsOrientationIncrement);
     resolveProc (api.xst, "XsDataPacket_orientationIncrement",
                  api.dataPacketOrientationIncrement);
 
-    // Resolve every probe once — each "XsDataPacket_contains*" name.
     for (auto& p : api.probes) {
         std::string sym = std::string("XsDataPacket_") + p.name;
-        // Convert first letter to lowercase to match actual export casing.
         if (!sym.empty() && sym.length() > 13) sym[13] = char(std::tolower(sym[13]));
         resolveProc(api.xst, sym.c_str(), p.fn);
     }
@@ -2018,8 +1869,6 @@ static void unloadApi(Api& api)
 }
 
 } // namespace xda
-
-// --- Impl ----------------------------------------------------------------
 
 struct MocapReceiver::Impl {
     bool             test;
@@ -2043,16 +1892,11 @@ struct MocapReceiver::Impl {
     std::array<bool,  kXsensSegmentCount> kfReady{};
     double           freqHz       = 240.0;   // queried from XsDevice_updateRate
 
-    // Sensor-to-segment alignment — identity by default, overwritten when
-    // the wizard finalises calibration.  Applied as inv(s2s[i]) to acc /
-    // gyr / mag before they enter the fusion filter.
     std::array<Quat, kXsensSegmentCount> s2s{};
     std::array<Quat, kXsensSegmentCount> s2sInv{};
     bool                                 s2sActive = false;
-    // Per-sensor magnetometer scaling (mag_magn).  1.0 = do nothing.
     std::array<double, kXsensSegmentCount> magMagn{};
     bool                                   magNormActive = false;
-    // Per-sensor accelerometer scaling (acc_magn).  1.0 = off.
     std::array<double, kXsensSegmentCount> accMagn{};
     bool                                   accNormActive = false;
 
@@ -2060,8 +1904,6 @@ struct MocapReceiver::Impl {
     std::array<QVector3D, kXsensSegmentCount>             magSoftOff{};
     bool                                                  magSoftActive = false;
 
-    // Connection transport preference: COM = scanPorts first, Network =
-    // enumerateNetworkDevices first (skip serial scan for faster WiFi boot).
     std::atomic<int> transport{0};              // 0 = ComPort, 1 = Network
     QString          wifiSsid;
     QString          wifiPassword;
@@ -2145,8 +1987,6 @@ struct ManusErgoSnapshot {
     std::atomic<std::uint32_t> lastLeft   { 0 };   // userId for left
     std::atomic<std::uint32_t> lastRight  { 0 };
 
-    // Parsed finger pose — hand-local frame (wrist at origin, +X along
-    // the forearm, +Y up, +Z out-of-palm).  Positions in metres.
     std::atomic<bool> haveLeft  { false };
     std::atomic<bool> haveRight { false };
     QMutex              lock;                       // guards the arrays
@@ -2155,9 +1995,6 @@ struct ManusErgoSnapshot {
     std::array<QVector3D, kFingerSegmentsHand> leftP{};
     std::array<QVector3D, kFingerSegmentsHand> rightP{};
 
-    // Test-mode raw-dump controls.  Set to true from MocapReceiver when
-    // the CLI passes -test so the callback emits full ergonomics-stream
-    // contents to the log for offline inspection.
     std::atomic<bool>          rawDump    { false };
     std::atomic<std::uint64_t> rawTicks   { 0 };
 
@@ -2168,8 +2005,6 @@ struct ManusErgoSnapshot {
 };
 static ManusErgoSnapshot g_ergo;
 
-// Per-finger bone lengths in metres — approximate adult-male anatomy.
-// kFingerBoneLen[finger][joint].  joint 0 = MCP/CMC, joint 3 = tip.
 static const double kFingerBoneLen[5][4] = {
     { 0.045, 0.030, 0.025, 0.020 },   // thumb
     { 0.045, 0.040, 0.025, 0.020 },   // index
@@ -2187,64 +2022,33 @@ static const QVector3D kFingerBaseOffset[5] = {
 static const double kSpreadSign[5] = { +1.0, +0.5, 0.0, -0.5, -1.0 };
 
 const FingerJointLimit kFingerLimits[5][3] = {
-    // Joint limits per finger, refined to real adult human ROM literature
-    // (Brand & Hollister, "Clinical Mechanics of the Hand", 3rd ed.).
-    //
-    // Layout per row: { spreadMin, spreadMax, flexMin, flexMax } for the
-    // matching FK joint (slot 0/1/2 of the finger), in radians.
-    //
-    //   thumb row 0  – CMC abduction (spread) + CMC flexion (a1)
-    //         row 1  – MCP flexion        (a2)
-    //         row 2  – IP  flexion        (a3)
-    //   other row 0  – MCP abduction (spread) + MCP flexion (a1)
-    //         row 1  – PIP flexion        (a2)
-    //         row 2  – DIP flexion        (a3)
-    //
-    // Pre-fix limits used PI/3 (60°) for every distal flexion — well below
-    // the 80-90° real-world DIP / thumb-IP ROM, so a full fist clipped
-    // before the tip reached the palm.  Pre-fix thumb spread also went to
-    // ±0.30π · π / 2 ≈ ±54°, far past the ~25° measured ROM.
     {
-        // Thumb CMC: spread = radial-ulnar abduction (carpometacarpal
-        // saddle); flex = palmar abduction (toward palm).  Spread tighter
-        // than before (real ROM is ~25° abd / 10° add), flex limited to
-        // 90° (real CMC flex max ~50–70° but Manus reports cumulative
-        // CMC+MCP here in some firmware revisions, so we leave headroom).
         { -M_PI / 18.0,  M_PI * 0.22,  -M_PI / 12.0,  M_PI * 0.50 },
-        // Thumb MCP: pure hinge, real max 75-90°.
         {  0.0,          0.0,           0.0,          M_PI * 0.50 },
-        // Thumb IP: pure hinge, real max 80-90° (was PI/3 = 60°).
         {  0.0,          0.0,           0.0,          M_PI * 0.45 }
     },
     {
-        // Index MCP: spread ±20° (radial / ulnar), flex 0-90°.
         { -M_PI / 9.0,   M_PI / 9.0,   -M_PI / 12.0,  M_PI * 0.50 },
-        // Index PIP: real max ~110°, slight headroom = 0.62π ≈ 112°.
         {  0.0,          0.0,           0.0,          M_PI * 0.62 },
-        // Index DIP: real max 80-90° (was PI/3 = 60° — too tight).
         {  0.0,          0.0,           0.0,          M_PI * 0.45 }
     },
     {
-        // Middle MCP: spread ±10° only — middle finger barely fans.
         { -M_PI / 18.0,  M_PI / 18.0,  -M_PI / 12.0,  M_PI * 0.50 },
         {  0.0,          0.0,           0.0,          M_PI * 0.62 },
         {  0.0,          0.0,           0.0,          M_PI * 0.45 }
     },
     {
-        // Ring MCP: spread ±20°.
         { -M_PI / 9.0,   M_PI / 9.0,   -M_PI / 12.0,  M_PI * 0.50 },
         {  0.0,          0.0,           0.0,          M_PI * 0.62 },
         {  0.0,          0.0,           0.0,          M_PI * 0.45 }
     },
     {
-        // Pinky MCP: spread ±22.5° (widest of the non-thumb).
         { -M_PI / 8.0,   M_PI / 8.0,   -M_PI / 12.0,  M_PI * 0.50 },
         {  0.0,          0.0,           0.0,          M_PI * 0.62 },
         {  0.0,          0.0,           0.0,          M_PI * 0.45 }
     }
 };
 
-// Build a quaternion from a unit axis and an angle in radians.
 static Quat axisAngleQuat(const QVector3D& axis, double rad)
 {
     const double h = rad * 0.5;
@@ -2262,12 +2066,6 @@ static void parseErgoHand(const float* degs20, bool isLeft,
     const double sideSign = isLeft ? -1.0 : +1.0;
 
     // ============================================================
-    // Thumb anatomy — CMC pre-rotation + per-joint axis tilts.
-    // CMC is a saddle joint at ~45° to palm plane; MCP/IP tilt ~5-10°
-    // palmar.  thumbPreRot = R_z(+radial) · R_x(-opposition).  Left hand
-    // gets correct mirror automatically via mirror_y_quat (homomorphism
-    // over quat product).  kThumbDistalFlexTiltDeg makes MCP/IP curl
-    // follow the palmar plane instead of cutting flat across it.
     // ============================================================
     constexpr double kThumbCmcRadialDeg          = 45.0;
     constexpr double kThumbCmcOppositionDeg      = 20.0;
@@ -2278,10 +2076,6 @@ static void parseErgoHand(const float* degs20, bool isLeft,
         axisAngleQuat(QVector3D(1,0,0),
                      -kThumbCmcOppositionDeg * M_PI / 180.0)
     ).normalized();
-    // Tilted hinge axis used for thumb MCP (a2) and IP (a3).  Rotating
-    // +Y by R_z(-tiltDeg) gives (sin tilt, cos tilt, 0) — mostly +Y
-    // (the canonical flex axis) with a small +X (forward) component, so
-    // flex now curls palmar-radial instead of palmar-only.
     const double tiltRad = kThumbDistalFlexTiltDeg * M_PI / 180.0;
     const QVector3D thumbDistalFlexAxis(float(std::sin(tiltRad)),
                                         float(std::cos(tiltRad)),
@@ -2304,15 +2098,10 @@ static void parseErgoHand(const float* degs20, bool isLeft,
 
         Quat q0 = quat_mult(axisAngleQuat(spreadAx, spreadC),
                             axisAngleQuat(flexAxis, a1c));
-        // Thumb MCP (a2) and IP (a3) hinges tilt ~8° palmar — see the
-        // kThumbDistalFlexTiltDeg block above for the anatomy reference.
-        // Other fingers keep the canonical +Y flex axis.
         const QVector3D distalAxis = (f == 0) ? thumbDistalFlexAxis : flexAxis;
         Quat q1 = axisAngleQuat(distalAxis, a2c);
         Quat q2 = axisAngleQuat(distalAxis, a3c);
 
-        // FIX: для большого пальца стартуем с предвернутой
-        // локальной системой координат вместо identity.
         Quat worldQ = (f == 0) ? thumbPreRot : Quat(1, 0, 0, 0);
         QVector3D p = kFingerBaseOffset[f];
         const int baseIdx = f * 4;
@@ -2343,8 +2132,6 @@ static inline QVector3D mirrorManusL(const QVector3D& p)
 }
 }
 
-// Callback signature matches CoreSdk_RegisterCallbackForErgonomicsStream:
-// `void(const ErgonomicsStream*)`.  Struct layout matches the Manus ABI.
 struct ManusErgoData {        // sizeof == 0xA8
     std::uint32_t id = 0;
     std::uint32_t isUserID = 0;
@@ -2535,9 +2322,6 @@ static void __cdecl foxManusErgonomicsCb(const void* raw)
     }
 }
 
-// ManusSDK ABI — function-pointer signatures matching the public
-// where these structs ship with static_assert()s against offsets / sizes
-// verified against the production SDK headers.
 namespace manus_abi {
 
 struct VersionInfo {
@@ -2574,9 +2358,6 @@ bool MocapReceiver::connectGloves()
 {
     auto& I = *m_impl;
 
-    // Raw ergonomics-stream logging in -test mode so we can reverse the
-    // exact wire layout per SDK build.  Idempotent — stays on until app
-    // shutdown.
     if (I.test) {
         g_ergo.rawDump.store(true);
         g_ergo.rawTicks.store(0);
@@ -2591,7 +2372,6 @@ bool MocapReceiver::connectGloves()
         return d;
     }();
 
-    // ---- 1. Load the SDK DLL (idempotent) ----------------------------------
     if (!I.manusDllLoaded) {
         const std::string sdk = dllDir + "\\ManusSDK.dll";
         HMODULE mod = LoadLibraryA(sdk.c_str());
@@ -2607,7 +2387,6 @@ bool MocapReceiver::connectGloves()
         I.manusDllLoaded = true;
     }
 
-    // ---- 2. Resolve exports (signatures from public ManusSDK headers) -----
     using namespace manus_abi;
     auto resolve = [&](const char* name) -> FARPROC {
         return GetProcAddress(I.manusModule, name);
@@ -2668,8 +2447,6 @@ bool MocapReceiver::connectGloves()
 
     bool coreUp = false;
     if (alreadyInit) {
-        // Previous session already installed callbacks + picked a host.
-        // Just verify the connection is still live.
         if (isConn) {
             bool flag = false;
             sehCall([&]() { isConn(&flag); });
@@ -2678,23 +2455,18 @@ bool MocapReceiver::connectGloves()
         testLog(std::string("[manus] re-entry on existing session, connected=")
                 + (coreUp ? "true" : "false"), I.test);
     } else {
-        // ---- 4. Register the streams BEFORE SetSessionType (UE5 order) --
         auto noop = [](const void*) {};
         if (regSkel) { int r = 0; sehCall([&]() { r = regSkel(noop); });
                        testLog("[manus] RegSkeletonStream rc=" + std::to_string(r), I.test); }
-        // Ergonomics = where glove presence is actually reported on this
-        // SDK build.  Wire the real callback so we get dataCount ticks.
         { int r = 0; sehCall([&]() { r = regErgo(&foxManusErgonomicsCb); });
           testLog("[manus] RegErgonomicsStream rc=" + std::to_string(r), I.test); }
         if (regSys)  { int r = 0; sehCall([&]() { r = regSys(noop); });
                        testLog("[manus] RegSystemStream rc=" + std::to_string(r), I.test); }
 
-        // ---- 5. SetSessionType(Unreal=2) -------------------------------
         int sRc = -1;
         sehCall([&]() { sRc = setSess(kSessionTypeUnreal); });
         testLog("[manus] CoreSdk_SetSessionType(2) rc=" + std::to_string(sRc), I.test);
 
-        // ---- 6. Coordinate system — Y-up, right-handed, meters ---------
         {
             CoordinateSystemVUH cs{};
             cs.view       = kAxisViewYFromViewer;
@@ -2706,7 +2478,6 @@ bool MocapReceiver::connectGloves()
             testLog("[manus] InitCoordSystemVUH rc=" + std::to_string(cRc), I.test);
         }
 
-        // ---- 7. LookForHosts + ConnectToHost ---------------------------
         int lRc = -1;
         sehCall([&]() { lRc = lookFor(1, true); });
         testLog("[manus] CoreSdk_LookForHosts rc=" + std::to_string(lRc), I.test);
@@ -2771,8 +2542,6 @@ bool MocapReceiver::connectGloves()
             }
         }
     }
-    // Fall back to the direct count API if the user table is empty — some
-    // Core builds populate one but not the other.
     if (gloveCount == 0 && getNumGl) {
         std::uint32_t n = 0;
         sehCall([&]() { getNumGl(&n); });
@@ -2815,8 +2584,6 @@ void MocapReceiver::setS2sAlignment(const std::array<Quat, kXsensSegmentCount>& 
     for (int i = 0; i < kXsensSegmentCount; ++i)
         m_impl->s2sInv[i] = s2s[i].inv();
     m_impl->s2sActive = true;
-    // Force re-init of every MEKF so the first few samples after s2s goes
-    // live don't corrupt the existing steady state.
     for (auto& r : m_impl->kfReady) r = false;
     testLog("[s2s] sensor-to-segment alignment installed", m_impl->test);
 }
@@ -2844,9 +2611,6 @@ void MocapReceiver::resetS2sAlignment()
     m_impl->magNormActive = false;
     m_impl->accNormActive = false;
     m_impl->magSoftActive = false;
-    // Calibration teardown also drops any FoxKf priors — the next predict
-    // re-initialises each sensor from (identity, zero) until the wizard
-    // installs fresh priors via setKfPriors.
     for (auto& r : m_impl->kfReady) r = false;
 }
 
@@ -2884,12 +2648,10 @@ void MocapReceiver::setKfPriors(const std::array<Quat, kXsensSegmentCount>& refQ
     constexpr float kDegToRad = float(M_PI / 180.0);
     QMutexLocker lk(&m_impl->lock);
     for (int i = 0; i < kXsensSegmentCount; ++i) {
-        // Hamilton WXYZ, double-precision → float Quat4.
         const Quat& q = refQuat[i];
         const fox::Quat4 qf{ float(q.w), float(q.x), float(q.y), float(q.z) };
         const QVector3D&  b = gyrBiasDegSec[i];
         const fox::Vec3   bRad{ b.x() * kDegToRad, b.y() * kDegToRad, b.z() * kDegToRad };
-        // Settings must already have been installed once via initialise().
         if (!m_impl->kfReady[i]) {
             fox::FoxKfSettings ks;
             ks.zuptHoldFrames = std::max(5,
@@ -2942,8 +2704,6 @@ void MocapReceiver::run()
         return;
     }
 
-    // SEH-wrap every XDA call: when no suit/dongle is plugged, XDA internals
-    // can throw structured exceptions that would crash the app silently.
     void* control = nullptr;
     if (!sehCall([&]() { control = api.controlConstruct(); }) || !control) {
         unloadApi(api);
@@ -2990,7 +2750,6 @@ void MocapReceiver::run()
         portCount = *reinterpret_cast<std::size_t*>(portsStorage + sizeof(void*));
         testLog("[xda] enumerateNetworkDevices found "
                 + std::to_string(portCount) + " device(s)", I.test);
-        // Fallback to COM scan if nothing found on network.
         if (portCount == 0) {
             I.setStatus(ConnStatus::Scanning,
                         "Сеть пуста — пробуем COM порты…", this);
@@ -3005,7 +2764,6 @@ void MocapReceiver::run()
             *reinterpret_cast<std::size_t*>(portsStorage + sizeof(void*));
         testLog("[xda] scanPorts found " + std::to_string(portCount) + " port(s)",
                 I.test);
-        // Fallback: USB-NCM / Ethernet enumeration (Body Pack V2 / WiFi path).
         if (portCount == 0 && api.enumerateNetworkDevices) {
             I.setStatus(ConnStatus::Scanning,
                         "Поиск Xsens в сети (WiFi/Ethernet)…", this);
@@ -3028,7 +2786,6 @@ void MocapReceiver::run()
         return;
     }
 
-    // ---- OPEN first port that yields tracker devices -------------------
     std::vector<void*> trackerHandles;
     std::vector<int>   trackerSegments;
 
@@ -3097,7 +2854,6 @@ void MocapReceiver::run()
                     .arg(trackerHandles.size()),
                 this);
 
-    // ---- Broadcast gotoMeasurement ------------------------------------
     bool measuring = false;
     if (broadcastDev) measuring = api.deviceGotoMeasurement(broadcastDev) != 0;
     if (!measuring) {
@@ -3115,9 +2871,6 @@ void MocapReceiver::run()
     }
     QThread::msleep(1000);     // let the stream spin up
 
-    // Query native update rate — Body Pack V2 is typically 240 Hz but we
-    // honour whatever the firmware reports so the SDI → acc/gyr conversion
-    // stays correct.
     if (api.deviceUpdateRate && !trackerHandles.empty()) {
         const int rate = api.deviceUpdateRate(trackerHandles.front());
         if (rate > 0) I.freqHz = double(rate);
@@ -3125,14 +2878,11 @@ void MocapReceiver::run()
                 I.test);
     }
 
-    // ---- Poll loop -----------------------------------------------------
     SuitPose staging;
     int framesThisSec = 0;
     double fpsT0 = monotonicSec();
     I.lastPacket = monotonicSec();
 
-    // Per-sensor "dumped once in -test" flag — we want to see each sensor's
-    // first three complete frames, then stop spamming.
     std::array<int, kXsensSegmentCount> dumpCount{};
 
     while (!I.stop.load()) {
@@ -3147,8 +2897,6 @@ void MocapReceiver::run()
             XsDataPacketBlob* pkt = api.deviceTakeFirstDataPacketInQueue(
                 dev, reinterpret_cast<XsDataPacketBlob*>(packetStorage));
 
-            // Resolve which segment this packet came from — prefer an
-            // embedded stored-location-id over our static mapping.
             int targetSeg = seg;
             if (pkt && api.dataPacketContainsStoredLocationId &&
                 api.dataPacketStoredLocationId &&
@@ -3158,7 +2906,6 @@ void MocapReceiver::run()
                 if (ss >= 0) targetSeg = ss;
             }
 
-            // --- Quaternion (if packet carries one) ----------------------
             Quat qo;
             bool haveQuat = false;
             if (pkt && api.dataPacketContainsOrientation &&
@@ -3172,9 +2919,6 @@ void MocapReceiver::run()
                 haveQuat = true;
             }
 
-            // --- Pull every IMU channel the packet might carry ----------
-            // Body Pack V2 streams SDI (velocityIncrement / orientationIncrement)
-            // + mag; absolute calibratedAcc/Gyro are usually absent.
             QVector3D acc, gyr, mag, velInc, freeAcc;
             Quat      dq;
             bool haveAcc=false, haveGyr=false, haveMag=false,
@@ -3222,7 +2966,6 @@ void MocapReceiver::run()
             QVector3D accForFilter, gyrForFilter;
             bool fuseReady = false;
             if (haveVelInc && haveDq) {
-                // SI units first (for the diagnostics dump), then xio units.
                 const QVector3D accSI(float(velInc.x() * I.freqHz),
                                       float(velInc.y() * I.freqHz),
                                       float(velInc.z() * I.freqHz));
@@ -3250,7 +2993,6 @@ void MocapReceiver::run()
                 if (a > 1e-6) accForFilter = accForFilter / float(a);
             }
 
-
             if (I.magSoftActive && haveMag && targetSeg >= 0 &&
                 targetSeg < kXsensSegmentCount)
             {
@@ -3271,8 +3013,6 @@ void MocapReceiver::run()
                 if (m > 1e-6) mag = mag / float(m);
             }
 
-            // Sensor-to-segment rotation so the fusion output is already
-            // in body-segment-world space.
             if (I.s2sActive && targetSeg >= 0 && targetSeg < kXsensSegmentCount) {
                 const Quat& inv = I.s2sInv[targetSeg];
                 accForFilter = vec_rotate(accForFilter, inv);
@@ -3283,15 +3023,9 @@ void MocapReceiver::run()
             Quat fusedQuat;
             bool haveFused = false;
             if (fuseReady && targetSeg >= 0 && targetSeg < kXsensSegmentCount) {
-                // FoxKf (XKFA-class MEKF) replaces the previous
-                // FusionAhrs + FusionBias pair.  See scr/fusion/FoxKf.h
-                // for state, process, and measurement model.
                 FoxKf& kf = I.kf[targetSeg];
                 if (!I.kfReady[targetSeg]) {
                     FoxKfSettings ks;
-                    // Tune the rejection gates to the same magnitudes
-                    // the previous code used: accept |a-1g|<0.30g, reject
-                    // |m-1|<0.40 unit.  Process noise is conservative.
                     ks.gyroNoiseStd       = 0.005f;
                     ks.gyroBiasRwStd      = 1.0e-5f;
                     ks.accNoiseStd        = 0.05f;
@@ -3309,9 +3043,6 @@ void MocapReceiver::run()
                     I.kfReady[targetSeg] = true;
                 }
 
-                // FoxKf expects gyro in rad/s; gyrForFilter is in deg/s
-                // (kept from the previous xio Fusion convention so the
-                // calibration paths upstream don't have to change).
                 constexpr float kDegToRad = float(M_PI / 180.0);
                 const Vec3 gyrRad{ gyrForFilter.x() * kDegToRad,
                                    gyrForFilter.y() * kDegToRad,
@@ -3337,9 +3068,6 @@ void MocapReceiver::run()
                     kf.updateMag(magV);
                 }
 
-                // Apply external ZUPT (when the filter's internal still
-                // detector confirms enough quiet frames).  This tightens
-                // bias estimation without harming dynamic accuracy.
                 if (kf.isStationary()) {
                     kf.updateZupt();
                 }
@@ -3354,7 +3082,6 @@ void MocapReceiver::run()
                                     && I.kfReady[targetSeg])
                 ? I.kf[targetSeg].orientStdDeg() : 0.0f;
 
-            // --- Publish into the shared frame ---------------------------
             if (targetSeg >= 0 && targetSeg < kXsensSegmentCount) {
                 QMutexLocker lk(&I.lock);
                 if      (haveFused) staging.quat[targetSeg] = fusedQuat;
@@ -3368,9 +3095,6 @@ void MocapReceiver::run()
                     staging.sampleCounter = api.dataPacketPacketCounter(pkt);
                 staging.recvTime = monotonicSec();
 
-                // --- Merge latest glove snapshot (Manus ergonomics stream)
-                // into staging.  Positions are in HAND-LOCAL frame here —
-                // the render tick rotates them by the wrist's world quat.
                 const bool haveL = g_ergo.haveLeft.load();
                 const bool haveR = g_ergo.haveRight.load();
                 if (haveL || haveR) {
@@ -3390,7 +3114,6 @@ void MocapReceiver::run()
                 gotAny = true;
             }
 
-            // --- First-N per-sensor dump in -test ------------------------
             if (I.test && targetSeg >= 0 && targetSeg < kXsensSegmentCount &&
                 dumpCount[targetSeg] < 3)
             {
@@ -3428,8 +3151,6 @@ void MocapReceiver::run()
                                     << "," << freeAcc.z() << ") m/s²";
                 else             ss << "-";
                 std::cout << ss.str() << '\n';
-                // One-time "which channels does this packet actually carry"
-                // snapshot.  Tells us exactly what Body Pack V2 streams.
                 if (dumpCount[targetSeg] == 0) {
                     std::ostringstream cs;
                     cs << "       channels:";
@@ -3474,8 +3195,6 @@ void MocapReceiver::run()
                    << "  t=" << std::setprecision(2) << now
                    << "s ==========\n";
 
-                // Quaternion → intrinsic XYZ Euler (deg).  Matches
-                // scipy.spatial.transform.Rotation.from_quat(w,x,y,z).as_euler('XYZ').
                 auto quatEulerDeg = [](const Quat& q, double& rx,
                                        double& ry, double& rz) {
                     const double m00 = 1-2*(q.y*q.y+q.z*q.z);
@@ -3526,8 +3245,6 @@ void MocapReceiver::run()
                                       << std::setw(7) << rz << ")°"
                        << "  |ang|=" << std::setw(6) << quat_angle_deg(q) << "°\n";
                 }
-                // Calibration state — printed once so misreads at the
-                // raw→normalised boundary are immediately diagnosable.
                 ss << "--- calibration flags: s2s=" << (I.s2sActive ? "on" : "off")
                    << "  accNorm=" << (I.accNormActive ? "on" : "off")
                    << "  magNorm=" << (I.magNormActive ? "on" : "off")
@@ -3554,8 +3271,6 @@ void MocapReceiver::run()
                            << ")\n";
                     }
                 }
-                // L/R pair deltas kept so asymmetry still pops out at a
-                // glance — now printed at the end of the full snapshot.
                 ss << std::setprecision(2);
                 ss << "--- L/R pair Δ (|angle|): ---\n";
                 struct Pair { const char* lbl; int lSeg; int rSeg; };
@@ -3600,7 +3315,6 @@ void MocapReceiver::run()
         }
     }
 
-    // ---- Teardown ------------------------------------------------------
     for (void* d : trackerHandles) api.deviceGotoConfig(d);
     api.controlClose(control);
     if (api.controlDestruct) api.controlDestruct(control);
@@ -3609,7 +3323,6 @@ void MocapReceiver::run()
 }
 
 // ============================================================================
-//  Localisation — RU / EN dictionary + runtime switch
 // ============================================================================
 
 Lang& Lang::instance() { static Lang g; return g; }
@@ -3750,7 +3463,6 @@ static const Tr kTr[] = {
     {"fng_ring",           "безымянный",                        "ring"},
     {"fng_pinky",          "мизинец",                           "pinky"},
 
-    // --- Record wizard ---
     {"rec_wiz_title",      "Запись сессии",                     "Record session"},
     {"rec_pick_format",    "Формат и качество",                 "Format and quality"},
     {"rec_format",         "Формат файла",                      "File format"},
@@ -3772,7 +3484,6 @@ static const Tr kTr[] = {
     {"rec_save_ok",        "Запись сохранена",                  "Recording saved"},
     {"rec_hd_progress",    "Обработка HD post-processing…",     "Running HD post-processing…"},
 
-    // --- Live-stream wizard ---
     {"live_wiz_title",     "Live-трансляция",                   "Live streaming"},
     {"live_target",        "Плагин-приёмник",                   "Target plugin"},
     {"live_frame_ty",      "Тип кадра MXTP",                    "MXTP frame type"},
@@ -3815,16 +3526,12 @@ QString Lang::t(const char* key)
     return QString::fromLatin1(key);           // key as fallback
 }
 
-// Helper: render a connection dot (green = live, red = off, grey = inactive).
 static void paintDot(QLabel* lab, const char* colorHex)
 {
     lab->setFixedSize(14, 14);
     lab->setStyleSheet(QString("background:%1; border-radius:7px;").arg(colorHex));
 }
 
-// Procedurally-drawn flag icons (no external assets).  28×20 px with a
-// 1-px dark border + rounded 3-px radius so they sit cleanly inside the
-// QComboBox list even on a black background.
 static QIcon makeFlagIcon(const char* code)
 {
     const int W = 28, H = 20;
@@ -3845,23 +3552,19 @@ static QIcon makeFlagIcon(const char* code)
         p.fillRect(QRectF(0, 0, W, H), QColor("#012169"));    // navy blue
         QPen wide(QColor("#FFFFFF"));  wide.setWidth(5);
         QPen thin(QColor("#C8102E"));  thin.setWidth(2);
-        // diagonals (saltire): two crossings corner-to-corner
         p.setPen(wide);
         p.drawLine(0, 0, W, H);
         p.drawLine(W, 0, 0, H);
         p.setPen(thin);
         p.drawLine(0, 0, W, H);
         p.drawLine(W, 0, 0, H);
-        // horizontal + vertical white cross
         wide.setWidth(6); p.setPen(wide);
         p.drawLine(W / 2, 0, W / 2, H);
         p.drawLine(0, H / 2, W, H / 2);
-        // red cross on top
         thin.setWidth(3); p.setPen(thin);
         p.drawLine(W / 2, 0, W / 2, H);
         p.drawLine(0, H / 2, W, H / 2);
     }
-    // subtle outline so the flag reads on the dark background.
     p.setClipping(false);
     p.setPen(QPen(QColor(0, 0, 0, 180), 1));
     p.setBrush(Qt::NoBrush);
@@ -3870,7 +3573,6 @@ static QIcon makeFlagIcon(const char* code)
 }
 
 // ============================================================================
-//  NewSessionWizard
 // ============================================================================
 
 NewSessionWizard::NewSessionWizard(MocapReceiver* rx, bool testMode, QWidget* parent)
@@ -3899,8 +3601,6 @@ NewSessionWizard::NewSessionWizard(MocapReceiver* rx, bool testMode, QWidget* pa
     outer->addWidget(m_pages, 1);
     outer->addLayout(nav);
 
-    // Poll the receiver's connection status a few times a second so the
-    // calibration page's badge + button state track reality automatically.
     m_statusTimer.setInterval(250);
     connect(&m_statusTimer, &QTimer::timeout, this, &NewSessionWizard::onStatusTick);
     m_statusTimer.start();
@@ -3936,8 +3636,6 @@ NewSessionWizard::NewSessionWizard(MocapReceiver* rx, bool testMode, QWidget* pa
                         testLog("[pilot] page 1 → connect suit", m_test);
                         onConnectSuit();
                     }
-                    // Try the gloves handshake once the SDK is ready — only
-                    // meaningful when the operator launched with --gloves.
                     if (needGlv && !gloveKicked && m_rx) {
                         gloveKicked = true;
                         testLog("[pilot] page 1 → connect gloves", m_test);
@@ -3949,8 +3647,6 @@ NewSessionWizard::NewSessionWizard(MocapReceiver* rx, bool testMode, QWidget* pa
                         testLog("[pilot] suit+gloves ready → continue", m_test);
                         goNext();
                     } else if (needGlv && suitUp && !gloveUp) {
-                        // Hold on the Mode page with a breadcrumb so the
-                        // operator can see exactly what's missing.
                         testLog("[pilot] waiting for gloves — core="
                                 + std::string(m_rx->glovesCoreReady() ? "up" : "down")
                                 + " count=" + std::to_string(
@@ -4055,7 +3751,6 @@ void NewSessionWizard::buildPages()
         connect(m_rbSuit,  &QRadioButton::toggled, this, &NewSessionWizard::onModeChanged);
         connect(m_rbSuitG, &QRadioButton::toggled, this, &NewSessionWizard::onModeChanged);
 
-        // Transport selector: COM port or WiFi.
         m_cbxTransport = new QComboBox(p);
         m_cbxTransport->addItem(QString::fromUtf8("\xF0\x9F\x94\x8C  COM порт — Awinda / MT-Link"));
         m_cbxTransport->addItem(QString::fromUtf8("\xF0\x9F\x93\xA1  WiFi — Awinda / Link station"));
@@ -4068,7 +3763,6 @@ void NewSessionWizard::buildPages()
             "QComboBox QAbstractItemView { background:#1b1b1b; color:#eee;"
             " selection-background-color:#FF7A1A; selection-color:#000; }");
 
-        // WiFi credentials row (hidden unless WiFi mode is chosen).
         m_wifiRow = new QWidget(p);
         {
             auto* wl = new QHBoxLayout(m_wifiRow);
@@ -4119,7 +3813,6 @@ void NewSessionWizard::buildPages()
                                           m_edPassword->text());
         });
 
-        // Suit connect row
         m_btnConnectSuit = new QPushButton(p);
         m_btnConnectSuit->setObjectName("primary");
         m_btnConnectSuit->setMinimumHeight(38);
@@ -4139,7 +3832,6 @@ void NewSessionWizard::buildPages()
         suitRow->addSpacing(6);
         suitRow->addWidget(m_suitText, 1);
 
-        // Glove connect row (only visible in suit+gloves mode)
         m_btnConnectGloves = new QPushButton(p);
         m_btnConnectGloves->setObjectName("primary");
         m_btnConnectGloves->setMinimumHeight(38);
@@ -4207,10 +3899,7 @@ void NewSessionWizard::buildPages()
             s->setKeyboardTracking(true);
             s->setButtonSymbols(QAbstractSpinBox::UpDownArrows);
             s->setCursor(Qt::IBeamCursor);
-            // Tooltip tells the user this box accepts typed values too.
             s->setToolTip(Lang::t("dims_type_hint"));
-            // Centred text + strong focus policy so keyboard input works
-            // without needing to click the line-edit first.
             if (auto* le = s->findChild<QLineEdit*>()) {
                 le->setAlignment(Qt::AlignCenter);
                 le->setFocusPolicy(Qt::StrongFocus);
@@ -4220,7 +3909,6 @@ void NewSessionWizard::buildPages()
         configSpin(m_height, 175.0, 100.0, 230.0, 0.5);
         m_foot   = new QDoubleSpinBox(p);
         configSpin(m_foot,    26.0,  15.0,  35.0, 0.5);
-        // 0 = «вычислить из роста» (фоллбэк в SkeletonXsens::buildLengths).
         m_arm = new QDoubleSpinBox(p);
         configSpin(m_arm,      0.0,   0.0, 250.0, 0.5);
         m_leg = new QDoubleSpinBox(p);
@@ -4232,9 +3920,6 @@ void NewSessionWizard::buildPages()
         m_hand     = new QDoubleSpinBox(p);
         configSpin(m_hand,     0.0,   0.0,  25.0, 0.5);     // 0 ⇒ 0.108·h·armScale
 
-        // True "select-all-on-focus" — attached via an event filter on
-        // each spin's internal QLineEdit.  Needed because QAbstractSpinBox
-        // doesn't expose a selectAllOnFocus property.
         struct SelAllFilter : QObject {
             bool eventFilter(QObject* o, QEvent* e) override {
                 if (e->type() == QEvent::FocusIn) {
@@ -4373,9 +4058,6 @@ void NewSessionWizard::buildPages()
         m_dimsHint->setWordWrap(true);
         m_dimsHint->setAlignment(Qt::AlignCenter);
 
-        // FIX: оборачиваем все 4 спина + breakdown в QScrollArea, чтобы
-        // окно мастера не вырастало вертикально при добавлении новых
-        // полей — пользователь скроллит контент внутри той же высоты.
         auto* scrollHost = new QWidget(p);
         auto* hostLay    = new QVBoxLayout(scrollHost);
         hostLay->setContentsMargins(0, 0, 0, 0);
@@ -4581,12 +4263,8 @@ void NewSessionWizard::retranslate()
     if (m_dimsTitle)      m_dimsTitle->setText(Lang::t("dims_title"));
     if (m_lblHeight)      m_lblHeight->setText(Lang::t("body_height") + ":");
     if (m_lblFoot)        m_lblFoot->setText(Lang::t("foot_length") + ":");
-    // FIX: переведённые подписи к новым полям размаха рук и длины ноги.
     if (m_lblArm)         m_lblArm->setText(Lang::t("body_arm_span") + ":");
     if (m_lblLeg)         m_lblLeg->setText(Lang::t("body_leg_length") + ":");
-    // New Drillis-Contini overrides: shoulder breadth, hip breadth, hand
-    // length.  Tooltips spell out the 0 = auto convention so the user
-    // doesn't accidentally lock in "0 cm" thinking it's a real value.
     auto setOptionalLabel = [](QLabel* lab, QDoubleSpinBox* sp, const char* key) {
         if (!lab) return;
         lab->setText(Lang::t(key) + ":");
@@ -4630,7 +4308,6 @@ void NewSessionWizard::retranslate()
     if (m_btnBack)        m_btnBack->setText(Lang::t("back"));
     if (m_btnNext)        m_btnNext->setText(Lang::t("continue"));
 
-    // Welcome "Language" label discovery
     for (QLabel* lab : findChildren<QLabel*>()) {
         if (lab->property("isLangLabel").toBool())
             lab->setText(Lang::t("language") + ":");
@@ -4656,11 +4333,8 @@ void NewSessionWizard::updateNavButtons()
 {
     m_btnBack->setVisible(m_pageIdx > 0 && m_pageIdx < 4);
     m_btnNext->setVisible(m_pageIdx > 0 && m_pageIdx < 3);
-    // page 0 has its own hero button, page 3 has "Start calibration",
-    // page 4 has "Finish".  Back is hidden on page 0 and page 4.
     m_btnBack->setEnabled(!m_captureTimer.isActive() && !m_countTimer.isActive());
 
-    // Continue from Mode page is gated on hardware being connected.
     if (m_pageIdx == 1 && m_btnNext) {
         const bool suitUp   = (m_rx && m_rx->isStreaming());
         const bool gloveUp  = (m_rx && m_rx->glovesReady());
@@ -4681,9 +4355,6 @@ void NewSessionWizard::onConnectSuit()
                 + std::string(connStatusName(s)), m_test);
         return;
     }
-    // Debounce at the UI level — every click disables the button for a
-    // second and re-enables it via the status tick.  Protects against
-    // the user double-tapping while the worker is still on its way down.
     m_btnConnectSuit->setEnabled(false);
     QTimer::singleShot(1200, this, [this]() {
         if (m_btnConnectSuit) m_btnConnectSuit->setEnabled(true);
@@ -4698,8 +4369,6 @@ void NewSessionWizard::onConnectGloves()
 {
     if (!m_rx || !m_btnConnectGloves) return;
     testLog("[wizard] Connect gloves clicked", m_test);
-    // Debounce — SDK handshake can take ~300 ms and a double-click used to
-    // reach the probe code twice, which was the other crash report.
     m_btnConnectGloves->setEnabled(false);
     QTimer::singleShot(800, this, [this]() {
         if (m_btnConnectGloves) m_btnConnectGloves->setEnabled(true);
@@ -4708,8 +4377,6 @@ void NewSessionWizard::onConnectGloves()
     const char* key = ok ? "gloves_ready"
                    : (m_rx->glovesCoreReady() ? "gloves_no_device"
                                               : "gloves_no_core");
-    // If the DLL itself is missing there is no Core to talk to — show the
-    // original "ManusSDK.dll not found" copy instead of the Core message.
     if (!ok && !m_rx->glovesDllLoaded()) key = "gloves_missing";
     if (m_gloveDot)  paintDot(m_gloveDot, ok ? "#2EC25A" : "#C03838");
     if (m_gloveText) m_gloveText->setText(Lang::t(key));
@@ -4739,8 +4406,6 @@ void NewSessionWizard::goNext()
     } else if (m_pageIdx == 2) {
         m_result.heightCm     = m_height->value();
         m_result.footLengthCm = m_foot->value();
-        // 0 → SkeletonXsens::buildLengths использует антропометрический
-        // Drillis-Contini фоллбэк по росту (см. ActorConfig docs).
         m_result.armSpanCm       = m_arm      ? m_arm->value()      : 0.0;
         m_result.legLengthCm     = m_leg      ? m_leg->value()      : 0.0;
         m_result.shoulderWidthCm = m_shoulder ? m_shoulder->value() : 0.0;
@@ -4782,10 +4447,8 @@ void NewSessionWizard::onStatusTick()
         case ConnStatus::NotInitialized:
         default:                      key = "suit_scanning";     break;
     }
-    // Calibration page badge.
     if (m_connBadge) setBadge(m_connBadge, Lang::t(key), streaming);
 
-    // Mode page row badge / button.
     if (m_suitDot)  paintDot(m_suitDot, streaming ? "#2EC25A" : "#C03838");
     if (m_suitText) m_suitText->setText(Lang::t(key));
     if (m_btnConnectSuit) m_btnConnectSuit->setText(
@@ -4808,7 +4471,6 @@ void NewSessionWizard::onStatusTick()
             m_calibStatus->setText(Lang::t("waiting_for_suit"));
     }
     if (!streaming && (m_countTimer.isActive() || m_captureTimer.isActive())) {
-        // Lost connection mid-calibration — reset both halves.
         m_countTimer.stop(); m_captureTimer.stop();
         m_countdownBar->setValue(0); m_readyBar->setValue(0);
         m_goodSamples = 0; m_samples.clear(); m_havePrev = false;
@@ -4833,7 +4495,6 @@ void NewSessionWizard::onCalibrationBegin()
     m_readyBar->setValue(0);
     m_btnCalibBegin->setEnabled(false);
 
-    // Reset BOTH accumulators (T and N) for the fresh run.
     for (int i = 0; i < kXsensSegmentCount; ++i) {
         m_accAccumT[i]    = QVector3D(0, 0, 0);
         m_gyrAccumT[i]    = QVector3D(0, 0, 0);
@@ -4855,8 +4516,6 @@ void NewSessionWizard::onCalibrationBegin()
         }
     }
 
-    // Bind pointer aliases to the T-pose buffers (CaptureT writes through
-    // these so the capture loop stays pose-agnostic).
     m_accAccum    = &m_accAccumT;
     m_gyrAccum    = &m_gyrAccumT;
     m_magAccum    = &m_magAccumT;
@@ -4865,9 +4524,6 @@ void NewSessionWizard::onCalibrationBegin()
     m_gyrSqAccum    = &m_gyrSqAccumT;
     m_magOuterAccum = &m_magOuterAccumT;
 
-    // Drop current s2s + restart Madgwick.  The first countdown that
-    // follows doubles as a fusion warm-up AND gives the actor time to
-    // settle into the T-pose reference.
     m_rx->resetS2sAlignment();
     m_rx->resetFusion();
 
@@ -4896,8 +4552,6 @@ void NewSessionWizard::onCountdownTick()
         m_countTimer.stop();
         m_countLabel->setText(Lang::t("still"));
 
-        // Countdown-end dispatcher: enter the matching capture phase and
-        // reset still-detector + per-phase readiness bar.
         m_goodSamples = 0;
         m_havePrev    = false;
         m_samples.clear();
@@ -5657,9 +5311,6 @@ void NewSessionWizard::onCaptureTick()
         }
 
         // Install the FoxKf prior NOW (q-prior + gyrBias) instead of letting
-        // the predict-tick re-initialise from identity.  Without this the
-        // filter has to re-converge through ~2-5 s of acc/mag updates and
-        // the wizard's settle window is partly wasted.
         m_rx->setKfPriors(m_result.calibReference, gyrBias);
 
         auto confidenceScore = [&](int i) -> double {
@@ -6020,9 +5671,6 @@ void NewSessionWizard::onCaptureTick()
             const Quat qL = s2s[lSeg];
             const double devMirr = mirrorYDeviationDeg(qR, qL);
             const double devPar  = parallelDeviationDeg(qR, qL);
-            // F9: see K-pose path — ambiguous mount defaults to mirror-Y
-            // (anatomy-correct for paired limbs) rather than flipping with
-            // residual jitter.
             const bool ambiguous = (mType == 0) && (std::abs(devMirr - devPar) < 10.0);
             const bool useMirror = (mType == 1)
                                 || (mType == 0 && ambiguous)
@@ -6039,9 +5687,6 @@ void NewSessionWizard::onCaptureTick()
                           << " using=" << sym << "\n";
             }
             if (dev <= 3.0) return;
-            // S12: tightened 60° → 12° (same rationale as the K-pass
-            // procrustesPair). Both passes must agree or one side wins
-            // and the other loses asymmetry, defeating the fix.
             if (dev >= 12.0) {
                 if (m_test) {
                     std::cout << "[calib refine] paired " << kSegmentNames[rSeg]
@@ -6063,7 +5708,6 @@ void NewSessionWizard::onCaptureTick()
                                         -counterpartL.y, -counterpartL.z);
                     dot = -dot;
                 }
-                // F10: see K-pose path for rationale — cap at [0.05, 0.70].
                 const double wR = std::min(0.70, std::max(0.05, 1.0 - s2sResidualN[rSeg] / 30.0));
                 const double wL = std::min(0.70, std::max(0.05, 1.0 - s2sResidualN[lSeg] / 30.0));
                 const double wTot = wR + wL;
@@ -6322,7 +5966,6 @@ void NewSessionWizard::onCaptureTick()
             return;
         }
 
-        // Hemisphere-corrected mean across all snapshots.
         for (int i = 0; i < kXsensSegmentCount; ++i) {
             double sw=0, sx=0, sy=0, sz=0;
             const Quat& anchor = (*snapshots)[0][i];
@@ -6398,12 +6041,8 @@ void NewSessionWizard::closeEvent(QCloseEvent* e)
 }
 
 // ============================================================================
-//  SensorIndicatorsPanel
 // ============================================================================
 
-// Pretty, human-readable labels for every tracker segment.  Falls back to
-// the lowercase internal name when a translation key is missing, which
-// keeps the panel readable even before the UI strings are loaded.
 static const char* kSensorLabelKey[kXsensSegmentCount] = {
     "sns_pelvis",    "",              "",              "",
     "sns_t8",        "",              "sns_head",
@@ -6419,7 +6058,6 @@ SensorIndicatorsPanel::SensorIndicatorsPanel(bool useGloves, QWidget* parent)
     setObjectName("sidePanel");
     setFixedWidth(340);
 
-    // ---- Top mode / status card ------------------------------------------
     auto* headerMode  = new QLabel(this);
     headerMode->setObjectName("sectionHeader");
     headerMode->setProperty("isModeHeader", true);
@@ -6451,7 +6089,6 @@ SensorIndicatorsPanel::SensorIndicatorsPanel(bool useGloves, QWidget* parent)
     fpsRow->addStretch();
     fpsRow->addWidget(m_lblFps);
 
-    // Battery row — populated from SuitPose.batteryLevel each tick.
     m_lblBattery = new QLabel("—", this);
     m_lblBattery->setStyleSheet("color:#2EC25A; font-weight:700;");
     auto* batLbl = new QLabel(Lang::t("battery_label"), this);
@@ -6502,12 +6139,10 @@ SensorIndicatorsPanel::SensorIndicatorsPanel(bool useGloves, QWidget* parent)
     grid->setColumnStretch(0, 1);
     grid->setColumnStretch(1, 1);
 
-    // Row 0..2 — spine / head, centred across both columns.
     grid->addWidget(makeCard(SEG_Head),    0, 0, 1, 2);
     grid->addWidget(makeCard(SEG_T8),      1, 0, 1, 2);
     grid->addWidget(makeCard(SEG_Pelvis),  2, 0, 1, 2);
 
-    // Paired limbs — left column = L side, right column = R side.
     struct Pair { int left; int right; };
     const Pair pairs[] = {
         { SEG_LShoulder, SEG_RShoulder  },
@@ -6525,9 +6160,6 @@ SensorIndicatorsPanel::SensorIndicatorsPanel(bool useGloves, QWidget* parent)
         ++r;
     }
 
-    // ---- Reset + Freeze buttons, directly under the sensor grid ---------
-    // Reset: skeleton snaps to scene origin (0, 0), feet on floor.
-    // Freeze (toggle): pin XY while allowing local sit/stand. One-button toggle.
     m_btnPauseResume = new QPushButton(this);  // legacy, unused visually
     m_btnPauseResume->setVisible(false);
 
@@ -6550,13 +6182,7 @@ SensorIndicatorsPanel::SensorIndicatorsPanel(bool useGloves, QWidget* parent)
         emit freezeToggled(on);
     });
 
-    // ---- Fingers (only shown when gloves are selected) -------------------
-    // Paired thumb/index/middle/ring/pinky — left hand in left column,
-    // right hand in right column, same card look as the suit grid.
     m_fingersBox = new QWidget(this);
-    // Start hidden — it reappears from updateFromPose() as soon as glove
-    // data actually flows.  Prevents an empty finger block from lingering
-    // when the operator selected gloves mode but ManusCore never replied.
     m_fingersBox->setVisible(false);
     auto* fHeader = new QLabel(m_fingersBox);
     fHeader->setObjectName("sectionHeader");
@@ -6593,8 +6219,6 @@ SensorIndicatorsPanel::SensorIndicatorsPanel(bool useGloves, QWidget* parent)
         return card;
     };
     for (int f = 0; f < 5; ++f) {
-        // Panel order: left hand on the left column, right hand on the
-        // right, paired by finger — thumb row, index row, etc.
         fGrid->addWidget(makeFingerCard(5 + f, kFingerKey[f]), f, 0); // L
         fGrid->addWidget(makeFingerCard(f,     kFingerKey[f]), f, 1); // R
     }
@@ -6606,13 +6230,9 @@ SensorIndicatorsPanel::SensorIndicatorsPanel(bool useGloves, QWidget* parent)
     fLay->addSpacing(6);
     fLay->addLayout(fGrid);
 
-    // Kept for API compatibility — the session label is no longer shown,
-    // but SensorIndicatorsPanel::setSessionRunning() still updates it.
     m_lblSession = new QLabel(this);
     m_lblSession->setVisible(false);
 
-    // Sub-captions under each section header — quick "what / how many"
-    // summaries so it's obvious at a glance which cards represent what.
     auto* subConn    = new QLabel(this);
     subConn->setObjectName("sectionSub");
     subConn->setProperty("isConnSub", true);
@@ -6641,9 +6261,6 @@ SensorIndicatorsPanel::SensorIndicatorsPanel(bool useGloves, QWidget* parent)
     bLay->setSpacing(2);
     bLay->addWidget(m_bodyHeader);
     bLay->addWidget(m_bodySub);
-    // m_bodyBox теперь занимает мало места; полностью спрячем если хотите —
-    // но оставляем заголовок как индикатор «Body sizes set in wizard»,
-    // чтобы пользователь видел что блок не пропал, а перенесён.
     m_bodyBox->setVisible(false);  // полностью убираем из вьюпорта
 
     auto* lay = new QVBoxLayout(this);
@@ -6750,9 +6367,6 @@ void SensorIndicatorsPanel::setMode(bool useGloves)
 void SensorIndicatorsPanel::setDot(QLabel* dot, bool live)
 {
     if (!dot) return;
-    // Dot + its containing card share state — restyling the dot alone
-    // looks half-baked, so we update the whole parent card through a
-    // dynamic property and let QSS do the colour work.
     dot->setStyleSheet(live ? "background:#2EC25A; border-radius:5px;"
                             : "background:#C03838; border-radius:5px;");
     if (QWidget* card = dot->parentWidget()) {
@@ -6791,9 +6405,6 @@ void SensorIndicatorsPanel::setSessionRunning(bool running)
 
 void SensorIndicatorsPanel::updateFromPose(const SuitPose& f)
 {
-    // Per-sensor staleness: green if received packet within 2s, else gray.
-    // Uses segLastT (populated in MocapReceiver::run). If suit disconnects
-    // mid-session all dots go gray immediately as timestamps age.
     using clk = std::chrono::steady_clock;
     const double nowSec = std::chrono::duration<double>(
                               clk::now().time_since_epoch()).count();
@@ -6804,7 +6415,6 @@ void SensorIndicatorsPanel::updateFromPose(const SuitPose& f)
                            && age < kStaleSeconds;
         setDot(m_trackers[i].dot, fresh);
     }
-    // Finger panel: only show when gloves are actually streaming now.
     const bool showFingers = m_useGloves && f.hasGloves;
     if (m_fingersBox && m_fingersBox->isVisible() != showFingers)
         m_fingersBox->setVisible(showFingers);
@@ -6812,11 +6422,9 @@ void SensorIndicatorsPanel::updateFromPose(const SuitPose& f)
         for (int i = 0; i < 10; ++i)
             if (m_fingers[i].dot) setDot(m_fingers[i].dot, true);
     } else {
-        // Gloves disconnected mid-session — grey out finger dots.
         for (int i = 0; i < 10; ++i)
             if (m_fingers[i].dot) setDot(m_fingers[i].dot, false);
     }
-    // Battery display.
     if (m_lblBattery) {
         if (f.batteryLevel < 0) {
             m_lblBattery->setText("—");
@@ -6833,7 +6441,6 @@ void SensorIndicatorsPanel::updateFromPose(const SuitPose& f)
 }
 
 // ============================================================================
-//  MocapViewport — simple GL orbit view of the skeleton bones.
 // ============================================================================
 
 MocapViewport::MocapViewport(const ActorConfig& actor, const std::string& pose,
@@ -6874,7 +6481,6 @@ void MocapViewport::setActor(const ActorConfig& actor)
 void MocapViewport::updatePose(const std::array<Quat, kXsensSegmentCount>& orient,
                                const QVector3D& root)
 {
-    // 2-arg overload: every sensor treated as confident (stdDeg=0).
     std::array<float, kXsensSegmentCount> zeros{};
     updatePose(orient, root, zeros);
 }
@@ -6926,15 +6532,12 @@ void MocapViewport::updatePose(const std::array<Quat, kXsensSegmentCount>& orien
 
     if (m_havePrevQ) {
         for (int i = 0; i < kXsensSegmentCount; ++i) {
-            // Angular speed from |q_delta| angle per dt.
             const Quat dq = quat_mult(orient[i], m_prevQ[i].inv()).normalized();
             const double w = std::abs(dq.w) > 1.0 ? 1.0 : std::abs(dq.w);
             const double angRad = 2.0 * std::acos(w);
             const double angVel = angRad * 180.0 / M_PI / dt;    // deg/s
-            // LP smooth so single-frame noise doesn't release lock.
             const double alpha = 0.30;
             m_angVelLP[i] = (1.0 - alpha) * m_angVelLP[i] + alpha * angVel;
-            // Angular acceleration magnitude (change of speed).
             const double angAcc = std::abs(angVel - m_angVelPrev[i]) / dt;
             m_angVelPrev[i] = angVel;
 
@@ -6949,15 +6552,6 @@ void MocapViewport::updatePose(const std::array<Quat, kXsensSegmentCount>& orien
             const bool slow = m_angVelLP[i] < slowThresh;
             const bool steady = angAcc < steadyThresh;
             // FoxKf confidence gate.  orientStdDeg[i] = 0 (e.g. unsensored
-            // spine slerp) is treated as confident: the slerp is bias-free
-            // by construction.  Otherwise the filter must report < 3.0°
-            // 1-sigma total — matches the "converged" threshold from
-            // tests/python/test_fox_kf_per_segment.py::
-            // test_orient_std_falls_per_segment, and corresponds to the
-            // setPrior(2°/axis) starting point shrinking by ~15 % after a
-            // handful of acc/mag updates.  Prolonged acc-rejection inflates
-            // stdDeg past 5° so the gate genuinely refuses to freeze a
-            // wandered filter.
             constexpr float kStdLockThreshDeg = 3.0f;
             const bool confident = (orientStdDeg[i] <= 0.0f)
                                 || (orientStdDeg[i] < kStdLockThreshDeg);
@@ -6966,12 +6560,10 @@ void MocapViewport::updatePose(const std::array<Quat, kXsensSegmentCount>& orien
             if (stillFrame) {
                 m_stillTicks[i] += dt;
                 if (m_stillTicks[i] > lockTime && !m_locked[i]) {
-                    // Engage lock — freeze at current quat.
                     m_locked[i]   = true;
                     m_lockQuat[i] = m_prevQ[i];
                 }
             } else {
-                // Motion detected → release lock, reset counter.
                 m_stillTicks[i] = 0.0;
                 m_locked[i] = false;
             }
@@ -7074,7 +6666,6 @@ void MocapViewport::resetSceneOrigin()
     if (!m_skel) return;
 
     const Quat& qp = m_orient[SEG_Pelvis];
-    // Rotate local +X by qp and measure atan2(y, x) — that's yaw in NWU.
     const double fx = 1.0 - 2.0*(qp.y*qp.y + qp.z*qp.z);
     const double fy = 2.0*(qp.x*qp.y + qp.w*qp.z);
     const double yaw = std::atan2(fy, fx);
@@ -7096,7 +6687,6 @@ void MocapViewport::setFreezeXY(bool frozen)
     if (m_freezeXY == frozen) return;
     m_freezeXY = frozen;
     if (frozen) {
-        // Capture pelvis XY at freeze moment (in post-shift scene coords).
         m_freezeAnchor = QVector3D(m_lastRenderedPelvis.x(),
                                    m_lastRenderedPelvis.y(), 0);
     }
@@ -7127,9 +6717,6 @@ void MocapViewport::resizeGL(int w, int h)
     f->glViewport(0, 0, w, h);
 }
 
-// --- legacy GL is fine for a line renderer; Qt's compatibility profile works
-//     on Windows where MVN is typically run.
-
 void MocapViewport::paintGL()
 {
     auto* gl = QOpenGLContext::currentContext()->functions();
@@ -7137,8 +6724,6 @@ void MocapViewport::paintGL()
 
     if (width() <= 0 || height() <= 0) return;
 
-    // Fixed-function setup (legacy profile).  Viewport coordinate system
-    // canonical default (use_isb_ref=False): Z-up, identity axis_rot.
     QMatrix4x4 proj;  proj.perspective(45.0f, float(width())/float(height()), 0.05f, 100.0f);
 
     const float yawR   = qDegreesToRadians(m_yaw);
@@ -7212,15 +6797,12 @@ void MocapViewport::drawSkeleton()
 {
     if (!m_skel) return;
 
-    // FK — skeleton gives 28 keypoints in world space.
     auto kp = m_skel->computeKeypoints(m_orient, m_root);
 
     // ----- Locomotion solver (walking + drift protection) --------------------
     {
         for (auto& p : kp) p += m_lastLocoOffset;
     }
-    // Safety: if anything pathological drops a keypoint below the floor,
-    // tug the whole skeleton up.  Should be rare now that locomotion pins Z.
     float minZ = kp[0].z();
     for (const auto& p : kp) if (p.z() < minZ) minZ = p.z();
     if (minZ < -0.02f) {
@@ -7247,20 +6829,14 @@ void MocapViewport::drawSkeleton()
     } else {
         for (auto& p : kp) p += m_sceneShift;
     }
-    // Cache the final on-screen pelvis so the Reset button can zero out XY
-    // on the next click without guessing the loco offset.
     m_lastRenderedPelvis = kp[SEG_Pelvis];
 
-    // Bones (GL_LINES).  Orange.
     glLineWidth(3.0f);
     glColor3f(1.0f, 0.48f, 0.10f);                       // accent orange
     glBegin(GL_LINES);
     const auto& S = m_skel->startPts();
     const auto& E = m_skel->endPts();
     for (int s = 0; s < kXsensSegmentCountWithDummies; ++s) {
-        // Skip FK hand bone (wrist→fingertip avg) when real glove fingers are
-        // drawn from wrist — two overlapping geometries confuse the eye,
-        // making fingers look like they start mid-arm.
         if (m_haveGloves && (E[s] == 24 || E[s] == 25)) continue;
         const auto& a = kp[S[s]];
         const auto& b = kp[E[s]];
@@ -7269,7 +6845,6 @@ void MocapViewport::drawSkeleton()
     }
     glEnd();
 
-    // Joints as thick points (white).
     glPointSize(6.0f);
     glColor3f(0.95f, 0.95f, 0.95f);
     glBegin(GL_POINTS);
@@ -7277,7 +6852,6 @@ void MocapViewport::drawSkeleton()
         glVertex3f(kp[i].x(), kp[i].y(), kp[i].z());
     glEnd();
 
-    // Root (pelvis) highlighted bright orange.
     glPointSize(10.0f);
     glColor3f(1.0f, 0.62f, 0.18f);
     glBegin(GL_POINTS);
@@ -7286,8 +6860,6 @@ void MocapViewport::drawSkeleton()
 
     // ----- Per-segment XYZ triads --------------------------------------------
     {
-        // Re-run the FK orientation chain just as computeKeypoints does so
-        // axes and bones stay in sync.
         std::array<Quat, kXsensSegmentCount> oriented{};
         for (int i = 0; i < kXsensSegmentCount; ++i)
             oriented[i] = quat_mult(m_orient[i], m_skel->defaultSegAngles()[i]);
@@ -7297,8 +6869,6 @@ void MocapViewport::drawSkeleton()
         glLineWidth(1.6f);
         glBegin(GL_LINES);
         for (int s = 0; s < kXsensSegmentCountWithDummies; ++s) {
-            // Axis triad at segment END keypoint (the joint/tip the bone
-            // actually ends at). Placing at start put head triad on the neck.
             const QVector3D origin = kp[E[s]];
             const QVector3D ax = vec_rotate(QVector3D(L, 0, 0), global[s]);
             const QVector3D ay = vec_rotate(QVector3D(0, L, 0), global[s]);
@@ -7326,9 +6896,6 @@ void MocapViewport::drawSkeleton()
                         const QVector3D& wrist,
                         float cr, float cg, float cb,         // bone color
                         float pr, float pg, float pb) {       // joint color
-        // Skip if we have no finger data yet (all zero).  This keeps the
-        // visualisation clean when a session is "suit + gloves" but the
-        // Manus stream hasn't started.
         bool any = false;
         for (const auto& v : rel) if (!v.isNull()) { any = true; break; }
         if (!any) return;
@@ -7358,7 +6925,6 @@ void MocapViewport::drawSkeleton()
         glEnd();
     };
 
-    // Right hand — warm orange;  Left hand — cyan.
     drawHand(m_rightHand, rWrist, 1.00f, 0.55f, 0.12f,  1.00f, 0.85f, 0.55f);
     drawHand(m_leftHand,  lWrist, 0.10f, 0.70f, 1.00f,  0.55f, 0.85f, 1.00f);
 }
@@ -7421,7 +6987,6 @@ static void appendInt32BE(QByteArray& pkt, qint32 v)
     const quint32 be = qToBigEndian<quint32>(static_cast<quint32>(v));
     pkt.append(reinterpret_cast<const char*>(&be), 4);
 }
-
 
 struct LiveStreamSender::Impl {
     QUdpSocket   sock;
@@ -7526,8 +7091,6 @@ bool LiveStreamSender::start(const LiveSettings& cfg, QString* err)
             const qint32 L = qint32(std::strlen(n));
             appendInt32BE(payload, L);
             payload.append(n, L);
-            // T-pose origin position в МЕТРАХ (MVN coord: Y-forward, Z-up, RH).
-            // Плагин (LiveLinkMvnSource SegData::Set) использует это для scale-калибровки.
             const QVector3D o = cfg.tposeOriginM[i];
             appendFloatBE(payload, o.x());
             appendFloatBE(payload, o.y());
@@ -7552,7 +7115,6 @@ bool LiveStreamSender::start(const LiveSettings& cfg, QString* err)
     }
 
     m_impl->framesSinceHandshake = 0;
-    // Fresh stream session — do not carry recap state from a previous run.
     m_impl->recapTicksLeft = 0;
     m_impl->recapSamples = 0;
     m_running = true;
@@ -7609,7 +7171,6 @@ void LiveStreamSender::pushFrame(quint32 sample,
         m_impl->baselineCaptured = true;
     }
 
-    // F15: 5-second still-averaging window for recalibrate-mid-stream.
     if (m_impl->recapTicksLeft > 0) {
         if (m_impl->recapSamples == 0) {
             m_impl->recapBodyQ = segQuat;
@@ -7785,9 +7346,6 @@ void LiveStreamSender::pushFrameWithGloves(quint32 sample,
         appendInt32BE(body, segmentIdBase + slot);
         const int mIdx = kXsensSlotToManus[slot];
         if (mIdx < 0) {
-            // F14: carpus slot — ship the wrist's world position (relative
-            // to the baseline pelvis) instead of zeros so the receiving
-            // plugin can anchor the palm correctly.
             const QVector3D p = wristWorldPos - m_impl->baselineSegPos[handSeg];
             appendFloatBE(body, p.x()); appendFloatBE(body, p.y()); appendFloatBE(body, p.z());
             const Quat q = quat_mult(segQuat[handSeg], m_impl->baselineBodyQ[handSeg].inv()).normalized();
@@ -7816,7 +7374,6 @@ void LiveStreamSender::pushFrameWithGloves(quint32 sample,
 }
 
 // ============================================================================
-//  RecordHud — small translucent overlay shown during recording.
 // ============================================================================
 
 RecordHud::RecordHud(QWidget* parent) : QWidget(parent)
@@ -7865,7 +7422,6 @@ void RecordHud::updateStats(qint64 frames, double elapsedSec)
 void RecordHud::setFormatLabel(const QString& text) { m_lblFormat->setText(text); }
 
 // ============================================================================
-//  RecordWizard — Format → Quality → FPS → Start.
 // ============================================================================
 
 RecordWizard::RecordWizard(QWidget* parent) : QDialog(parent)
@@ -7881,7 +7437,6 @@ void RecordWizard::buildPages()
 {
     m_pages = new QStackedWidget(this);
 
-    // Page 0 — Format.
     {
         auto* p = new QWidget();
         auto* title = new QLabel(Lang::t("rec_pick_format"), p);
@@ -7914,7 +7469,6 @@ void RecordWizard::buildPages()
 
         m_pages->addWidget(p);
     }
-    // Page 1 — FPS.
     {
         auto* p = new QWidget();
         auto* title = new QLabel(Lang::t("rec_pick_fps"), p);
@@ -7943,7 +7497,6 @@ void RecordWizard::buildPages()
 
         m_pages->addWidget(p);
     }
-    // Page 2 — Review / Start.
     {
         auto* p = new QWidget();
         auto* title = new QLabel(Lang::t("rec_ready"), p);
@@ -8019,7 +7572,6 @@ void RecordWizard::updateNav()
 }
 
 // ============================================================================
-//  LiveStreamWizard — target, host, port, Start.
 // ============================================================================
 
 LiveStreamWizard::LiveStreamWizard(QWidget* parent) : QDialog(parent)
@@ -8074,7 +7626,6 @@ LiveStreamWizard::LiveStreamWizard(QWidget* parent) : QDialog(parent)
         " border: 1px solid #3a3a3a; border-radius: 6px; padding: 4px 8px; }"
         "QSpinBox:focus { border-color: #FF7A1A; }");
 
-    // Новый: выбор частоты выходного потока 24/30/60.
     m_fps = new QComboBox(this);
     m_fps->addItem("24 fps", 24);
     m_fps->addItem("30 fps", 30);
@@ -8091,9 +7642,6 @@ LiveStreamWizard::LiveStreamWizard(QWidget* parent) : QDialog(parent)
     connect(m_btnStart, &QPushButton::clicked, this, [this]() {
         m_result.target = LiveTarget(m_target->currentData().toInt());
 
-        // Хост: всегда из currentText() — currentData() устаревает при
-        // ручном вводе, а split-по-пробелу одинаково режет и "1.2.3.4",
-        // и "1.2.3.4   (Wi-Fi)".
         QString host = m_host->currentText().trimmed();
         const int sp = host.indexOf(' ');
         if (sp > 0) host = host.left(sp);
@@ -8148,7 +7696,6 @@ struct BvhBone {
 
 struct BvhBoneRatio { const char* name; int parent; double dx, dy, dz; };
 static const BvhBoneRatio kBvh[] = {
-    // 0  Hips (pelvis) — root
     { "Hips",             -1,   0.0,   0.000, 0.0 },
     { "Spine",             0,   0.0,   0.100, 0.0 },    // L5
     { "Spine1",            1,   0.0,   0.095, 0.0 },    // L3
@@ -8174,11 +7721,8 @@ static const BvhBoneRatio kBvh[] = {
     { "LeftToeBase",      21,   0.0,  -0.02,  0.16 },
 };
 
-// Quaternion → intrinsic ZXY Euler (degrees).  Matches Blender / Maya
-// "rotate order ZXY" convention used by most mocap toolchains.
 static void quatToEulerZXYdeg(const Quat& q, double& rz, double& rx, double& ry)
 {
-    // Rotation matrix from quaternion.
     const double w=q.w, x=q.x, y=q.y, z=q.z;
     const double m00 = 1-2*(y*y+z*z);
     const double m01 = 2*(x*y - z*w);
@@ -8190,7 +7734,6 @@ static void quatToEulerZXYdeg(const Quat& q, double& rz, double& rx, double& ry)
     const double m21 = 2*(y*z + x*w);
     const double m22 = 1-2*(x*x+y*y);
     (void)m00; (void)m02;
-    // ZXY: X = asin(m21); Z = atan2(-m01, m11); Y = atan2(-m20, m22);
     const double sx = std::clamp(m21, -1.0, 1.0);
     const double xrad = std::asin(sx);
     const double zrad = std::atan2(-m01, m11);
@@ -8215,12 +7758,9 @@ static bool writeBvh(const QString& path,
 
     const double hcm = heightMeters * 100.0;
 
-    // --- Skeleton (HIERARCHY) ---
     std::vector<int> childCount(std::size(kBvh), 0);
     for (size_t i = 1; i < std::size(kBvh); ++i) childCount[kBvh[i].parent]++;
 
-    // "emit" is a Qt macro — using it as an identifier expands into empty
-    // and trips C2513.  Rename the recursive lambda to emitBone.
     std::function<void(int, int)> emitBone = [&](int idx, int indent) {
         auto pad = [&](int n){ return QString(n, QChar('\t')); };
         const auto& b = kBvh[idx];
@@ -8253,12 +7793,10 @@ static bool writeBvh(const QString& path,
     os << "HIERARCHY\n";
     emitBone(0, 0);
 
-    // --- Motion ---
     os << "MOTION\n";
     os << "Frames: " << frames.size() << "\n";
     os << "Frame Time: " << (1.0 / double(fps)) << "\n";
 
-    // Map BVH bone → SEG_ index.  -1 = no sensor → identity rotation.
     static const int kBoneToSeg[] = {
         SEG_Pelvis,      SEG_L5,          SEG_L3,
         SEG_T12,         SEG_T8,          SEG_Neck,
@@ -8271,7 +7809,6 @@ static bool writeBvh(const QString& path,
     };
 
     for (const RecordedFrame& fr : frames) {
-        // Root translation in cm.
         os << (fr.pelvisPos.x() * 100.0) << " "
            << (fr.pelvisPos.y() * 100.0) << " "
            << (fr.pelvisPos.z() * 100.0);
@@ -8301,7 +7838,6 @@ static bool writeFbxAscii(const QString& path,
 
     const double hcm = heightMeters * 100.0;
 
-    // Header boilerplate.
     os << "; FBX 7.4.0 project file\n";
     os << "; Created by Fox Mocap\n";
     os << "FBXHeaderExtension:  {\n";
@@ -8320,7 +7856,6 @@ static bool writeFbxAscii(const QString& path,
     os << "    }\n";
     os << "}\n";
 
-    // Definitions.
     os << "Definitions:  {\n";
     os << "    Version: 100\n";
     os << "    Count: 3\n";
@@ -8333,7 +7868,6 @@ static bool writeFbxAscii(const QString& path,
     os << "    ObjectType: \"AnimationCurve\" { Count: " << (std::size(kBvh) * 6) << " }\n";
     os << "}\n";
 
-    // Objects — bone models.
     os << "Objects:  {\n";
     auto boneId = [](size_t i) { return 10000LL + qint64(i) * 16; };
     for (size_t i = 0; i < std::size(kBvh); ++i) {
@@ -8347,7 +7881,6 @@ static bool writeFbxAscii(const QString& path,
         os << "        }\n";
         os << "    }\n";
     }
-    // AnimationStack + Layer.
     const qint64 stackId = 20000, layerId = 20001;
     os << "    AnimationStack: " << stackId << ", \"AnimStack::Take 001\", \"\" {\n";
     os << "        Properties70:  {\n";
@@ -8358,15 +7891,12 @@ static bool writeFbxAscii(const QString& path,
     os << "    }\n";
     os << "    AnimationLayer: " << layerId << ", \"AnimLayer::BaseLayer\", \"\" {}\n";
 
-    // Curves: one AnimationCurveNode per bone (rotation), three curves (X,Y,Z).
     const qint64 curveIdBase = 30000;
     const qint64 curveNodeIdBase = 25000;
 
-    // KTime ticks per second in FBX = 46186158000.
     const qint64 kTimePerSecond = 46186158000LL;
     const qint64 stepTicks = kTimePerSecond / fps;
 
-    // Emit curve nodes and curves.
     for (size_t i = 0; i < std::size(kBvh); ++i) {
         static const int kBoneToSegMap[] = {
             SEG_Pelvis,SEG_L5,SEG_L3,SEG_T12,SEG_T8,SEG_Neck,SEG_Head,
@@ -8376,11 +7906,9 @@ static bool writeFbxAscii(const QString& path,
             SEG_LUpperLeg,SEG_LLowerLeg,SEG_LFoot,SEG_LToe,
         };
         const int segIdx = kBoneToSegMap[i];
-        // CurveNode for rotation.
         const qint64 nodeId = curveNodeIdBase + qint64(i);
         os << "    AnimationCurveNode: " << nodeId
            << ", \"AnimCurveNode::R\", \"\" {}\n";
-        // Three curves.
         for (int ax = 0; ax < 3; ++ax) {
             const qint64 cid = curveIdBase + qint64(i) * 3 + ax;
             os << "    AnimationCurve: " << cid
@@ -8410,7 +7938,6 @@ static bool writeFbxAscii(const QString& path,
     }
     os << "}\n";
 
-    // Connections — minimal parent/child graph + curve node → bone.
     os << "Connections:  {\n";
     for (size_t i = 0; i < std::size(kBvh); ++i) {
         if (kBvh[i].parent >= 0)
@@ -8467,8 +7994,6 @@ static void hdOutlierReject(std::vector<RecordedFrame>& fr)
     }
 }
 
-// Pass 2 — Gaussian SLERP smoother.  Half-width 10 frames, σ = 4 (≈ the
-// MVN-style 21-sample decomposition window).
 static void hdQuatSmooth(std::vector<RecordedFrame>& fr)
 {
     const int half = 10;
@@ -8508,9 +8033,6 @@ static void hdQuatSmooth(std::vector<RecordedFrame>& fr)
     for (int i = 0; i < N; ++i) fr[i].segQuat = out[i];
 }
 
-// Pass 3 — Butterworth 2nd-order low-pass on pelvis position.  Cutoff
-// ≈ 5 Hz at 240 Hz sampling yields coefficients below.  Applied twice
-// (forward and reverse) for zero phase delay, à la scipy filtfilt.
 static void hdRootLowpass(std::vector<RecordedFrame>& fr, int fps)
 {
     if (fr.size() < 4) return;
@@ -8535,17 +8057,12 @@ static void hdRootLowpass(std::vector<RecordedFrame>& fr, int fps)
             p = yn;
         }
     };
-    // Forward.
     pass([&](size_t i) -> QVector3D& { return fr[i].pelvisPos; });
-    // Reverse (zero-phase).
     std::reverse(fr.begin(), fr.end());
     pass([&](size_t i) -> QVector3D& { return fr[i].pelvisPos; });
     std::reverse(fr.begin(), fr.end());
 }
 
-// Pass 4 — ZUPT: zero out pelvis XY drift on frames where both feet
-// quaternions barely rotate between consecutive samples.  Catches the
-// "skating" artefact caused by IMU integration drift.
 static void hdZupt(std::vector<RecordedFrame>& fr)
 {
     if (fr.size() < 3) return;
@@ -8555,7 +8072,6 @@ static void hdZupt(std::vector<RecordedFrame>& fr)
         const double dL = angBetween(fr[i-1].segQuat[SEG_LFoot],
                                      fr[i].segQuat[SEG_LFoot]);
         if (dR < 0.01 && dL < 0.01) {
-            // Both feet essentially still → freeze pelvis translation.
             fr[i].pelvisPos.setX(fr[i-1].pelvisPos.x());
             fr[i].pelvisPos.setY(fr[i-1].pelvisPos.y());
         }
@@ -8649,7 +8165,6 @@ static void runHdPostProcessing(std::vector<RecordedFrame>& fr,
 } // anonymous namespace
 
 // ============================================================================
-//  MainWindow
 // ============================================================================
 
 MainWindow::MainWindow(MocapReceiver* rx,
@@ -8661,7 +8176,6 @@ MainWindow::MainWindow(MocapReceiver* rx,
                                                 QCoreApplication::applicationVersion()));
     resize(1360, 820);
 
-    // Actor config derived from wizard result.
     ActorConfig actor;
     actor.heightCm        = m_setup.heightCm;
     actor.footLengthCm    = m_setup.footLengthCm;
@@ -8676,20 +8190,15 @@ MainWindow::MainWindow(MocapReceiver* rx,
     m_skel     = std::make_unique<SkeletonXsens>(actor, m_setup.poseKind);
     if (m_test) m_viewport->setLocoVerbose(true);
 
-    // Left-hand indicators panel.  Its bottom button is now "Build
-    // coordinates" — we reroute the existing pauseClicked signal to the
-    // new handler instead of growing a second signal for one use site.
     m_panel = new SensorIndicatorsPanel(m_setup.useGloves, this);
     connect(m_panel, &SensorIndicatorsPanel::pauseClicked,
             this, &MainWindow::onBuildCoordinates);
-    // Reset: skeleton snaps to scene origin with feet on floor.
     connect(m_panel, &SensorIndicatorsPanel::resetClicked,
             this, [this]() {
         if (m_viewport) m_viewport->resetSceneOrigin();
         if (statusBar()) statusBar()->showMessage(Lang::t("reset_coords"), 1500);
         logTest("[action] reset-scene-origin");
     });
-    // Freeze toggle: one button, pin XY at current or unfreeze.
     connect(m_panel, &SensorIndicatorsPanel::freezeToggled,
             this, [this](bool on) {
         if (m_viewport) m_viewport->setFreezeXY(on);
@@ -8842,7 +8351,6 @@ MainWindow::MainWindow(MocapReceiver* rx,
         }
     });
 
-    // Live scene — panel on the left, 3-D viewport filling the rest.
     auto* liveWidget = new QWidget(this);
     auto* cl         = new QHBoxLayout(liveWidget);
     cl->setContentsMargins(4, 4, 4, 4);
@@ -8866,8 +8374,6 @@ MainWindow::MainWindow(MocapReceiver* rx,
     setStatusBar(new QStatusBar(this));
     statusBar()->showMessage(Lang::t("session_running"));
 
-    // Receiver signal wiring — the thread is already running (started before
-    // the wizard), so we just hook into its signals here.
     connect(m_rx, &MocapReceiver::statusChanged,      this, &MainWindow::onConnStatusChanged);
     connect(m_rx, &MocapReceiver::gloveStatusChanged, this, &MainWindow::onGloveStatus);
     connect(m_rx, &MocapReceiver::fpsUpdated,         this, &MainWindow::onFps);
@@ -8876,7 +8382,6 @@ MainWindow::MainWindow(MocapReceiver* rx,
     connect(&m_renderTimer, &QTimer::timeout, this, &MainWindow::onRenderTick);
     m_renderTimer.start();
 
-    // Initial status badge reflects whatever state the receiver is in now.
     onConnStatusChanged(int(m_rx->status()), m_rx->statusDetail());
 }
 
@@ -8904,7 +8409,6 @@ void MainWindow::onConnStatusChanged(int status, const QString& /*detail*/)
 
 void MainWindow::onGloveStatus(bool /*up*/)
 {
-    // Finger activity is updated per-frame in updateFromPose().
 }
 
 void MainWindow::onFps(double hz)
@@ -8974,7 +8478,6 @@ void MainWindow::onRenderTick()
         : (1.0 / kRenderFps);
     s_lastT = now;
 
-    // --- Собираем raw + считаем угловую скорость и stillness. ---
     std::array<Quat, kXsensSegmentCount> raw{};
     for (int i = 0; i < kXsensSegmentCount; ++i) {
         if (kTracked[i] && f.segValid[i]) {
@@ -9100,18 +8603,6 @@ void MainWindow::onRenderTick()
     q[SEG_Neck] = slerp_quat(q[SEG_T8],     q[SEG_Head], smoothstep(0.62));
 
     // Phase D: toe dorsiflexion during toe-off.  Without a toe sensor
-    // the toe segment normally copies the foot orientation, but during
-    // toe-off (heel up, toe-ball still down) real toes dorsiflex ~25°
-    // relative to the foot — the toe tip rises while the ball stays
-    // planted as the push-off pivot.  We derive the phase from the
-    // heel/toe contact state already computed by LocomotionSolver and
-    // apply the tilt around the foot's body-local Y (medio-lateral)
-    // axis.  Sign: foot body frame is X=forward, Y=lateral, Z=up; with
-    // right-hand rotation around +Y, +X (toe forward) tilts toward -Z
-    // (toe down = plantarflexion), so dorsiflexion is -25° around +Y.
-    // No feedback risk: tickHeelToe reads kp[SEG_*Toe] which is the
-    // START of the toe bone (foot/toe joint), determined by the FOOT
-    // bone direction — independent of the toe segment's own orient.
     const ContactState cs = m_viewport->contactState();
     const Quat toeDorsi = axisAngleQuat(QVector3D(0, 1, 0),
                                         qDegreesToRadians(-25.0));
@@ -9220,7 +8711,6 @@ void MainWindow::onRenderTick()
         QVector3D pelvisM(0.0f, 0.0f, 0.0f);
         std::array<Quat, kXsensSegmentCount> qStream = qOut;
         std::array<QVector3D, kXsensSegmentCount> segPosStream{};
-        // Wrist positions for the carpus slot (F14).
         QVector3D wristPosR(0, 0, 0), wristPosL(0, 0, 0);
         if (m_skel) {
             auto kp = m_skel->computeKeypoints(qOut, QVector3D(0.0f, 0.0f, 0.0f));
@@ -9266,9 +8756,6 @@ void MainWindow::onRenderTick()
         const bool gloves = f.hasGloves && m_setup.useGloves;
         if (gloves) {
 
-            // Y-flip для левой руки (отражение Manus → Xsens body frame
-            // для пальцев).
-
             const Quat finger90 = axisAngleQuat(QVector3D(1, 0, 0), -M_PI / 2.0);
             std::array<Quat, kFingerSegmentsHand> rGloveWorld, lGloveWorld;
             std::array<QVector3D, kFingerSegmentsHand> rGloveWorldP, lGloveWorldP;
@@ -9277,9 +8764,6 @@ void MainWindow::onRenderTick()
                 const Quat lQ = quat_mult(f.leftGloveQ[i],  finger90);
                 rGloveWorld[i] = quat_mult(qRHandWorld, rQ);
                 lGloveWorld[i] = quat_mult(qLHandWorld, mirror_y_quat(lQ));
-                // Finger world positions are the wrist origin plus the
-                // rotated local offset (so they're absolute world coords,
-                // not wrist-relative).
                 rGloveWorldP[i] = wristPosR + vec_rotate(f.rightGloveP[i],              qRHandWorld);
                 lGloveWorldP[i] = wristPosL + vec_rotate(mirrorManusL(f.leftGloveP[i]), qLHandWorld);
             }
@@ -9371,8 +8855,6 @@ void MainWindow::onRenderTick()
                 return quat_angle_deg(quat_mult(a, b.inv()));
             };
 
-            // --- All 23 segments: raw vs. post-calibration-output,
-            //     Δ between frames, Euler XYZ, still-ticks, ω ---
             ss << std::setprecision(3);
             ss << "--- 23 segments: raw quat → post-calib out → Δ → Euler ---\n";
             for (int i = 0; i < kXsensSegmentCount; ++i) {
@@ -9401,15 +8883,11 @@ void MainWindow::onRenderTick()
                    << std::setprecision(3) << "\n";
             }
 
-            // --- FK keypoints (all 28) in world-frame meters ---
             const auto kp = m_viewport
                 ? (m_viewport->isVisible(),
                    std::array<QVector3D, kXsensKeypointCount>{})  // unused path
                 : std::array<QVector3D, kXsensKeypointCount>{};
             (void)kp;
-            // Recompute FK on our side so the dump is self-contained (the
-            // viewport applies additional camera / locomotion offsets we
-            // don't want contaminating the log).
             ActorConfig actor;
             actor.heightCm        = m_setup.heightCm;
             actor.footLengthCm    = m_setup.footLengthCm;
@@ -9488,7 +8966,6 @@ void MainWindow::onRenderTick()
                 }
             }
 
-            // --- All 27 bones-with-dummies: length, parent angle ---
             const auto& sIdx = s_skel.startPts();
             const auto& eIdx = s_skel.endPts();
             const auto& lens = s_skel.lengths();
@@ -9518,25 +8995,6 @@ void MainWindow::onRenderTick()
     }
 
     // v4: Rotate Manus-local finger positions into WORLD frame.
-    //
-    // Phase A parity fix: the viewport's wrist position in drawSkeleton
-    // sees the SCENE-yawed, post-filter (drift-lock + wrist-constraint)
-    // wrist — so the finger offsets we hand it must be rotated by the
-    // same orientation.  qRHandWorld/qLHandWorld were composed above as
-    //     qSceneYaw · qOut[SEG_*Hand] · defAngFor(SEG_*Hand)
-    // and are reused both for the stream payload and here.  Without this
-    // unification a drift-locked wrist or a post-Reset sceneYaw≠0 caused
-    // the viewport fingers to lag the streamed pose.
-    //
-    // Mirror-Y on the LEFT hand positions stays — Manus delivers both
-    // hands in the same +Y=thumb-side convention but the Xsens L-hand
-    // body frame is the reflection of the R-hand frame, which can't be
-    // expressed by a quaternion (det=-1).
-    //
-    // No filters applied here either — Manus SDK already delivers
-    // per-finger ergonomics data smoothed.  Suit-only sessions: the block
-    // still runs but drawSkeleton's `if (!m_haveGloves) return;` prevents
-    // any finger rendering.
     std::array<QVector3D, kFingerSegmentsHand> relR{}, relL{};
     for (int i = 0; i < kFingerSegmentsHand; ++i) {
         relR[i] = vec_rotate(f.rightGloveP[i],              qRHandWorld);
@@ -9561,7 +9019,6 @@ void MainWindow::onResumeSession()
 
 void MainWindow::onOpenLiveWizard()
 {
-    // Stream & Record are mutually exclusive — prevent double-session.
     if (m_recording) {
         QMessageBox::warning(this, Lang::t("live_wiz_title"),
             QStringLiteral("Нельзя запустить стрим пока идёт запись. "
@@ -9655,7 +9112,6 @@ void MainWindow::finishRecording()
         return;
     }
 
-    // --- Optional HD post-processing pass -----------------------------------
     if (m_recCfg.quality == RecordQuality::HdPostProcessing) {
         auto computeMetrics = [&](const std::vector<RecordedFrame>& fr,
                                   double& maxAngDelta, double& rootPathLen,
@@ -9745,7 +9201,6 @@ void MainWindow::finishRecording()
         out.push_back(std::move(fr));
     }
 
-    // --- Ask the operator where to drop the file ---------------------------
     const bool bvh = (m_recCfg.format == RecordFormat::BVH);
     const QString filter = bvh ? "BVH (*.bvh)"
                                : "FBX (ASCII) (*.fbx)";
@@ -9780,14 +9235,12 @@ void MainWindow::finishRecording()
 void MainWindow::layoutHud()
 {
     if (!m_viewport) return;
-    // RecordHud stays top-RIGHT with stop button (if recording).
     if (m_hud) {
         const QPoint tl = m_viewport->mapTo(centralWidget(), QPoint(0, 0));
         const int x = tl.x() + m_viewport->width() - m_hud->width() - 16;
         const int y = tl.y() + 16;
         m_hud->move(std::max(0, x), std::max(0, y));
     }
-    // Mode HUD (REC/STREAM + seconds) in top-LEFT, created on demand.
     if (!m_modeHud) {
         m_modeHud = new QLabel(centralWidget());
         m_modeHud->setStyleSheet(
@@ -9828,7 +9281,6 @@ void MainWindow::layoutHud()
             const int m = (total % 3600) / 60;
             const int s = total % 60;
             const QString dot = QString::fromUtf8("\xE2\x97\x8F");   // ●
-            // Blink the dot every second — professional "live" feel.
             const bool blink = (total % 2 == 0);
             m_modeHud->setText(QString("<span style='color:%1'>%2</span>"
                                        "&nbsp;&nbsp;<b>%3</b>&nbsp;&nbsp;"
@@ -9888,25 +9340,18 @@ void MainWindow::logTest(const std::string& msg) const
 
 void MainWindow::closeEvent(QCloseEvent* e)
 {
-    // Stop every timer first so no queued QTimer slots can fire after the
-    // window starts tearing down (their lambdas capture `this` and access
-    // m_streamer / m_modeHud / m_recording, which become invalid mid-close).
     m_renderTimer.stop();
     if (m_modeHudTimer) m_modeHudTimer->stop();
 
-    // Cleanly shut down outbound streaming and recording so we don't leak
-    // an open UDP socket / file handle on exit.
     if (m_streamer && m_streamer->isRunning()) m_streamer->stop();
     if (m_recording) onRecordStop();
 
-    // Receiver thread is joined last — it owns the longest-blocking wait.
     if (m_rx) { m_rx->stop(); m_rx->wait(1500); }
 
     QMainWindow::closeEvent(e);
 }
 
 // ============================================================================
-//  Black / orange stylesheet
 // ============================================================================
 
 const char* kStyleSheet = R"(
@@ -9918,8 +9363,6 @@ const char* kStyleSheet = R"(
   QWidget#statusCard { background: #181818; border: 1px solid #242424;
                        border-radius: 10px; }
 
-  /* Calibration pose illustration — framed so the heading and hint never
-     crash into the image edge. */
   QWidget#poseFrame  { background: #121212; border: 1px solid #262626;
                        border-radius: 14px; }
 
@@ -10074,8 +9517,6 @@ const char* kStyleSheet = R"(
   }
 
   /* ---- Actor-dimension inputs: behave like text fields ---------------- */
-  /* Keep the arrows small; emphasize the typing affordance — thick focus
-     border, big font, centred caret, visible text-selection colour. */
   QDoubleSpinBox#bigSpin, QSpinBox#bigSpin {
       selection-background-color: #FF7A1A;
       selection-color: #111;
@@ -10116,7 +9557,6 @@ const char* kStyleSheet = R"(
 )";
 
 // ============================================================================
-//  CLI + test logger
 // ============================================================================
 
 CliArgs parseCli(int argc, char** argv)
@@ -10156,9 +9596,6 @@ void testLog(const std::string& msg, bool enabled)
 static void attachTestOutput()
 {
 #ifdef _WIN32
-    // In -test we always mirror stdout/stderr into fox_mocap.log next to the
-    // exe.  No AttachConsole shenanigans — those silently broke output when
-    // launched without a parent terminal (Start-Process, Explorer).
     char buf[MAX_PATH]{};
     GetModuleFileNameA(nullptr, buf, MAX_PATH);
     std::string exeDir(buf);
@@ -10181,7 +9618,6 @@ static void attachTestOutput()
 }  // namespace fox
 
 // ============================================================================
-//  Entry point
 // ============================================================================
 
 int main(int argc, char** argv)
@@ -10194,9 +9630,6 @@ int main(int argc, char** argv)
         fox::g_testStreamLog = true;
     }
 
-    // Request a compatibility-profile OpenGL context so legacy immediate-mode
-    // GL (used by the viewport line/point renderer) works.  Must be set BEFORE
-    // QApplication is constructed.
     {
         QSurfaceFormat fmt;
         fmt.setProfile(QSurfaceFormat::CompatibilityProfile);
@@ -10213,19 +9646,14 @@ int main(int argc, char** argv)
 #  define FOX_VERSION_STR "dev"
 #endif
     app.setApplicationVersion(FOX_VERSION_STR);
-    // Stylised fox icon used in title bar, taskbar, Alt+Tab, dialogs.
     const QIcon foxIcon = makeFoxAppIcon();
     app.setWindowIcon(foxIcon);
 
     testLog(std::string("[boot] fox_mocap starting, test_mode=")
             + (cli.test ? "true" : "false"), cli.test);
 
-    // The XDA receiver is constructed now but NOT started.  The wizard's
-    // Mode page has a "Connect suit" button that triggers scan on demand so
-    // the user sees explicit progress instead of a silent background poll.
     auto* rx = new MocapReceiver(cli.test, &app);
 
-    // ---- New-session wizard -----------------------------------------------
     NewSessionWizard wiz(rx, cli.test);
     if (cli.gloves) {
         testLog("[boot] --gloves flag set — pre-selecting suit+gloves mode", cli.test);
@@ -10245,7 +9673,6 @@ int main(int argc, char** argv)
                 .arg(QString::fromStdString(result.poseKind))
                 .toStdString(), cli.test);
 
-    // ---- Main window ------------------------------------------------------
     auto* win = new MainWindow(rx, result, cli.test);
     if (cli.wristConstraint) {
         win->setWristConstraintEnabled(true);

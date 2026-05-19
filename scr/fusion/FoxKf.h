@@ -36,32 +36,20 @@
 
 namespace fox {
 
-// 3-vector & 4-quat aliases used at the FoxKf boundary.  The receiver
-// converts between these and QVector3D / Quat outside the filter.
 using Vec3  = std::array<float, 3>;
 using Quat4 = std::array<float, 4>;       // (w, x, y, z) Hamilton
 
 struct FoxKfSettings {
-    // Process noise.  Source: Awinda BNO055/MTw datasheet typical
-    // gyro spectral density 0.005-0.010 rad/√s, gyro RW (bias instability)
-    // ~1e-5 rad/s/√s at the 100 Hz rate.  Conservative defaults below.
     float gyroNoiseStd       = 0.005f;     // rad/√s
     float gyroBiasRwStd      = 1.0e-5f;    // rad/s/√s
-    // Measurement noise.
     float accNoiseStd        = 0.05f;      // g  (≈ 0.5 m/s²)
     float magNoiseStd        = 0.10f;      // unit-norm-mag
     float accRejectG         = 0.30f;      // skip update if |a|-1 > this (g)
     float magRejectUnit      = 0.40f;      // skip update if |m|-1 > this
-    // Magnetic dip — average for European/Russian latitudes ~ 60° down.
-    // Caller MAY override per-region; the filter uses cos(dip)/sin(dip)
-    // to compute the body-frame magnetic reference.
     float magDipRad          = 1.047f;     // 60° default
-    // Stationarity gate (ZUPT).  Detect when (ω - b_g) and (a - 1g) are
-    // both small for `zuptHoldFrames`.
     float zuptOmegaThresh    = 0.05f;      // rad/s
     float zuptAccThresh      = 0.03f;      // g
     int   zuptHoldFrames     = 30;         // ≈ 0.33 s at 90 Hz
-    // Initial covariance scale when a prior is set.
     float initOrientStdDeg   = 5.0f;
     float initBiasStd        = 0.5f;       // rad/s — very loose until ZUPT
 };
@@ -79,9 +67,6 @@ public:
 
     void predict(const Vec3& gyrRadPerSec, float dt);
 
-    // Update with accelerometer.  Expected ≈ unit-norm direction of gravity
-    // in body frame.  Filter ignores the update when |accUnitG| is far from
-    // 1.0 (impact / linear acc).  Pass post-calibration acc / |acc_magn|.
     void updateAcc(const Vec3& accUnitG);
 
     void updateMag(const Vec3& magUnit);
@@ -90,9 +75,6 @@ public:
 
     Quat4 orient()       const { return m_q; }
     Vec3  gyroBias()     const { return m_b; }
-    // Orientation 1-sigma uncertainty in degrees (sqrt of the trace of the
-    // δθ-block of P, converted to deg).  Used by MocapViewport's drift-lock
-    // as a confidence gate so a still-converging filter is never frozen.
     float orientStdDeg() const;
     float biasStd()      const;
     bool  isStationary() const { return m_still; }

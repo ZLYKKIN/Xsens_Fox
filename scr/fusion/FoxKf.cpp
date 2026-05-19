@@ -39,7 +39,6 @@ Quat4 toQuat4(const Qf&  q) {
     return Quat4{qn.w(), qn.x(), qn.y(), qn.z()};
 }
 
-// Skew-symmetric matrix [v]_×.
 Mat3 skew(const V3& v) {
     Mat3 M;
     M <<    0.f, -v.z(),  v.y(),
@@ -48,7 +47,6 @@ Mat3 skew(const V3& v) {
     return M;
 }
 
-// Exp map: rotation vector → unit quaternion.
 Qf expSO3(const V3& w) {
     const float a = w.norm();
     if (a < 1e-8f) {
@@ -59,12 +57,10 @@ Qf expSO3(const V3& w) {
     return Qf(std::cos(h), w.x() * s, w.y() * s, w.z() * s).normalized();
 }
 
-// Rotate v by inverse(q).  Equivalent to qᵀ ⊗ [0,v] ⊗ q.
 V3 rotateInv(const Qf& q, const V3& v) {
     return q.conjugate() * v;
 }
 
-// View m_P (float[36] row-major) as Eigen::Matrix<float,6,6>.
 Eigen::Map<Mat6,       Eigen::Unaligned, Eigen::Stride<6, 1>>
 covView(float* P) {
     return Eigen::Map<Mat6, Eigen::Unaligned, Eigen::Stride<6, 1>>(P);
@@ -118,18 +114,14 @@ void FoxKf::predict(const Vec3& gyrRadPerSec, float dt) {
     const V3 w = toV3(gyrRadPerSec) - toV3(m_b);
     m_lastGyrCorrected = toVec3(w);
 
-    // Quaternion integration (1st-order via Exp).
     const V3 wdt = w * dt;
     Qf q = toQf(m_q) * expSO3(wdt);
     m_q = toQuat4(q);
 
-    // Linearised state-transition  F = [[I - [wdt]_×, -I·dt], [0, I]] (6×6).
     Mat6 F = Mat6::Identity();
     F.block<3, 3>(0, 0) = Mat3::Identity() - skew(wdt);
     F.block<3, 3>(0, 3) = -Mat3::Identity() * dt;
-    // F.block<3,3>(3,0) already zero; F.block<3,3>(3,3) already identity.
 
-    // Process noise Q (6×6 diag): gyro noise feeds δθ, bias RW feeds δb.
     const float qg = m_set.gyroNoiseStd  * m_set.gyroNoiseStd  * dt * dt;
     const float qb = m_set.gyroBiasRwStd * m_set.gyroBiasRwStd * dt;
 
@@ -139,7 +131,6 @@ void FoxKf::predict(const Vec3& gyrRadPerSec, float dt) {
     P.diagonal().tail<3>().array() += qb;
     P = 0.5f * (P + P.transpose().eval());
 
-    // Stationarity gate: small corrected gyro + small |a-1g|.
     const float wmag = w.norm();
     const float aMag = toV3(m_lastAcc).norm();
     const bool stillNow = (wmag < m_set.zuptOmegaThresh)
@@ -155,17 +146,14 @@ void FoxKf::updateAcc(const Vec3& accUnitG) {
     const float err = std::fabs(mag - 1.0f);
     if (err > m_set.accRejectG * 2.0f) return;           // hard skip on huge shock
 
-    // Inflate R adaptively (XKF3i pattern: track but distrust).
     float rScale = 1.0f + 9.0f * std::min(1.0f, err / std::max(1e-6f, m_set.accRejectG));
     if (err > m_set.accRejectG) rScale *= 1.0f + (err - m_set.accRejectG) * 20.0f;
     const float rA = m_set.accNoiseStd * m_set.accNoiseStd * rScale;
 
-    // Predicted gravity in body frame: ĝ_body = R(q)ᵀ · [0,0,-1]
     const V3 gravUp(0.0f, 0.0f, -1.0f);
     const V3 gBody = rotateInv(toQf(m_q), gravUp);
     const V3 innov = a - gBody;
 
-    // Measurement Jacobian H = [ [gBody]_× , 0_{3×3} ] (3×6).
     Mat36 H = Mat36::Zero();
     H.block<3, 3>(0, 0) = skew(gBody);
 
@@ -182,7 +170,6 @@ void FoxKf::updateAcc(const Vec3& accUnitG) {
     m_q = toQuat4(expSO3(dTheta) * toQf(m_q));
     m_b = Vec3{m_b[0] + dBias.x(), m_b[1] + dBias.y(), m_b[2] + dBias.z()};
 
-    // Joseph form: P ← (I-KH) P (I-KH)ᵀ + K R Kᵀ.
     const Mat6 IKH = Mat6::Identity() - K * H;
     P = IKH * P * IKH.transpose() + rA * (K * K.transpose());
     P = 0.5f * (P + P.transpose().eval());
@@ -197,9 +184,6 @@ void FoxKf::updateMag(const Vec3& magUnit) {
     float rScale = 1.0f + 9.0f * std::min(1.0f, err / std::max(1e-6f, m_set.magRejectUnit));
     const float rM = m_set.magNoiseStd * m_set.magNoiseStd * rScale;
 
-    // Magnetic reference in world frame: along horizontal north with dip
-    // angle pointing down.  Convention NWU: +X = north, +Z = up.
-    // Reference unit vector = (cosD, 0, -sinD)  (dip points downward).
     const float cD = std::cos(m_set.magDipRad);
     const float sD = std::sin(m_set.magDipRad);
     const V3 mRefWorld(cD, 0.0f, -sD);
@@ -228,7 +212,6 @@ void FoxKf::updateMag(const Vec3& magUnit) {
 }
 
 void FoxKf::updateZupt() {
-    // ZUPT: corrected gyro should be 0.  H = [0_{3×3}, -I_3].
     const V3 innov = -toV3(m_lastGyrCorrected);
     const float r = m_set.gyroNoiseStd * m_set.gyroNoiseStd * 0.1f;  // tight measurement noise
 
