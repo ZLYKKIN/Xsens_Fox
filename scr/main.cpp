@@ -5561,8 +5561,11 @@ void NewSessionWizard::onCaptureTick()
             { SEG_RFoot,      SEG_LFoot      }, { SEG_RToe,       SEG_LToe       },
         };
         for (const auto& pr : pairsK) {
-            const double dev = mirrorYDeviationDeg(s2sNew[pr.first], s2sNew[pr.second]);
-            const double f = std::max(0.0, 1.0 - dev / 30.0);
+            if (m_asymmetricMount[pr.first] || m_asymmetricMount[pr.second]) continue;
+            const double devM = mirrorYDeviationDeg(s2sNew[pr.first], s2sNew[pr.second]);
+            const double devP = parallelDeviationDeg(s2sNew[pr.first], s2sNew[pr.second]);
+            const double dev = std::min(devM, devP);
+            const double f = std::max(0.20, 1.0 - dev / 45.0);
             confidence[pr.first]  = std::min(confidence[pr.first],  f);
             confidence[pr.second] = std::min(confidence[pr.second], f);
         }
@@ -5917,11 +5920,32 @@ void NewSessionWizard::onCaptureTick()
             }
             if (dev <= 3.0) return;
             if (dev >= 12.0) {
+                auto solveIndependentlyN = [&](int seg) -> double {
+                    if (m_accumCountT[seg] < 10 || m_accumCountN[seg] < 10) return s2sResidualN[seg];
+                    const QVector3D gT_bs = gravityInBodyFrame(defAng_T[seg]).normalized();
+                    const QVector3D gN_bs = gravityInBodyFrame(defAng_N[seg]).normalized();
+                    const QVector3D aT_ss = (m_accAccumT[seg] / float(m_accumCountT[seg])).normalized();
+                    const QVector3D aN_ss = (m_accAccumN[seg] / float(m_accumCountN[seg])).normalized();
+                    double res = 1e9;
+                    const Quat qBest = solveS2sBestAxisPermutation(
+                        gT_bs, gN_bs, aT_ss, aN_ss,
+                        QVector3D(0, 0, -1), QVector3D(0, 0, -1), false, res);
+                    const Quat qInv = qBest.inv().normalized();
+                    s2s[seg] = canonical_hemisphere(qInv);
+                    s2sMode[seg] = 0;
+                    s2sResidualN[seg] = res;
+                    return res;
+                };
+                const double rNew = solveIndependentlyN(rSeg);
+                const double lNew = solveIndependentlyN(lSeg);
+                s2sFusedN[rSeg] = s2sFusedN[lSeg] = true;
+                m_asymmetricMount[rSeg] = m_asymmetricMount[lSeg] = true;
                 if (m_test) {
                     std::cout << "[calib refine] paired " << kSegmentNames[rSeg]
                               << "/" << kSegmentNames[lSeg]
-                              << " " << sym << "_dev=" << std::fixed << std::setprecision(2) << dev
-                              << "° — too large, skipping (real asymmetry or sensor mount error)\n";
+                              << " independently re-solved via axis-permutation (N-pose), "
+                              << "R=" << std::fixed << std::setprecision(2) << rNew << "°, "
+                              << "L=" << lNew << "° (asymmetric mount detected)\n";
                 }
                 return;
             }
@@ -7229,23 +7253,27 @@ struct LiveStreamSender::Impl {
     QByteArray   scalePkt;
     quint64      framesSinceHandshake = 0;
     qint64       lastEmitMs = -1;
+    quint32      streamSample = 0;
 
-    std::array<Quat, kXsensSegmentCount> baselineBodyQ{};
-    std::array<QVector3D, kXsensSegmentCount> baselineSegPos{};
-    std::array<Quat, kFingerSegmentsHand> baselineLeftGloveQ{};
-    std::array<Quat, kFingerSegmentsHand> baselineRightGloveQ{};
-    QVector3D    baselinePelvisPos{};
-    bool         baselineCaptured = false;
+    std::array<Quat, kXsensSegmentCount> streamCalibQ{};
+    std::array<Quat, kFingerSegmentsHand> leftGloveCalibQ{};
+    std::array<Quat, kFingerSegmentsHand> rightGloveCalibQ{};
+    bool         streamCalibInstalled = false;
     int          fingerBaselineSamples = 0;
     static constexpr int kFingerBaselineWindow = 30;
 
     int recapTicksLeft = 0;
     int recapSamples = 0;
     qint64 recapDeadlineMs = -1;
-    std::array<Quat,      kXsensSegmentCount> recapBodyQ{};
-    std::array<QVector3D, kXsensSegmentCount> recapSegPos{};
+    std::array<Quat, kXsensSegmentCount> recapBodyQ{};
     std::array<Quat, kFingerSegmentsHand> recapLeftGloveQ{};
     std::array<Quat, kFingerSegmentsHand> recapRightGloveQ{};
+
+    Impl() {
+        for (auto& q : streamCalibQ)     q = Quat(1, 0, 0, 0);
+        for (auto& q : leftGloveCalibQ)  q = Quat(1, 0, 0, 0);
+        for (auto& q : rightGloveCalibQ) q = Quat(1, 0, 0, 0);
+    }
 
     void maybeRetransmitHandshake() {
         if (++framesSinceHandshake >= 270) {
@@ -7350,6 +7378,7 @@ bool LiveStreamSender::start(const LiveSettings& cfg, QString* err)
     m_impl->framesSinceHandshake = 0;
     m_impl->recapTicksLeft = 0;
     m_impl->recapSamples = 0;
+    m_impl->streamSample = 0;
     m_running = true;
     return true;
 }
@@ -7377,9 +7406,17 @@ void LiveStreamSender::setTposeBaseline(
     const std::array<Quat, kXsensSegmentCount>& tposeQ,
     const QVector3D& tposePelvis)
 {
-    m_impl->baselineBodyQ = tposeQ;
-    m_impl->baselinePelvisPos = tposePelvis;
-    m_impl->baselineCaptured = true;
+    Q_UNUSED(tposePelvis);
+    for (int i = 0; i < kXsensSegmentCount; ++i) {
+        const Quat& t = tposeQ[i];
+        const double n2 = t.w*t.w + t.x*t.x + t.y*t.y + t.z*t.z;
+        if (n2 < 1e-10 || !std::isfinite(n2)) {
+            m_impl->streamCalibQ[i] = Quat(1, 0, 0, 0);
+        } else {
+            m_impl->streamCalibQ[i] = canonical_hemisphere(t.normalized().inv());
+        }
+    }
+    m_impl->streamCalibInstalled = true;
 }
 
 bool g_testStreamLog = false;
@@ -7390,6 +7427,7 @@ void LiveStreamSender::pushFrame(quint32 sample,
     const QVector3D& pelvisPos)
 {
     if (!m_running) return;
+    Q_UNUSED(pelvisPos);
 
     if (m_cfg.fps > 0) {
         const qint64 now      = m_impl->timer.elapsed();
@@ -7399,23 +7437,13 @@ void LiveStreamSender::pushFrame(quint32 sample,
         m_impl->lastEmitMs = now;
     }
 
-    if (!m_impl->baselineCaptured) {
-        m_impl->baselineBodyQ = segQuat;
-        m_impl->baselinePelvisPos = pelvisPos;
-        m_impl->baselineSegPos = segPos;
-        m_impl->baselineCaptured = true;
-    }
-
     if (m_impl->recapTicksLeft > 0) {
         if (m_impl->recapSamples == 0) {
             m_impl->recapBodyQ = segQuat;
-            m_impl->recapSegPos = segPos;
         } else {
             const double t = 1.0 / double(m_impl->recapSamples + 1);
             for (int i = 0; i < kXsensSegmentCount; ++i) {
                 m_impl->recapBodyQ[i] = slerp_quat(m_impl->recapBodyQ[i], segQuat[i], t);
-                m_impl->recapSegPos[i] = m_impl->recapSegPos[i] * float(1.0 - t)
-                                      + segPos[i] * float(t);
             }
         }
         ++m_impl->recapSamples;
@@ -7423,10 +7451,16 @@ void LiveStreamSender::pushFrame(quint32 sample,
         const bool deadlineHit = (m_impl->recapDeadlineMs > 0)
                               && (m_impl->timer.elapsed() >= m_impl->recapDeadlineMs);
         if ((m_impl->recapTicksLeft == 0 || deadlineHit) && m_impl->recapSamples > 0) {
-            m_impl->baselineBodyQ = m_impl->recapBodyQ;
-            m_impl->baselineSegPos = m_impl->recapSegPos;
-            m_impl->baselinePelvisPos = pelvisPos;
-            m_impl->baselineCaptured = true;
+            for (int i = 0; i < kXsensSegmentCount; ++i) {
+                const Quat& t = m_impl->recapBodyQ[i];
+                const double n2 = t.w*t.w + t.x*t.x + t.y*t.y + t.z*t.z;
+                if (n2 < 1e-10 || !std::isfinite(n2)) {
+                    m_impl->streamCalibQ[i] = Quat(1, 0, 0, 0);
+                } else {
+                    m_impl->streamCalibQ[i] = canonical_hemisphere(t.normalized().inv());
+                }
+            }
+            m_impl->streamCalibInstalled = true;
             m_impl->recapSamples = 0;
             m_impl->recapTicksLeft = 0;
             m_impl->recapDeadlineMs = -1;
@@ -7437,14 +7471,15 @@ void LiveStreamSender::pushFrame(quint32 sample,
     const quint32 ft = quint32(m_impl->timer.elapsed());
     const double  ts = std::chrono::duration<double>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
+    const quint32 wireSample = ++m_impl->streamSample;
     QByteArray body;
     for (int i = 0; i < kXsensSegmentCount; ++i) {
         appendInt32BE(body, i + 1);
-        const QVector3D p = segPos[i] - m_impl->baselineSegPos[i];
+        const QVector3D p = segPos[i];
         appendFloatBE(body, p.x());
         appendFloatBE(body, p.y());
         appendFloatBE(body, p.z());
-        Quat q = quat_mult(segQuat[i], m_impl->baselineBodyQ[i].inv()).normalized();
+        Quat q = quat_mult(m_impl->streamCalibQ[i], segQuat[i]).normalized();
         if (q.w < 0.0) { q.w = -q.w; q.x = -q.x; q.y = -q.y; q.z = -q.z; }
         appendFloatBE(body, float(q.w));
         appendFloatBE(body, float(q.x));
@@ -7452,18 +7487,18 @@ void LiveStreamSender::pushFrame(quint32 sample,
         appendFloatBE(body, float(q.z));
 
         if (g_testStreamLog) {
-            char buf[256];
+            char buf[320];
             std::snprintf(buf, sizeof(buf),
-                "[send] t=%.6f sample=%u seg=%d "
+                "[send] t=%.6f sample=%u wire=%u seg=%d "
                 "quat=%.6f,%.6f,%.6f,%.6f pos=%.6f,%.6f,%.6f",
-                ts, unsigned(sample), i,
+                ts, unsigned(sample), unsigned(wireSample), i,
                 q.w, q.x, q.y, q.z,
                 double(p.x()), double(p.y()), double(p.z()));
             std::cout << buf << '\n';
         }
     }
     if (g_testStreamLog) std::cout.flush();
-    QByteArray hdr = buildMxtpHeader("02", sample, 0x80,
+    QByteArray hdr = buildMxtpHeader("02", wireSample, 0x80,
                                      quint8(kXsensSegmentCount), ft, 23, 0);
     m_impl->sock.writeDatagram(hdr + body, m_impl->host, m_impl->port);
 }
@@ -7480,6 +7515,7 @@ void LiveStreamSender::pushFrameWithGloves(quint32 sample,
     const QVector3D& wristPosL)
 {
     if (!m_running) return;
+    Q_UNUSED(pelvisPos);
 
     if (m_cfg.fps > 0) {
         const qint64 now      = m_impl->timer.elapsed();
@@ -7489,25 +7525,15 @@ void LiveStreamSender::pushFrameWithGloves(quint32 sample,
         m_impl->lastEmitMs = now;
     }
 
-    if (!m_impl->baselineCaptured) {
-        m_impl->baselineBodyQ = segQuat;
-        m_impl->baselinePelvisPos = pelvisPos;
-        m_impl->baselineSegPos = segPos;
-        m_impl->baselineCaptured = true;
-    }
-
     if (m_impl->recapTicksLeft > 0) {
         if (m_impl->recapSamples == 0) {
             m_impl->recapBodyQ = segQuat;
-            m_impl->recapSegPos = segPos;
             m_impl->recapLeftGloveQ = leftGloveQ;
             m_impl->recapRightGloveQ = rightGloveQ;
         } else {
             const double t = 1.0 / double(m_impl->recapSamples + 1);
             for (int i = 0; i < kXsensSegmentCount; ++i) {
                 m_impl->recapBodyQ[i] = slerp_quat(m_impl->recapBodyQ[i], segQuat[i], t);
-                m_impl->recapSegPos[i] = m_impl->recapSegPos[i] * float(1.0 - t)
-                                      + segPos[i] * float(t);
             }
             for (int i = 0; i < kFingerSegmentsHand; ++i) {
                 m_impl->recapLeftGloveQ[i] = slerp_quat(m_impl->recapLeftGloveQ[i], leftGloveQ[i], t);
@@ -7519,12 +7545,26 @@ void LiveStreamSender::pushFrameWithGloves(quint32 sample,
         const bool deadlineHit = (m_impl->recapDeadlineMs > 0)
                               && (m_impl->timer.elapsed() >= m_impl->recapDeadlineMs);
         if ((m_impl->recapTicksLeft == 0 || deadlineHit) && m_impl->recapSamples > 0) {
-            m_impl->baselineBodyQ = m_impl->recapBodyQ;
-            m_impl->baselineSegPos = m_impl->recapSegPos;
-            m_impl->baselineLeftGloveQ = m_impl->recapLeftGloveQ;
-            m_impl->baselineRightGloveQ = m_impl->recapRightGloveQ;
-            m_impl->baselinePelvisPos = pelvisPos;
-            m_impl->baselineCaptured = true;
+            for (int i = 0; i < kXsensSegmentCount; ++i) {
+                const Quat& t = m_impl->recapBodyQ[i];
+                const double n2 = t.w*t.w + t.x*t.x + t.y*t.y + t.z*t.z;
+                if (n2 < 1e-10 || !std::isfinite(n2)) {
+                    m_impl->streamCalibQ[i] = Quat(1, 0, 0, 0);
+                } else {
+                    m_impl->streamCalibQ[i] = canonical_hemisphere(t.normalized().inv());
+                }
+            }
+            for (int i = 0; i < kFingerSegmentsHand; ++i) {
+                const Quat& tl = m_impl->recapLeftGloveQ[i];
+                const Quat& tr = m_impl->recapRightGloveQ[i];
+                const double n2l = tl.w*tl.w + tl.x*tl.x + tl.y*tl.y + tl.z*tl.z;
+                const double n2r = tr.w*tr.w + tr.x*tr.x + tr.y*tr.y + tr.z*tr.z;
+                m_impl->leftGloveCalibQ[i]  = (n2l < 1e-10 || !std::isfinite(n2l))
+                    ? Quat(1, 0, 0, 0) : canonical_hemisphere(tl.normalized().inv());
+                m_impl->rightGloveCalibQ[i] = (n2r < 1e-10 || !std::isfinite(n2r))
+                    ? Quat(1, 0, 0, 0) : canonical_hemisphere(tr.normalized().inv());
+            }
+            m_impl->streamCalibInstalled = true;
             m_impl->recapSamples = 0;
             m_impl->recapTicksLeft = 0;
             m_impl->recapDeadlineMs = -1;
@@ -7532,13 +7572,17 @@ void LiveStreamSender::pushFrameWithGloves(quint32 sample,
         }
     } else if (m_impl->fingerBaselineSamples < Impl::kFingerBaselineWindow) {
         if (m_impl->fingerBaselineSamples == 0) {
-            m_impl->baselineLeftGloveQ = leftGloveQ;
-            m_impl->baselineRightGloveQ = rightGloveQ;
+            for (int i = 0; i < kFingerSegmentsHand; ++i) {
+                m_impl->leftGloveCalibQ[i]  = canonical_hemisphere(leftGloveQ[i].normalized().inv());
+                m_impl->rightGloveCalibQ[i] = canonical_hemisphere(rightGloveQ[i].normalized().inv());
+            }
         } else {
             const double t = 1.0 / double(m_impl->fingerBaselineSamples + 1);
             for (int i = 0; i < kFingerSegmentsHand; ++i) {
-                m_impl->baselineLeftGloveQ[i]  = slerp_quat(m_impl->baselineLeftGloveQ[i],  leftGloveQ[i],  t);
-                m_impl->baselineRightGloveQ[i] = slerp_quat(m_impl->baselineRightGloveQ[i], rightGloveQ[i], t);
+                const Quat invL = canonical_hemisphere(leftGloveQ[i].normalized().inv());
+                const Quat invR = canonical_hemisphere(rightGloveQ[i].normalized().inv());
+                m_impl->leftGloveCalibQ[i]  = slerp_quat(m_impl->leftGloveCalibQ[i],  invL, t);
+                m_impl->rightGloveCalibQ[i] = slerp_quat(m_impl->rightGloveCalibQ[i], invR, t);
             }
         }
         m_impl->fingerBaselineSamples++;
@@ -7548,16 +7592,17 @@ void LiveStreamSender::pushFrameWithGloves(quint32 sample,
     const quint32 ft = quint32(m_impl->timer.elapsed());
     const double  ts = std::chrono::duration<double>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
+    const quint32 wireSample = ++m_impl->streamSample;
     const quint8  bodyCount = quint8(kXsensSegmentCount);
     const quint8  fingerCount = quint8(2 * kFingerSegmentsHand);
     QByteArray body;
     for (int i = 0; i < kXsensSegmentCount; ++i) {
         appendInt32BE(body, i + 1);
-        const QVector3D p = segPos[i] - m_impl->baselineSegPos[i];
+        const QVector3D p = segPos[i];
         appendFloatBE(body, p.x());
         appendFloatBE(body, p.y());
         appendFloatBE(body, p.z());
-        Quat q = quat_mult(segQuat[i], m_impl->baselineBodyQ[i].inv()).normalized();
+        Quat q = quat_mult(m_impl->streamCalibQ[i], segQuat[i]).normalized();
         if (q.w < 0.0) { q.w = -q.w; q.x = -q.x; q.y = -q.y; q.z = -q.z; }
         appendFloatBE(body, float(q.w));
         appendFloatBE(body, float(q.x));
@@ -7565,11 +7610,11 @@ void LiveStreamSender::pushFrameWithGloves(quint32 sample,
         appendFloatBE(body, float(q.z));
 
         if (g_testStreamLog) {
-            char buf[256];
+            char buf[320];
             std::snprintf(buf, sizeof(buf),
-                "[send] t=%.6f sample=%u seg=%d "
+                "[send] t=%.6f sample=%u wire=%u seg=%d "
                 "quat=%.6f,%.6f,%.6f,%.6f pos=%.6f,%.6f,%.6f",
-                ts, unsigned(sample), i,
+                ts, unsigned(sample), unsigned(wireSample), i,
                 q.w, q.x, q.y, q.z,
                 double(p.x()), double(p.y()), double(p.z()));
             std::cout << buf << '\n';
@@ -7587,22 +7632,22 @@ void LiveStreamSender::pushFrameWithGloves(quint32 sample,
                           const QVector3D& wristWorldPos,
                           const std::array<Quat, kFingerSegmentsHand>& qArr,
                           const std::array<QVector3D, kFingerSegmentsHand>& pArr,
-                          const std::array<Quat, kFingerSegmentsHand>& baseArr) {
+                          const std::array<Quat, kFingerSegmentsHand>& calibArr) {
         appendInt32BE(body, segmentIdBase + slot);
         const int mIdx = kXsensSlotToManus[slot];
         if (mIdx < 0) {
-            const QVector3D p = wristWorldPos - m_impl->baselineSegPos[handSeg];
+            const QVector3D p = wristWorldPos;
             appendFloatBE(body, p.x()); appendFloatBE(body, p.y()); appendFloatBE(body, p.z());
-            Quat q = quat_mult(segQuat[handSeg], m_impl->baselineBodyQ[handSeg].inv()).normalized();
+            Quat q = quat_mult(m_impl->streamCalibQ[handSeg], segQuat[handSeg]).normalized();
             if (q.w < 0.0) { q.w = -q.w; q.x = -q.x; q.y = -q.y; q.z = -q.z; }
             appendFloatBE(body, float(q.w));
             appendFloatBE(body, float(q.x));
             appendFloatBE(body, float(q.y));
             appendFloatBE(body, float(q.z));
         } else {
-            const QVector3D p = pArr[mIdx] - m_impl->baselineSegPos[handSeg];
+            const QVector3D p = pArr[mIdx];
             appendFloatBE(body, p.x()); appendFloatBE(body, p.y()); appendFloatBE(body, p.z());
-            Quat q = quat_mult(qArr[mIdx], baseArr[mIdx].inv()).normalized();
+            Quat q = quat_mult(calibArr[mIdx], qArr[mIdx]).normalized();
             if (q.w < 0.0) { q.w = -q.w; q.x = -q.x; q.y = -q.y; q.z = -q.z; }
             appendFloatBE(body, float(q.w));
             appendFloatBE(body, float(q.x));
@@ -7611,10 +7656,10 @@ void LiveStreamSender::pushFrameWithGloves(quint32 sample,
         }
     };
     for (int slot = 0; slot < kFingerSegmentsHand; ++slot)
-        emitFinger(slot, 24, SEG_LHand, wristPosL, leftGloveQ, leftGloveP, m_impl->baselineLeftGloveQ);
+        emitFinger(slot, 28, SEG_LHand, wristPosL, leftGloveQ, leftGloveP, m_impl->leftGloveCalibQ);
     for (int slot = 0; slot < kFingerSegmentsHand; ++slot)
-        emitFinger(slot, 44, SEG_RHand, wristPosR, rightGloveQ, rightGloveP, m_impl->baselineRightGloveQ);
-    QByteArray hdr = buildMxtpHeader("02", sample, 0x80,
+        emitFinger(slot, 48, SEG_RHand, wristPosR, rightGloveQ, rightGloveP, m_impl->rightGloveCalibQ);
+    QByteArray hdr = buildMxtpHeader("02", wireSample, 0x80,
                                      quint8(bodyCount + fingerCount),
                                      ft, bodyCount, fingerCount);
     m_impl->sock.writeDatagram(hdr + body, m_impl->host, m_impl->port);
@@ -8489,11 +8534,7 @@ MainWindow::MainWindow(MocapReceiver* rx,
 
     m_streamer = new LiveStreamSender(this);
     if (m_setup.tposeCaptured) {
-        std::array<Quat, kXsensSegmentCount> baselineCand{};
-        for (int i = 0; i < kXsensSegmentCount; ++i) {
-            baselineCand[i] = quat_mult(m_setup.tposeReference[i],
-                                        m_setup.calibReference[i].inv()).normalized();
-        }
+        std::array<Quat, kXsensSegmentCount> baselineCand = m_setup.tposeReference;
         auto ss22 = [](double x) { return x * x * (3.0 - 2.0 * x); };
         baselineCand[SEG_L5]   = slerp_quat(baselineCand[SEG_Pelvis],
                                             baselineCand[SEG_T8],   ss22(0.22));
@@ -8960,16 +9001,14 @@ void MainWindow::onRenderTick()
         std::array<QVector3D, kXsensSegmentCount> segPosStream{};
         QVector3D wristPosR(0, 0, 0), wristPosL(0, 0, 0);
         if (m_skel) {
-            auto kp = m_skel->computeKeypoints(qOut, QVector3D(0.0f, 0.0f, 0.0f));
+            const float pelvisZ_stream = float(m_setup.heightCm * 0.55 / 100.0);
+            auto kp = m_skel->computeKeypoints(qOut, QVector3D(0.0f, 0.0f, pelvisZ_stream));
             const QVector3D off = m_viewport->lastLocoOffset();
-            for (auto& p : kp) p += off;
+            for (auto& p : kp) p += QVector3D(off.x(), off.y(), 0.0f);
             float minZ = kp[0].z();
             for (const auto& p : kp) if (p.z() < minZ) minZ = p.z();
             if (minZ < -0.02f) {
-                static float s_liftEma = 0.0f;
-                const float rawLift = std::min(0.10f, -minZ);
-                s_liftEma = 0.85f * s_liftEma + 0.15f * rawLift;
-                const QVector3D up(0.0f, 0.0f, s_liftEma);
+                const QVector3D up(0.0f, 0.0f, -minZ + 0.005f);
                 for (auto& p : kp) p += up;
             }
             const float yaw = m_viewport->sceneYaw();
