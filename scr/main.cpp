@@ -8097,22 +8097,79 @@ static void appendInt32BE(QByteArray& pkt, qint32 v)
     pkt.append(reinterpret_cast<const char*>(&be), 4);
 }
 
-// NWU (X=fwd, Y=left, Z=up, RH) -> MVN (Y=fwd, X=right, Z=up, RH).
-// Plugin's QuaternionDatagram.cpp:27 явно говорит "Z-Up, right-handed",
-// плагинный Y-flip в SegData::Set ожидает MVN convention на входе.  hipose
-// pipeline native-NWU (см. main.cpp:51,504,2836), значит между фреймами
-// нужен similarity Rz(+90°):
-//   q_mvn = Rz(+90°) * q_nwu * Rz(-90°)
-//   p_mvn = Rz(+90°) * p_nwu  =>  (x,y,z) -> (-y, x, z)
-// Для quat-компонент при оси-Z similarity:
-//   (w, x, y, z)_nwu  ->  (w, -y, x, z)_mvn
-static Quat conjugateNwuToMvn(const Quat& q)
-{
-    return q;
+// ============================================================================
+// Streaming coordinate conversion: NWU → MVN wire frame.
+//
+// Наш C++ pipeline нативно работает в NWU (X=forward, Y=left, Z=up, RH).
+// Плагины ожидают MVN wire frame, и формат отличается по плагинам:
+//
+// 1. Blender MVN add-on (Plugins/MVNBlenderPlugin-main/pose.py:357-365):
+//    плагин делает (y, z, x) ремап считая что wire = **Y-up MVN**
+//    (X=right, Y=up, Z=forward, RH) — это формат MVN Animate.  Комментарий
+//    в pose.py:361 явно говорит «Fox sends Z-up NWU; that mismatch is one
+//    suspect for the 'wrong starting pose'».  То есть для Blender нужна
+//    реальная конверсия NWU → Y-up MVN.
+//
+//    NWU → Y-up MVN:
+//        new_x = -old_y   (NWU left  → MVN -right = MVN right inverted)
+//        new_y = +old_z   (NWU up    → MVN up)
+//        new_z = +old_x   (NWU fwd   → MVN fwd)
+//    Это axis-cycling rotation about (1,1,1)/√3 на 120° (=2π/3).
+//    Кватернион:  q_rot = (cos 60°, sin 60° · axis) = (0.5, 0.5, 0.5, 0.5).
+//    q_mvn = q_rot * q_nwu * q_rot^(-1).
+//
+// 2. UE LiveLink plugin (Plugins/XsensLivc/.../LiveLinkMvnSource.h:46-55):
+//    плагин делает FVector(x, -y, z)·100 и FQuat(-qi, +qj, -qk, +qw).
+//    Это conversion из **Z-up RH** в UE Z-up LH.  То есть UE ожидает wire
+//    = Z-up RH, что совпадает с нашим NWU (axes идентичны, оба Z-up RH).
+//    Конверсия → identity.
+//
+// Селектируем по cfg.target.
+// ============================================================================
+
+namespace {
+constexpr Quat kNwuToYupMvn{0.5, 0.5, 0.5, 0.5};  // axis (1,1,1)/√3, 120°
+
+inline QVector3D nwuToYupMvn(const QVector3D& p) {
+    // (x, y, z)_nwu  →  (-y, z, x)_mvn
+    return QVector3D(-p.y(), p.z(), p.x());
 }
-static QVector3D rotateNwuToMvn(const QVector3D& p)
+inline Quat nwuToYupMvnQ(const Quat& q) {
+    // similarity transform: q_mvn = q_rot · q_nwu · q_rot^(-1)
+    return quat_mult(quat_mult(kNwuToYupMvn, q),
+                     kNwuToYupMvn.inv()).normalized();
+}
+}  // namespace
+
+static QVector3D rotateNwuToMvn(const QVector3D& p, LiveTarget target)
 {
-    return p;
+    if (target == LiveTarget::BlenderMVN)
+        return nwuToYupMvn(p);
+    return p;  // UE LiveLink: NWU is already its expected Z-up RH wire.
+}
+static Quat conjugateNwuToMvn(const Quat& q, LiveTarget target)
+{
+    if (target == LiveTarget::BlenderMVN)
+        return nwuToYupMvnQ(q);
+    return q;  // UE LiveLink: identity.
+}
+
+// FIX (stream polish): hex-dump первого фрейма для verification против
+// MVN spec.  Печатается в stdout, читается совместно с логом и tcpdump.
+static void dumpFirstFrameHex(const char* tag, const QByteArray& pkt)
+{
+    std::cout << "[stream first-frame hex] " << tag << " bytes="
+              << pkt.size() << "\n";
+    const int n = std::min(pkt.size(), qsizetype(24 + 64));  // header + 2 segs max
+    std::cout << "  hex:";
+    for (int i = 0; i < n; ++i) {
+        if (i % 16 == 0) std::cout << "\n    ";
+        char buf[4];
+        std::snprintf(buf, sizeof(buf), "%02x ",
+                      static_cast<unsigned>(static_cast<unsigned char>(pkt[i])));
+        std::cout << buf;
+    }
+    std::cout << "\n";
 }
 
 struct LiveStreamSender::Impl {
@@ -8122,6 +8179,7 @@ struct LiveStreamSender::Impl {
     QElapsedTimer timer;
     QByteArray   metaPkt;
     QByteArray   scalePkt;
+    bool         firstFrameDumped = false;
     quint64      framesSinceHandshake = 0;
     qint64       lastEmitMs = -1;
 
@@ -8200,6 +8258,23 @@ bool LiveStreamSender::start(const LiveSettings& cfg, QString* err)
         };
         const qint32 segCount   = cfg.useGloves ? 63 : 23;
         const quint8 fingerHdr  = cfg.useGloves ? 40 : 0;     // фикс: было 0
+        // FIX (stream polish): защита от пустого tposeOriginM.  Если все 23
+        // элемента нулевые — MXTP13 уходит со scale=0 и плагины не могут
+        // отнормировать pelvis (в LiveLinkMvnSource scale становится 0
+        // и pelvis улетает на ~47x или клампится).  Проверяем и логируем.
+        bool tposeOriginsValid = false;
+        for (int i = 0; i < kXsensSegmentCount; ++i) {
+            if (cfg.tposeOriginM[i].lengthSquared() > 1e-6f) {
+                tposeOriginsValid = true;
+                break;
+            }
+        }
+        if (!tposeOriginsValid) {
+            std::cout << "[stream] WARNING: MXTP13 tposeOriginM is empty —"
+                         " plugins may render rig at wrong scale.  "
+                         "Caller must populate cfg.tposeOriginM[] from FK "
+                         "before LiveStreamSender::start().\n";
+        }
         QByteArray payload;
         appendInt32BE(payload, segCount);
         for (int i = 0; i < kXsensSegmentCount; ++i) {
@@ -8281,18 +8356,19 @@ void LiveStreamSender::pushFrame(quint32 sample,
 
     m_impl->maybeRetransmitHandshake();
     const quint32 ft = quint32(m_impl->timer.elapsed());
+    const LiveTarget target = m_cfg.target;
     QByteArray body;
     for (int i = 0; i < kXsensSegmentCount; ++i) {
         appendInt32BE(body, i + 1);
         const QVector3D pRaw = (i == SEG_Pelvis)
                 ? (pelvisPos - m_impl->baselinePelvisPos)
                 : QVector3D(0, 0, 0);
-        const QVector3D p = rotateNwuToMvn(pRaw);
+        const QVector3D p = rotateNwuToMvn(pRaw, target);
         appendFloatBE(body, p.x());
         appendFloatBE(body, p.y());
         appendFloatBE(body, p.z());
         const Quat qDelta = quat_mult(segQuat[i], m_impl->baselineBodyQ[i].inv()).normalized();
-        const Quat q = conjugateNwuToMvn(qDelta);
+        const Quat q = conjugateNwuToMvn(qDelta, target);
         appendFloatBE(body, float(q.w));
         appendFloatBE(body, float(q.x));
         appendFloatBE(body, float(q.y));
@@ -8300,7 +8376,12 @@ void LiveStreamSender::pushFrame(quint32 sample,
     }
     QByteArray hdr = buildMxtpHeader("02", sample, 0x80,
                                      quint8(kXsensSegmentCount), ft, 23, 0);
-    m_impl->sock.writeDatagram(hdr + body, m_impl->host, m_impl->port);
+    const QByteArray pkt = hdr + body;
+    if (m_cfg.debugDumpFirstFrame && !m_impl->firstFrameDumped) {
+        dumpFirstFrameHex("MXTP02 body-only", pkt);
+        m_impl->firstFrameDumped = true;
+    }
+    m_impl->sock.writeDatagram(pkt, m_impl->host, m_impl->port);
 }
 
 void LiveStreamSender::pushFrameWithGloves(quint32 sample,
@@ -8345,18 +8426,19 @@ void LiveStreamSender::pushFrameWithGloves(quint32 sample,
     const quint32 ft = quint32(m_impl->timer.elapsed());
     const quint8  bodyCount = quint8(kXsensSegmentCount);
     const quint8  fingerCount = quint8(2 * kFingerSegmentsHand);
+    const LiveTarget target = m_cfg.target;
     QByteArray body;
     for (int i = 0; i < kXsensSegmentCount; ++i) {
         appendInt32BE(body, i + 1);
         const QVector3D pRaw = (i == SEG_Pelvis)
                 ? (pelvisPos - m_impl->baselinePelvisPos)
                 : QVector3D(0, 0, 0);
-        const QVector3D p = rotateNwuToMvn(pRaw);
+        const QVector3D p = rotateNwuToMvn(pRaw, target);
         appendFloatBE(body, p.x());
         appendFloatBE(body, p.y());
         appendFloatBE(body, p.z());
         const Quat qDelta = quat_mult(segQuat[i], m_impl->baselineBodyQ[i].inv()).normalized();
-        const Quat q = conjugateNwuToMvn(qDelta);
+        const Quat q = conjugateNwuToMvn(qDelta, target);
         appendFloatBE(body, float(q.w));
         appendFloatBE(body, float(q.x));
         appendFloatBE(body, float(q.y));
@@ -8378,30 +8460,66 @@ void LiveStreamSender::pushFrameWithGloves(quint32 sample,
         if (mIdx < 0) {
             appendFloatBE(body, 0.f); appendFloatBE(body, 0.f); appendFloatBE(body, 0.f);
             const Quat qDelta = quat_mult(segQuat[handSeg], m_impl->baselineBodyQ[handSeg].inv()).normalized();
-            const Quat q = conjugateNwuToMvn(qDelta);
+            const Quat q = conjugateNwuToMvn(qDelta, target);
             appendFloatBE(body, float(q.w));
             appendFloatBE(body, float(q.x));
             appendFloatBE(body, float(q.y));
             appendFloatBE(body, float(q.z));
         } else {
-            const QVector3D p = rotateNwuToMvn(pArr[mIdx]);
+            const QVector3D p = rotateNwuToMvn(pArr[mIdx], target);
             appendFloatBE(body, p.x()); appendFloatBE(body, p.y()); appendFloatBE(body, p.z());
             const Quat qDelta = quat_mult(qArr[mIdx], baseArr[mIdx].inv()).normalized();
-            const Quat q = conjugateNwuToMvn(qDelta);
+            const Quat q = conjugateNwuToMvn(qDelta, target);
             appendFloatBE(body, float(q.w));
             appendFloatBE(body, float(q.x));
             appendFloatBE(body, float(q.y));
             appendFloatBE(body, float(q.z));
         }
     };
+    // emitFinger lambda append'ит сегменты к `body`.  Запомним размер
+    // body-only до этого, чтобы потом split mode мог вырезать только
+    // finger-часть.
+    const int bodyOnlyBytes = body.size();
     for (int slot = 0; slot < kFingerSegmentsHand; ++slot)
         emitFinger(slot, 24, SEG_LHand, leftGloveQ, leftGloveP, m_impl->baselineLeftGloveQ);
     for (int slot = 0; slot < kFingerSegmentsHand; ++slot)
         emitFinger(slot, 44, SEG_RHand, rightGloveQ, rightGloveP, m_impl->baselineRightGloveQ);
-    QByteArray hdr = buildMxtpHeader("02", sample, 0x80,
-                                     quint8(bodyCount + fingerCount),
-                                     ft, bodyCount, fingerCount);
-    m_impl->sock.writeDatagram(hdr + body, m_impl->host, m_impl->port);
+
+    // FIX (stream polish): split-mode шлёт body и fingers как два UDP
+    // datagram'а через MXTP dgCounter splitting (bit 0..6 = index, bit 7 =
+    // last).  Single-mode (default) шлёт всё в одном datagram'е (~2040 байт)
+    // — на loopback IP fragmentation работает, на LAN risk потери.
+    if (m_cfg.splitGloveDatagrams) {
+        const QByteArray bodyOnly    = body.left(bodyOnlyBytes);
+        const QByteArray fingerOnly  = body.mid(bodyOnlyBytes);
+        QByteArray hdrBody = buildMxtpHeader("02", sample, 0x00,
+                                             quint8(bodyCount),
+                                             ft, bodyCount, fingerCount);
+        const QByteArray pkt1 = hdrBody + bodyOnly;
+        if (m_cfg.debugDumpFirstFrame && !m_impl->firstFrameDumped) {
+            dumpFirstFrameHex("MXTP02 split body (1/2)", pkt1);
+        }
+        m_impl->sock.writeDatagram(pkt1, m_impl->host, m_impl->port);
+        QByteArray hdrFingers = buildMxtpHeader("02", sample, 0x81,
+                                                quint8(fingerCount),
+                                                ft, bodyCount, fingerCount);
+        const QByteArray pkt2 = hdrFingers + fingerOnly;
+        if (m_cfg.debugDumpFirstFrame && !m_impl->firstFrameDumped) {
+            dumpFirstFrameHex("MXTP02 split fingers (2/2)", pkt2);
+            m_impl->firstFrameDumped = true;
+        }
+        m_impl->sock.writeDatagram(pkt2, m_impl->host, m_impl->port);
+    } else {
+        QByteArray hdr = buildMxtpHeader("02", sample, 0x80,
+                                         quint8(bodyCount + fingerCount),
+                                         ft, bodyCount, fingerCount);
+        const QByteArray pkt = hdr + body;
+        if (m_cfg.debugDumpFirstFrame && !m_impl->firstFrameDumped) {
+            dumpFirstFrameHex("MXTP02 combined", pkt);
+            m_impl->firstFrameDumped = true;
+        }
+        m_impl->sock.writeDatagram(pkt, m_impl->host, m_impl->port);
+    }
 }
 
 // ============================================================================
@@ -8625,8 +8743,8 @@ LiveStreamWizard::LiveStreamWizard(QWidget* parent) : QDialog(parent)
     m_target = new QComboBox(this);
     m_target->addItem(QString::fromUtf8("\xF0\x9F\x94\xB6  Blender — MVN Live (MXTP)"),
                       int(LiveTarget::BlenderMVN));
-    m_target->addItem(QString::fromUtf8("\xF0\x9F\x8E\xAE  Unreal Engine — XsensLivc (MXTP)"),
-                      int(LiveTarget::XsensLivc));
+    m_target->addItem(QString::fromUtf8("\xF0\x9F\x8E\xAE  Unreal Engine — LiveLink (MXTP)"),
+                      int(LiveTarget::UnrealLiveLink));
     m_target->setMinimumHeight(34);
 
     m_host = new QComboBox(this);
@@ -9401,13 +9519,19 @@ MainWindow::MainWindow(MocapReceiver* rx,
     if (m_test) {
         LiveSettings cfg;
         cfg.useGloves = m_setup.useGloves;
+        // FIX (stream polish): в -test режиме всегда target=BlenderMVN
+        // (соответствует требованию задачи "если -test → стримим в Blender"),
+        // и включаем одноразовый hex-dump первого фрейма для byte-уровня
+        // verification.
+        cfg.target              = LiveTarget::BlenderMVN;
+        cfg.debugDumpFirstFrame = true;
         if (m_skel) {
             std::array<Quat, kXsensSegmentCount> identity{};
             for (auto& qq : identity) qq = Quat(1, 0, 0, 0);
             const float pelvisZ = float(m_setup.heightCm * 0.55 / 100.0);
             auto kp = m_skel->computeKeypoints(identity, QVector3D(0.0f, 0.0f, pelvisZ));
             for (int i = 0; i < kXsensSegmentCount; ++i) {
-                cfg.tposeOriginM[i] = rotateNwuToMvn(kp[i]);
+                cfg.tposeOriginM[i] = rotateNwuToMvn(kp[i], cfg.target);
                 cfg.defAngT[i] = m_skel->defAngFor(i);
             }
         }
@@ -10227,7 +10351,7 @@ void MainWindow::onOpenLiveWizard()
         const float pelvisZ = float(m_setup.heightCm * 0.55 / 100.0);
         auto kp = m_skel->computeKeypoints(identity, QVector3D(0.0f, 0.0f, pelvisZ));
         for (int i = 0; i < kXsensSegmentCount; ++i) {
-            cfg.tposeOriginM[i] = rotateNwuToMvn(kp[i]);
+            cfg.tposeOriginM[i] = rotateNwuToMvn(kp[i], cfg.target);
             cfg.defAngT[i] = m_skel->defAngFor(i);
         }
     }
