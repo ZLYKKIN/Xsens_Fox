@@ -1133,7 +1133,13 @@ private:
 // Live-stream wizard.  Lets the operator pick a target plugin and a port,
 // then start sending live pose data.  Concrete transport lives in the
 // sender class — wired after the plugin protocol research lands.
-enum class LiveTarget { BlenderMVN, XsensLivc };
+// Live-stream target.  Оба варианта используют один и тот же MVN MXTP
+// wire протокол (UE LiveLink plugin = бывший XsensLivc), различие — в
+// координатной системе wire frame:
+//   BlenderMVN       — Y-up MVN frame (плагин делает (y,z,x) ремап).
+//   UnrealLiveLink   — Z-up RH frame (плагин делает Y-flip для UE LH).
+// См. rotateNwuToMvn/conjugateNwuToMvn в main.cpp.
+enum class LiveTarget { BlenderMVN, UnrealLiveLink };
 
 struct LiveSettings {
     LiveTarget    target    = LiveTarget::BlenderMVN;
@@ -1141,11 +1147,25 @@ struct LiveSettings {
     int           port      = 9763;           // MVN default; overridden in UI
     bool          useGloves = false;
     int           fps       = 60;             // 24 / 30 / 60 — UI throttle
+    // FIX (stream polish): gloves frame = 24 header + 63 seg × 32 = 2040 байт,
+    // > 1500 MTU.  На loopback ядро делает IP fragmentation, на LAN risk потери.
+    // Если true — body и fingers идут в два отдельных UDP datagram'а через
+    // MXTP dgCounter splitting (bit 7 = last).  Оставлено в false до verify
+    // что Blender plugin handles multi-datagram reassembly.
+    bool          splitGloveDatagrams = false;
+    // FIX (stream polish): однократный hex-dump первого MXTP02 фрейма в
+    // stdout — для byte-уровня проверки против MVN протокол spec.
+    // Используется в -test режиме для diff против известного хорошего
+    // MVN Animate output.
+    bool          debugDumpFirstFrame = false;
     // T-pose origin position (meters) for each of 23 Xsens body segments.
     // Plugin (LiveLinkMvnSource) кладёт это в FTransform.Scale3D и потом
     // ULiveLinkMvnRetargetAsset делит unrealLength/xsensLength для масштаба
     // позиции pelvis. Если оставить нули — pelvis улетает на ~47x.
     std::array<QVector3D, kXsensSegmentCount> tposeOriginM{};
+    // Default T-pose segment angles per skeleton.defAngFor(i).  Сохраняется
+    // как метаданные на стороне отправителя; в wire не уходит — плагины
+    // строят свои rest poses из MXTP13 origins + bone hierarchy.
     std::array<Quat, kXsensSegmentCount> defAngT{};
 };
 
