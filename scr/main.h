@@ -1133,7 +1133,13 @@ private:
 // Live-stream wizard.  Lets the operator pick a target plugin and a port,
 // then start sending live pose data.  Concrete transport lives in the
 // sender class — wired after the plugin protocol research lands.
-enum class LiveTarget { BlenderMVN, XsensLivc };
+// Live-stream target.  Оба варианта используют один и тот же MVN MXTP
+// wire протокол (UE LiveLink plugin = бывший XsensLivc), различие — в
+// координатной системе wire frame:
+//   BlenderMVN       — Y-up MVN frame (плагин делает (y,z,x) ремап).
+//   UnrealLiveLink   — Z-up RH frame (плагин делает Y-flip для UE LH).
+// См. rotateNwuToMvn/conjugateNwuToMvn в main.cpp.
+enum class LiveTarget { BlenderMVN, UnrealLiveLink };
 
 struct LiveSettings {
     LiveTarget    target    = LiveTarget::BlenderMVN;
@@ -1152,6 +1158,9 @@ struct LiveSettings {
     // ULiveLinkMvnRetargetAsset делит unrealLength/xsensLength для масштаба
     // позиции pelvis. Если оставить нули — pelvis улетает на ~47x.
     std::array<QVector3D, kXsensSegmentCount> tposeOriginM{};
+    // Default T-pose segment angles per skeleton.defAngFor(i).  Сохраняется
+    // как метаданные на стороне отправителя; в wire не уходит — плагины
+    // строят свои rest poses из MXTP13 origins + bone hierarchy.
     std::array<Quat, kXsensSegmentCount> defAngT{};
 };
 

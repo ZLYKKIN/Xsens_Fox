@@ -8705,8 +8705,8 @@ LiveStreamWizard::LiveStreamWizard(QWidget* parent) : QDialog(parent)
     m_target = new QComboBox(this);
     m_target->addItem(QString::fromUtf8("\xF0\x9F\x94\xB6  Blender — MVN Live (MXTP)"),
                       int(LiveTarget::BlenderMVN));
-    m_target->addItem(QString::fromUtf8("\xF0\x9F\x8E\xAE  Unreal Engine — XsensLivc (MXTP)"),
-                      int(LiveTarget::XsensLivc));
+    m_target->addItem(QString::fromUtf8("\xF0\x9F\x8E\xAE  Unreal Engine — LiveLink (MXTP)"),
+                      int(LiveTarget::UnrealLiveLink));
     m_target->setMinimumHeight(34);
 
     m_host = new QComboBox(this);
