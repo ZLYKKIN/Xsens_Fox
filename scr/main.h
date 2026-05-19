@@ -434,6 +434,18 @@ public:
     void setKfPriors(const std::array<Quat, kXsensSegmentCount>& refQuat,
                      const std::array<QVector3D, kXsensSegmentCount>& gyrBiasDegSec);
 
+    // Variant that accepts per-segment orientation uncertainty (degrees).
+    // Used after calibration when different segments have different
+    // confidence (e.g. spinal sensors with ecompass residual 0° vs. leg
+    // sensors fall-back to TRIAD with residual 5-15°).  A tight 2° prior
+    // on a low-confidence segment forces the filter to trust a possibly
+    // wrong calibration and stalls acc/mag corrections; a looser prior
+    // (~10-15°) lets the filter adapt over the first few seconds while
+    // still preserving the priors on the well-conditioned spine.
+    void setKfPriors(const std::array<Quat, kXsensSegmentCount>& refQuat,
+                     const std::array<QVector3D, kXsensSegmentCount>& gyrBiasDegSec,
+                     const std::array<float, kXsensSegmentCount>& orientStdDeg);
+
     SuitPose snapshot() const;
 
     ConnStatus  status()       const;

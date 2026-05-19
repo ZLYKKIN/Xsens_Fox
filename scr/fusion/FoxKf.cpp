@@ -88,6 +88,8 @@ void FoxKf::initialise(const FoxKfSettings& s) {
 
     m_still = false;
     m_stillTicks = 0;
+    m_softStill = false;
+    m_softStillTicks = 0;
     m_lastGyrCorrected = Vec3{0.0f, 0.0f, 0.0f};
     m_lastAcc          = Vec3{0.0f, 0.0f, 0.0f};
     m_magResidLp      = 0.0f;
@@ -165,6 +167,15 @@ void FoxKf::predict(const Vec3& gyrRadPerSec, float dt) {
                        && (std::fabs(aMag - 1.0f) < m_set.zuptAccThresh);
     m_stillTicks = stillNow ? std::min(m_stillTicks + 1, 100000) : 0;
     m_still = (m_stillTicks >= m_set.zuptHoldFrames);
+
+    // Soft-stillness: looser thresholds for "approximately at rest", used
+    // by the skeletal-closure / yaw-anchor second layer in main.cpp to
+    // detect candidate moments for gentle yaw re-alignment without the
+    // strict ZUPT gate that rarely triggers on lightly moving limbs.
+    const bool softStillNow = (wmag < m_set.softOmegaThresh)
+                           && (std::fabs(aMag - 1.0f) < m_set.softAccThresh);
+    m_softStillTicks = softStillNow ? std::min(m_softStillTicks + 1, 100000) : 0;
+    m_softStill = (m_softStillTicks >= m_set.softHoldFrames);
 
     if (!isFiniteQuat(m_q) || !isFiniteVec(m_b) || !isFiniteCov(m_P)) {
         const FoxKfSettings s = m_set;

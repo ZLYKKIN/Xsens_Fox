@@ -832,9 +832,28 @@ static Quat solveS2sBestAxisPermutation(
     bool haveThird,
     double& outResidual)
 {
-    Quat best(1.0, 0.0, 0.0, 0.0);
-    double bestRes = 1e9;
-    for (const auto& qPerm : kCubeRotations) {
+    // Two-phase selection: enumerate all 24 cube-rotation candidates,
+    // then choose the candidate whose residual is within `tieEps` of the
+    // minimum AND whose composed rotation has the smallest absolute angle.
+    //
+    // Rationale: for symmetric measurement geometries (e.g. lower-leg T+N+K
+    // where all three pose-vectors are near-vertical), several cube
+    // permutations yield numerically equivalent residuals — including the
+    // 180°-axis-twisted variant that visually appears as an inverted shin.
+    // The smallest-angle tie-breaker is a soft anatomical prior: a sensor
+    // is statistically more likely to be mounted close to body axes than
+    // arbitrarily flipped, and when the data cannot discriminate we should
+    // pick the simpler explanation.  When the data is not degenerate the
+    // standard residual minimum is preserved unchanged.
+    struct Candidate {
+        Quat   composed;
+        double residualDeg;
+        double composedAngleDeg;
+    };
+    std::array<Candidate, kCubeRotations.size()> cands;
+    double minRes = 1e9;
+    for (size_t k = 0; k < kCubeRotations.size(); ++k) {
+        const Quat& qPerm = kCubeRotations[k];
         const QVector3D v1sr = vec_rotate(v1s, qPerm);
         const QVector3D v2sr = vec_rotate(v2s, qPerm);
         const Quat qCore = triadSolve(v1b, v2b, v1sr, v2sr);
@@ -844,12 +863,26 @@ static Quat solveS2sBestAxisPermutation(
             const double r3 = ecompResidualDeg(qCore, v3b, v3sr);
             r = std::max(r, r3);
         }
-        if (r < bestRes) {
-            const Quat composed = quat_mult(qCore, qPerm).normalized();
-            bestRes = r;
-            best = composed;
+        const Quat composed = quat_mult(qCore, qPerm).normalized();
+        const double absW   = std::min(1.0, std::abs(composed.w));
+        const double angDeg = 2.0 * std::acos(absW) * 180.0 / M_PI;
+        cands[k] = Candidate{ composed, r, angDeg };
+        if (r < minRes) minRes = r;
+    }
+
+    constexpr double tieEpsDeg = 1.5;
+    Quat best(1.0, 0.0, 0.0, 0.0);
+    double bestRes   = 1e9;
+    double bestAngle = 1e9;
+    for (const Candidate& c : cands) {
+        if (c.residualDeg > minRes + tieEpsDeg) continue;
+        if (c.composedAngleDeg < bestAngle - 1e-9) {
+            bestAngle = c.composedAngleDeg;
+            bestRes   = c.residualDeg;
+            best      = c.composed;
         }
     }
+
     outResidual = bestRes;
     if (best.w < 0.0) best = Quat(-best.w, -best.x, -best.y, -best.z);
     return best;
@@ -2738,6 +2771,15 @@ void MocapReceiver::setMagSoftIron(const std::array<std::array<double, 9>, kXsen
 void MocapReceiver::setKfPriors(const std::array<Quat, kXsensSegmentCount>& refQuat,
                                 const std::array<QVector3D, kXsensSegmentCount>& gyrBiasDegSec)
 {
+    std::array<float, kXsensSegmentCount> std2{};
+    std2.fill(2.0f);
+    setKfPriors(refQuat, gyrBiasDegSec, std2);
+}
+
+void MocapReceiver::setKfPriors(const std::array<Quat, kXsensSegmentCount>& refQuat,
+                                const std::array<QVector3D, kXsensSegmentCount>& gyrBiasDegSec,
+                                const std::array<float, kXsensSegmentCount>& orientStdDeg)
+{
     constexpr float kDegToRad = float(M_PI / 180.0);
     QMutexLocker lk(&m_impl->lock);
     for (int i = 0; i < kXsensSegmentCount; ++i) {
@@ -2751,7 +2793,8 @@ void MocapReceiver::setKfPriors(const std::array<Quat, kXsensSegmentCount>& refQ
                 int(std::round(0.3 * std::max(60.0, m_impl->freqHz))));
             m_impl->kf[i].initialise(ks);
         }
-        m_impl->kf[i].setPrior(qf, bRad, /*orientStdDeg*/ 2.0f, /*biasStd*/ 0.1f);
+        const float stdDeg = std::max(2.0f, orientStdDeg[i]);
+        m_impl->kf[i].setPrior(qf, bRad, stdDeg, /*biasStd*/ 0.1f);
         m_impl->kfReady[i] = true;
     }
     testLog("[fusion] FoxKf priors installed for 17 sensored segments "
@@ -5539,9 +5582,6 @@ void NewSessionWizard::onCaptureTick()
             }
         }
 
-        // Install the FoxKf prior NOW (q-prior + gyrBias) instead of letting
-        m_rx->setKfPriors(m_result.calibReference, gyrBias);
-
         auto confidenceScore = [&](int i) -> double {
             const double cRes = confidenceFromResidual(s2sResidual[i], s2sNewMode[i]);
             const double cSamples = std::min(1.0, double(m_accumCountK[i]) / double(kCalibrationSamples));
@@ -5569,6 +5609,21 @@ void NewSessionWizard::onCaptureTick()
             confidence[pr.first]  = std::min(confidence[pr.first],  f);
             confidence[pr.second] = std::min(confidence[pr.second], f);
         }
+
+        // Per-segment orientation prior std: tight for high-confidence
+        // spine sensors (ecompass residual≈0°, conf≈0.85+) so the filter
+        // trusts a known-good alignment, loose for limb sensors with
+        // marginal TRIAD/triple-pose residuals so they can re-converge via
+        // acc/mag updates instead of stalling on a possibly wrong prior.
+        // Mapping: conf 1.0 → 2°, conf 0.0 → 15° (linear in between).
+        std::array<float, kXsensSegmentCount> orientStdPerSeg{};
+        for (int i = 0; i < kXsensSegmentCount; ++i) {
+            const double c  = std::clamp(confidence[i], 0.0, 1.0);
+            const double sd = 2.0 + 13.0 * (1.0 - c);
+            orientStdPerSeg[i] = float(sd);
+        }
+        // Install the FoxKf prior NOW (q-prior + gyrBias + per-seg stdDeg)
+        m_rx->setKfPriors(m_result.calibReference, gyrBias, orientStdPerSeg);
 
         if (m_test) {
             static const char* kModeStrK[3] = {"triad ", "ecomp ", "ident "};
@@ -6096,6 +6151,37 @@ void NewSessionWizard::onCaptureTick()
     }
 
     m_rx->setS2sAlignment(s2s);
+
+    // -----------------------------------------------------------------
+    // Migrate tposeReference from sensor_body frame into segment_N frame.
+    //
+    // The T-pose snapshot was captured BEFORE s2s was installed, so the
+    // stored quaternion is `world ← sensor_body`.  Right after this call,
+    // the live filter output is `world ← segment_body = (world ← sensor) · s2s`.
+    // The K-pose delta logic at line ~5535 expects tposeReference to already
+    // live in the same frame as calibReference (which is captured AFTER
+    // setS2sAlignment).  Without this migration, streamCalibQ ends up
+    // composed of `s2s_K^-1 · s2s_N · s2s_K` instead of identity at T-pose,
+    // and the spine + every downstream FK segment inherits a 90°–180° error.
+    // -----------------------------------------------------------------
+    if (m_result.tposeCaptured) {
+        for (int i = 0; i < kXsensSegmentCount; ++i) {
+            m_result.tposeReference[i] =
+                quat_mult(m_result.tposeReference[i], s2s[i]).normalized();
+            if (m_result.tposeReference[i].w < 0.0) {
+                m_result.tposeReference[i] = Quat(
+                    -m_result.tposeReference[i].w,
+                    -m_result.tposeReference[i].x,
+                    -m_result.tposeReference[i].y,
+                    -m_result.tposeReference[i].z);
+            }
+        }
+        if (m_test) {
+            std::cout << "[calib] tposeReference migrated into segment_N frame "
+                         "via tpose *= s2s_N (post-setS2sAlignment)\n";
+            std::cout.flush();
+        }
+    }
 
     if (m_test) {
         for (int i = 0; i < kXsensSegmentCount; ++i) {
@@ -6822,7 +6908,16 @@ void MocapViewport::updatePose(const std::array<Quat, kXsensSegmentCount>& orien
             }
 
             if (m_locked[i]) {
-                filtered[i] = m_lockQuat[i];
+                // Soft yaw freeze instead of a hard lock to the moment the
+                // segment first went still: slerp the previous output
+                // toward the live orient at a small rate so the bone still
+                // tracks real motion while suppressing the per-frame jitter
+                // that previously read as drift.  The hard lock used to
+                // pin the segment to a possibly mis-calibrated quaternion
+                // and made every recalibration round trip visible as a
+                // sudden snap when stillness broke.
+                const double slowAlpha = std::clamp(dt / 0.40, 0.0, 0.10);
+                filtered[i] = nlerpQ(m_outPrevQ[i], orient[i], slowAlpha);
                 m_unlockBlend[i] = 0.30;
             } else if (m_unlockBlend[i] < 1.0) {
                 filtered[i] = nlerpQ(m_outPrevQ[i], orient[i], m_unlockBlend[i]);
@@ -6852,7 +6947,16 @@ void MocapViewport::updatePose(const std::array<Quat, kXsensSegmentCount>& orien
                 } else if (m_anchorValid[i]) {
                     const Quat current_local = quat_mult(fWorld.inv(), hWorld).normalized();
                     Quat drift = quat_mult(current_local, m_anchorLocal[i].inv()).normalized();
-                    if (drift.w < 0) {
+                    // Continuous-hemisphere relative to the previously stored
+                    // drift instead of a scalar w>=0 flip.  At w=0 the scalar
+                    // canonicalisation reverses the rotation axis, which then
+                    // feeds swing-twist below and produces the visible
+                    // "terminator" snap when the wrist is rotated past 180°
+                    // relative to the forearm.
+                    const Quat& prevDrift = m_driftLocal[i];
+                    const double dotPrev = drift.w*prevDrift.w + drift.x*prevDrift.x
+                                         + drift.y*prevDrift.y + drift.z*prevDrift.z;
+                    if (dotPrev < 0.0) {
                         drift.w = -drift.w; drift.x = -drift.x;
                         drift.y = -drift.y; drift.z = -drift.z;
                     }
@@ -7269,10 +7373,30 @@ struct LiveStreamSender::Impl {
     std::array<Quat, kFingerSegmentsHand> recapLeftGloveQ{};
     std::array<Quat, kFingerSegmentsHand> recapRightGloveQ{};
 
+    // Continuous-hemisphere state for the wire output: every segment / finger
+    // remembers the quaternion sent on the previous frame so the next frame
+    // can be flipped into the same hemisphere when their dot product would
+    // otherwise go negative.  Scalar w>=0 canonicalisation alone causes a
+    // visible 180° "terminator" snap when w crosses zero (e.g. full wrist
+    // rotation); continuous-hemisphere matches the shortest-path convention
+    // every MVN consumer (Blender / Unreal LiveLink) already assumes.
+    std::array<Quat, kXsensSegmentCount> lastSentBodyQ{};
+    std::array<Quat, kFingerSegmentsHand> lastSentLeftGloveQ{};
+    std::array<Quat, kFingerSegmentsHand> lastSentRightGloveQ{};
+    std::array<bool, kXsensSegmentCount> hasLastSentBodyQ{};
+    std::array<bool, kFingerSegmentsHand> hasLastSentLeftGloveQ{};
+    std::array<bool, kFingerSegmentsHand> hasLastSentRightGloveQ{};
+
     Impl() {
         for (auto& q : streamCalibQ)     q = Quat(1, 0, 0, 0);
         for (auto& q : leftGloveCalibQ)  q = Quat(1, 0, 0, 0);
         for (auto& q : rightGloveCalibQ) q = Quat(1, 0, 0, 0);
+        for (auto& q : lastSentBodyQ)       q = Quat(1, 0, 0, 0);
+        for (auto& q : lastSentLeftGloveQ)  q = Quat(1, 0, 0, 0);
+        for (auto& q : lastSentRightGloveQ) q = Quat(1, 0, 0, 0);
+        hasLastSentBodyQ.fill(false);
+        hasLastSentLeftGloveQ.fill(false);
+        hasLastSentRightGloveQ.fill(false);
     }
 
     void maybeRetransmitHandshake() {
@@ -7480,7 +7604,20 @@ void LiveStreamSender::pushFrame(quint32 sample,
         appendFloatBE(body, p.y());
         appendFloatBE(body, p.z());
         Quat q = quat_mult(m_impl->streamCalibQ[i], segQuat[i]).normalized();
-        if (q.w < 0.0) { q.w = -q.w; q.x = -q.x; q.y = -q.y; q.z = -q.z; }
+        // Continuous-hemisphere flip: align to previous wire-sent quaternion
+        // so consumer-side slerps take the short path through w=0.  Bootstrap
+        // first frame with scalar w>=0 canonicalisation.
+        if (m_impl->hasLastSentBodyQ[i]) {
+            const Quat& prev = m_impl->lastSentBodyQ[i];
+            const double d = q.w*prev.w + q.x*prev.x + q.y*prev.y + q.z*prev.z;
+            if (d < 0.0) {
+                q.w = -q.w; q.x = -q.x; q.y = -q.y; q.z = -q.z;
+            }
+        } else {
+            if (q.w < 0.0) { q.w = -q.w; q.x = -q.x; q.y = -q.y; q.z = -q.z; }
+            m_impl->hasLastSentBodyQ[i] = true;
+        }
+        m_impl->lastSentBodyQ[i] = q;
         appendFloatBE(body, float(q.w));
         appendFloatBE(body, float(q.x));
         appendFloatBE(body, float(q.y));
@@ -7603,7 +7740,17 @@ void LiveStreamSender::pushFrameWithGloves(quint32 sample,
         appendFloatBE(body, p.y());
         appendFloatBE(body, p.z());
         Quat q = quat_mult(m_impl->streamCalibQ[i], segQuat[i]).normalized();
-        if (q.w < 0.0) { q.w = -q.w; q.x = -q.x; q.y = -q.y; q.z = -q.z; }
+        if (m_impl->hasLastSentBodyQ[i]) {
+            const Quat& prev = m_impl->lastSentBodyQ[i];
+            const double d = q.w*prev.w + q.x*prev.x + q.y*prev.y + q.z*prev.z;
+            if (d < 0.0) {
+                q.w = -q.w; q.x = -q.x; q.y = -q.y; q.z = -q.z;
+            }
+        } else {
+            if (q.w < 0.0) { q.w = -q.w; q.x = -q.x; q.y = -q.y; q.z = -q.z; }
+            m_impl->hasLastSentBodyQ[i] = true;
+        }
+        m_impl->lastSentBodyQ[i] = q;
         appendFloatBE(body, float(q.w));
         appendFloatBE(body, float(q.x));
         appendFloatBE(body, float(q.y));
@@ -7632,33 +7779,46 @@ void LiveStreamSender::pushFrameWithGloves(quint32 sample,
                           const QVector3D& wristWorldPos,
                           const std::array<Quat, kFingerSegmentsHand>& qArr,
                           const std::array<QVector3D, kFingerSegmentsHand>& pArr,
-                          const std::array<Quat, kFingerSegmentsHand>& calibArr) {
+                          const std::array<Quat, kFingerSegmentsHand>& calibArr,
+                          bool isLeft) {
         appendInt32BE(body, segmentIdBase + slot);
         const int mIdx = kXsensSlotToManus[slot];
+        std::array<Quat, kFingerSegmentsHand>& lastArr =
+            isLeft ? m_impl->lastSentLeftGloveQ : m_impl->lastSentRightGloveQ;
+        std::array<bool, kFingerSegmentsHand>& hasLastArr =
+            isLeft ? m_impl->hasLastSentLeftGloveQ : m_impl->hasLastSentRightGloveQ;
+        Quat q;
         if (mIdx < 0) {
             const QVector3D p = wristWorldPos;
             appendFloatBE(body, p.x()); appendFloatBE(body, p.y()); appendFloatBE(body, p.z());
-            Quat q = quat_mult(m_impl->streamCalibQ[handSeg], segQuat[handSeg]).normalized();
-            if (q.w < 0.0) { q.w = -q.w; q.x = -q.x; q.y = -q.y; q.z = -q.z; }
-            appendFloatBE(body, float(q.w));
-            appendFloatBE(body, float(q.x));
-            appendFloatBE(body, float(q.y));
-            appendFloatBE(body, float(q.z));
+            q = quat_mult(m_impl->streamCalibQ[handSeg], segQuat[handSeg]).normalized();
         } else {
             const QVector3D p = pArr[mIdx];
             appendFloatBE(body, p.x()); appendFloatBE(body, p.y()); appendFloatBE(body, p.z());
-            Quat q = quat_mult(calibArr[mIdx], qArr[mIdx]).normalized();
-            if (q.w < 0.0) { q.w = -q.w; q.x = -q.x; q.y = -q.y; q.z = -q.z; }
-            appendFloatBE(body, float(q.w));
-            appendFloatBE(body, float(q.x));
-            appendFloatBE(body, float(q.y));
-            appendFloatBE(body, float(q.z));
+            q = quat_mult(calibArr[mIdx], qArr[mIdx]).normalized();
         }
+        // Continuous-hemisphere: align finger quaternion to its last-sent
+        // value so per-finger streams are also free of the w-crossing snap.
+        if (hasLastArr[slot]) {
+            const Quat& prev = lastArr[slot];
+            const double d = q.w*prev.w + q.x*prev.x + q.y*prev.y + q.z*prev.z;
+            if (d < 0.0) {
+                q.w = -q.w; q.x = -q.x; q.y = -q.y; q.z = -q.z;
+            }
+        } else {
+            if (q.w < 0.0) { q.w = -q.w; q.x = -q.x; q.y = -q.y; q.z = -q.z; }
+            hasLastArr[slot] = true;
+        }
+        lastArr[slot] = q;
+        appendFloatBE(body, float(q.w));
+        appendFloatBE(body, float(q.x));
+        appendFloatBE(body, float(q.y));
+        appendFloatBE(body, float(q.z));
     };
     for (int slot = 0; slot < kFingerSegmentsHand; ++slot)
-        emitFinger(slot, 28, SEG_LHand, wristPosL, leftGloveQ, leftGloveP, m_impl->leftGloveCalibQ);
+        emitFinger(slot, 28, SEG_LHand, wristPosL, leftGloveQ, leftGloveP, m_impl->leftGloveCalibQ, true);
     for (int slot = 0; slot < kFingerSegmentsHand; ++slot)
-        emitFinger(slot, 48, SEG_RHand, wristPosR, rightGloveQ, rightGloveP, m_impl->rightGloveCalibQ);
+        emitFinger(slot, 48, SEG_RHand, wristPosR, rightGloveQ, rightGloveP, m_impl->rightGloveCalibQ, false);
     QByteArray hdr = buildMxtpHeader("02", wireSample, 0x80,
                                      quint8(bodyCount + fingerCount),
                                      ft, bodyCount, fingerCount);
@@ -8960,7 +9120,14 @@ void MainWindow::onRenderTick()
     s_haveOut[SEG_L5] = s_haveOut[SEG_L3] = s_haveOut[SEG_T12] =
     s_haveOut[SEG_Neck] = s_haveOut[SEG_RToe] = s_haveOut[SEG_LToe] = true;
 
-    m_viewport->updatePose(q, QVector3D(0.0f, 0.0f, 0.0f), f.orientStdDeg);
+    // Pass the standing pelvis height as the FK root so the viewport's
+    // skeleton stands on the floor; locomotion offset (which is a delta
+    // around this baseline) is then added inside drawSkeleton.  Without
+    // this the figure sat with pelvis at z=0 and feet at z≈-0.96 m
+    // (clipped 10 cm lift cap left the legs buried under the grid).
+    const float pelvisZ_root = float(m_setup.heightCm * 0.55 / 100.0);
+    m_viewport->updatePose(q, QVector3D(0.0f, 0.0f, pelvisZ_root),
+                           f.orientStdDeg);
     const auto& qOut = m_viewport->filteredOrient();
 
     const float sceneYawF = m_viewport->sceneYaw();
@@ -9004,7 +9171,13 @@ void MainWindow::onRenderTick()
             const float pelvisZ_stream = float(m_setup.heightCm * 0.55 / 100.0);
             auto kp = m_skel->computeKeypoints(qOut, QVector3D(0.0f, 0.0f, pelvisZ_stream));
             const QVector3D off = m_viewport->lastLocoOffset();
-            for (auto& p : kp) p += QVector3D(off.x(), off.y(), 0.0f);
+            // Apply the FULL 3D locomotion offset, including Z.  Stripping the
+            // vertical component pinned the streamed pelvis Z to 0.55·height
+            // for every pose, so consumers (Blender/Unreal) never saw the
+            // squat / vertical bob / sit / lie height delta.  The min-Z
+            // safety lift below keeps the figure above the floor when the
+            // pose dips slightly under it.
+            for (auto& p : kp) p += off;
             float minZ = kp[0].z();
             for (const auto& p : kp) if (p.z() < minZ) minZ = p.z();
             if (minZ < -0.02f) {
