@@ -8097,22 +8097,61 @@ static void appendInt32BE(QByteArray& pkt, qint32 v)
     pkt.append(reinterpret_cast<const char*>(&be), 4);
 }
 
-// NWU (X=fwd, Y=left, Z=up, RH) -> MVN (Y=fwd, X=right, Z=up, RH).
-// Plugin's QuaternionDatagram.cpp:27 явно говорит "Z-Up, right-handed",
-// плагинный Y-flip в SegData::Set ожидает MVN convention на входе.  hipose
-// pipeline native-NWU (см. main.cpp:51,504,2836), значит между фреймами
-// нужен similarity Rz(+90°):
-//   q_mvn = Rz(+90°) * q_nwu * Rz(-90°)
-//   p_mvn = Rz(+90°) * p_nwu  =>  (x,y,z) -> (-y, x, z)
-// Для quat-компонент при оси-Z similarity:
-//   (w, x, y, z)_nwu  ->  (w, -y, x, z)_mvn
-static Quat conjugateNwuToMvn(const Quat& q)
-{
-    return q;
+// ============================================================================
+// Streaming coordinate conversion: NWU → MVN wire frame.
+//
+// Наш C++ pipeline нативно работает в NWU (X=forward, Y=left, Z=up, RH).
+// Плагины ожидают MVN wire frame, и формат отличается по плагинам:
+//
+// 1. Blender MVN add-on (Plugins/MVNBlenderPlugin-main/pose.py:357-365):
+//    плагин делает (y, z, x) ремап считая что wire = **Y-up MVN**
+//    (X=right, Y=up, Z=forward, RH) — это формат MVN Animate.  Комментарий
+//    в pose.py:361 явно говорит «Fox sends Z-up NWU; that mismatch is one
+//    suspect for the 'wrong starting pose'».  То есть для Blender нужна
+//    реальная конверсия NWU → Y-up MVN.
+//
+//    NWU → Y-up MVN:
+//        new_x = -old_y   (NWU left  → MVN -right = MVN right inverted)
+//        new_y = +old_z   (NWU up    → MVN up)
+//        new_z = +old_x   (NWU fwd   → MVN fwd)
+//    Это axis-cycling rotation about (1,1,1)/√3 на 120° (=2π/3).
+//    Кватернион:  q_rot = (cos 60°, sin 60° · axis) = (0.5, 0.5, 0.5, 0.5).
+//    q_mvn = q_rot * q_nwu * q_rot^(-1).
+//
+// 2. UE LiveLink plugin (Plugins/XsensLivc/.../LiveLinkMvnSource.h:46-55):
+//    плагин делает FVector(x, -y, z)·100 и FQuat(-qi, +qj, -qk, +qw).
+//    Это conversion из **Z-up RH** в UE Z-up LH.  То есть UE ожидает wire
+//    = Z-up RH, что совпадает с нашим NWU (axes идентичны, оба Z-up RH).
+//    Конверсия → identity.
+//
+// Селектируем по cfg.target.
+// ============================================================================
+
+namespace {
+constexpr Quat kNwuToYupMvn{0.5, 0.5, 0.5, 0.5};  // axis (1,1,1)/√3, 120°
+
+inline QVector3D nwuToYupMvn(const QVector3D& p) {
+    // (x, y, z)_nwu  →  (-y, z, x)_mvn
+    return QVector3D(-p.y(), p.z(), p.x());
 }
-static QVector3D rotateNwuToMvn(const QVector3D& p)
+inline Quat nwuToYupMvnQ(const Quat& q) {
+    // similarity transform: q_mvn = q_rot · q_nwu · q_rot^(-1)
+    return quat_mult(quat_mult(kNwuToYupMvn, q),
+                     kNwuToYupMvn.inv()).normalized();
+}
+}  // namespace
+
+static QVector3D rotateNwuToMvn(const QVector3D& p, LiveTarget target)
 {
-    return p;
+    if (target == LiveTarget::BlenderMVN)
+        return nwuToYupMvn(p);
+    return p;  // UE LiveLink: NWU is already its expected Z-up RH wire.
+}
+static Quat conjugateNwuToMvn(const Quat& q, LiveTarget target)
+{
+    if (target == LiveTarget::BlenderMVN)
+        return nwuToYupMvnQ(q);
+    return q;  // UE LiveLink: identity.
 }
 
 struct LiveStreamSender::Impl {
@@ -8281,18 +8320,19 @@ void LiveStreamSender::pushFrame(quint32 sample,
 
     m_impl->maybeRetransmitHandshake();
     const quint32 ft = quint32(m_impl->timer.elapsed());
+    const LiveTarget target = m_cfg.target;
     QByteArray body;
     for (int i = 0; i < kXsensSegmentCount; ++i) {
         appendInt32BE(body, i + 1);
         const QVector3D pRaw = (i == SEG_Pelvis)
                 ? (pelvisPos - m_impl->baselinePelvisPos)
                 : QVector3D(0, 0, 0);
-        const QVector3D p = rotateNwuToMvn(pRaw);
+        const QVector3D p = rotateNwuToMvn(pRaw, target);
         appendFloatBE(body, p.x());
         appendFloatBE(body, p.y());
         appendFloatBE(body, p.z());
         const Quat qDelta = quat_mult(segQuat[i], m_impl->baselineBodyQ[i].inv()).normalized();
-        const Quat q = conjugateNwuToMvn(qDelta);
+        const Quat q = conjugateNwuToMvn(qDelta, target);
         appendFloatBE(body, float(q.w));
         appendFloatBE(body, float(q.x));
         appendFloatBE(body, float(q.y));
@@ -8345,18 +8385,19 @@ void LiveStreamSender::pushFrameWithGloves(quint32 sample,
     const quint32 ft = quint32(m_impl->timer.elapsed());
     const quint8  bodyCount = quint8(kXsensSegmentCount);
     const quint8  fingerCount = quint8(2 * kFingerSegmentsHand);
+    const LiveTarget target = m_cfg.target;
     QByteArray body;
     for (int i = 0; i < kXsensSegmentCount; ++i) {
         appendInt32BE(body, i + 1);
         const QVector3D pRaw = (i == SEG_Pelvis)
                 ? (pelvisPos - m_impl->baselinePelvisPos)
                 : QVector3D(0, 0, 0);
-        const QVector3D p = rotateNwuToMvn(pRaw);
+        const QVector3D p = rotateNwuToMvn(pRaw, target);
         appendFloatBE(body, p.x());
         appendFloatBE(body, p.y());
         appendFloatBE(body, p.z());
         const Quat qDelta = quat_mult(segQuat[i], m_impl->baselineBodyQ[i].inv()).normalized();
-        const Quat q = conjugateNwuToMvn(qDelta);
+        const Quat q = conjugateNwuToMvn(qDelta, target);
         appendFloatBE(body, float(q.w));
         appendFloatBE(body, float(q.x));
         appendFloatBE(body, float(q.y));
@@ -8378,16 +8419,16 @@ void LiveStreamSender::pushFrameWithGloves(quint32 sample,
         if (mIdx < 0) {
             appendFloatBE(body, 0.f); appendFloatBE(body, 0.f); appendFloatBE(body, 0.f);
             const Quat qDelta = quat_mult(segQuat[handSeg], m_impl->baselineBodyQ[handSeg].inv()).normalized();
-            const Quat q = conjugateNwuToMvn(qDelta);
+            const Quat q = conjugateNwuToMvn(qDelta, target);
             appendFloatBE(body, float(q.w));
             appendFloatBE(body, float(q.x));
             appendFloatBE(body, float(q.y));
             appendFloatBE(body, float(q.z));
         } else {
-            const QVector3D p = rotateNwuToMvn(pArr[mIdx]);
+            const QVector3D p = rotateNwuToMvn(pArr[mIdx], target);
             appendFloatBE(body, p.x()); appendFloatBE(body, p.y()); appendFloatBE(body, p.z());
             const Quat qDelta = quat_mult(qArr[mIdx], baseArr[mIdx].inv()).normalized();
-            const Quat q = conjugateNwuToMvn(qDelta);
+            const Quat q = conjugateNwuToMvn(qDelta, target);
             appendFloatBE(body, float(q.w));
             appendFloatBE(body, float(q.x));
             appendFloatBE(body, float(q.y));
@@ -9407,7 +9448,7 @@ MainWindow::MainWindow(MocapReceiver* rx,
             const float pelvisZ = float(m_setup.heightCm * 0.55 / 100.0);
             auto kp = m_skel->computeKeypoints(identity, QVector3D(0.0f, 0.0f, pelvisZ));
             for (int i = 0; i < kXsensSegmentCount; ++i) {
-                cfg.tposeOriginM[i] = rotateNwuToMvn(kp[i]);
+                cfg.tposeOriginM[i] = rotateNwuToMvn(kp[i], cfg.target);
                 cfg.defAngT[i] = m_skel->defAngFor(i);
             }
         }
@@ -10227,7 +10268,7 @@ void MainWindow::onOpenLiveWizard()
         const float pelvisZ = float(m_setup.heightCm * 0.55 / 100.0);
         auto kp = m_skel->computeKeypoints(identity, QVector3D(0.0f, 0.0f, pelvisZ));
         for (int i = 0; i < kXsensSegmentCount; ++i) {
-            cfg.tposeOriginM[i] = rotateNwuToMvn(kp[i]);
+            cfg.tposeOriginM[i] = rotateNwuToMvn(kp[i], cfg.target);
             cfg.defAngT[i] = m_skel->defAngFor(i);
         }
     }
