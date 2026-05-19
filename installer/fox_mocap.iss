@@ -43,9 +43,9 @@ AppPublisher={#MyAppPublisher}
 AppPublisherURL={#MyAppURL}
 AppSupportURL={#MyAppSupportURL}
 AppUpdatesURL={#MyAppUpdatesURL}
-VersionInfoVersion=0.0.0.0
+VersionInfoVersion=0.1.0.0
 VersionInfoProductName={#MyAppName}
-VersionInfoProductVersion={#AppVersion}
+VersionInfoProductVersion=0.1.0.0
 VersionInfoCompany={#MyAppPublisher}
 
 DefaultDirName={autopf}\{#MyAppName}
