@@ -83,3 +83,6 @@ tests/python/__pycache__/
 # Python bytecode (e.g. from running tools/diff_streams.py)
 __pycache__/
 *.pyc
+
+# Git bundle deliverables — transient artefacts, not source
+*.bundle
