@@ -1371,6 +1371,17 @@ void foxLocoResetStatics() { /* no-op — state is now per-instance */ }
         m_confRFrozenForRoll = m_confLFrozenForRoll = false;
         m_confRFrozenValue = m_confLFrozenValue = 0.0;
 
+        // FIX (heel/toe + airborne reset)
+        m_footPitchZR = m_footPitchZL = 0.0;
+        m_contactBlendR = m_contactBlendL = 0.0;
+        m_heelLiftConfR = m_heelLiftConfL = 0.0;
+        m_heelLiftR = m_heelLiftL = false;
+        m_pelvisZVel = 0.0;
+        m_pelvisZPrev = 0.0;
+        m_havePelvisZPrev = false;
+        m_airborneTicks = 0;
+        m_landedTicks = 0;
+
         foxLocoResetStatics();
     }
 
@@ -1518,6 +1529,34 @@ QVector3D LocomotionSolver::update(const Quat& qR,
                        ? std::min(m_lowZTicksR + 1, 4096) : 0;
         m_lowZTicksL = (fkL.z() - fkMinZ < float(m_lowZBandM))
                        ? std::min(m_lowZTicksL + 1, 4096) : 0;
+
+        // FIX (heel/toe contact discrimination): отслеживаем sin(pitch)
+        // обеих стоп.  defAngFor(SEG_RFoot/LFoot)==identity → qR/qL уже
+        // совпадает с world quat стопы; X = vec_rotate((1,0,0), q) =
+        // (1-2(y²+z²), 2(xy+wz), 2(xz-wy)).  Z-компонента = 2*(qx*qz - qw*qy).
+        //   z > 0  → ball выше heel (носок поднят, опора на пятке)
+        //   z < 0  → ball ниже heel (пятка поднята, опора на мыске)
+        const double pzR = 2.0 * (qR.x * qR.z - qR.w * qR.y);
+        const double pzL = 2.0 * (qL.x * qL.z - qL.w * qL.y);
+        m_footPitchZR = 0.70 * m_footPitchZR + 0.30 * pzR;
+        m_footPitchZL = 0.70 * m_footPitchZL + 0.30 * pzL;
+
+        // FIX (squat heel-lift): smoothstep confidence в полосе 21°..33°
+        // (sin: 0.36..0.55).  Активируется только в Squat/Sit — в Stand
+        // pitch такой величины встречается на ходу (heel strike) и не
+        // должен переключать contact-point.  LP α=0.10 (333ms) — heel-lift
+        // в приседе обычно держится секундами; быстрая фильтрация уберёт
+        // ложные пики.
+        auto sstep = [](double x){ x = std::clamp(x,0.0,1.0); return x*x*(3.0-2.0*x); };
+        const bool poseAllowsHeelLift = (m_pose == PoseSquat || m_pose == PoseSit);
+        const double hlR_raw = poseAllowsHeelLift
+                ? sstep((-m_footPitchZR - 0.36) / 0.19) : 0.0;
+        const double hlL_raw = poseAllowsHeelLift
+                ? sstep((-m_footPitchZL - 0.36) / 0.19) : 0.0;
+        m_heelLiftConfR = 0.90 * m_heelLiftConfR + 0.10 * hlR_raw;
+        m_heelLiftConfL = 0.90 * m_heelLiftConfL + 0.10 * hlL_raw;
+        m_heelLiftR = (m_heelLiftConfR > 0.5);
+        m_heelLiftL = (m_heelLiftConfL > 0.5);
 
         // FIX issue 10 + terminator smoothing: rolling-foot detector.
         // Стопа быстро вращается (|angV| ~2 rad/s) при почти стоячем
@@ -7379,6 +7418,7 @@ MocapViewport::MocapViewport(const ActorConfig& actor, const std::string& pose,
 {
     m_skel = std::make_unique<SkeletonXsens>(actor, pose);
     m_loco.setActorHeight(actor.heightCm / 100.0);
+    m_loco.setFootLength(actor.footLengthCm / 100.0);
     setFocusPolicy(Qt::StrongFocus);
     setMouseTracking(true);
 }
@@ -7388,6 +7428,7 @@ void MocapViewport::setPose(const std::string& pose)
     m_skel = std::make_unique<SkeletonXsens>(m_actor, pose);
     m_loco.reset();           // fresh calibration = fresh anchor
     m_loco.setActorHeight(m_actor.heightCm / 100.0);
+    m_loco.setFootLength(m_actor.footLengthCm / 100.0);
     update();
 }
 
@@ -7408,6 +7449,7 @@ void MocapViewport::setActor(const ActorConfig& actor)
         m_skel = std::make_unique<SkeletonXsens>(actor, pose);
     }
     m_loco.setActorHeight(actor.heightCm / 100.0);
+    m_loco.setFootLength(actor.footLengthCm / 100.0);
     update();
 }
 
@@ -7435,6 +7477,33 @@ void MocapViewport::setTposeHandAnchor(const Quat& fR, const Quat& hR,
     m_tposeHandAnchorValid   = true;
     m_driftLocal[SEG_RHand]  = Quat(1, 0, 0, 0);
     m_driftLocal[SEG_LHand]  = Quat(1, 0, 0, 0);
+}
+
+// FIX (T-pose foot direction reference): pin foot-yaw anchor from T-pose
+// calibration.  В T-pose обе стопы смотрят вперёд по +X.  Сохраняем
+// foot-quat в pelvis-yaw frame как ground truth.  Это лучше анкора по
+// lowerLeg (используемого в FIX issue 7), потому что lowerLeg меняется
+// при flex'е колена 30-60° → искажает yaw reference.  Pelvis-yaw frame
+// стабилен — меняется только при повороте таза.
+//
+// defAngFor(SEG_Pelvis) != identity (в T-pose это Rot_Y(-π/2)), поэтому
+// сначала переводим raw pelvis sensor в world, потом извлекаем yaw.
+// Аналогично для стоп — но defAngFor(SEG_RFoot/LFoot) == identity, так что
+// raw sensor quat = world quat.
+void MocapViewport::setTposeFootAnchor(const Quat& pelvis_T,
+                                       const Quat& rFoot_T, const Quat& lFoot_T)
+{
+    const Quat dA_pel = m_skel ? m_skel->defAngFor(SEG_Pelvis) : Quat(1, 0, 0, 0);
+    const Quat dA_rf  = m_skel ? m_skel->defAngFor(SEG_RFoot)  : Quat(1, 0, 0, 0);
+    const Quat dA_lf  = m_skel ? m_skel->defAngFor(SEG_LFoot)  : Quat(1, 0, 0, 0);
+    const Quat pelvisWorld = quat_mult(pelvis_T, dA_pel).normalized();
+    const Quat rFootWorld  = quat_mult(rFoot_T,  dA_rf).normalized();
+    const Quat lFootWorld  = quat_mult(lFoot_T,  dA_lf).normalized();
+    const Quat pelvisYaw    = yaw_only_quat(pelvisWorld);
+    const Quat pelvisYawInv = pelvisYaw.inv();
+    m_tposeFootRefPelR = quat_mult(pelvisYawInv, rFootWorld).normalized();
+    m_tposeFootRefPelL = quat_mult(pelvisYawInv, lFootWorld).normalized();
+    m_tposeFootAnchorValid = true;
 }
 
 void MocapViewport::updatePose(const std::array<Quat, kXsensSegmentCount>& orient,
@@ -9535,6 +9604,15 @@ MainWindow::MainWindow(MocapReceiver* rx,
                 m_setup.tposeReference[SEG_RHand],
                 m_setup.tposeReference[SEG_LForearm],
                 m_setup.tposeReference[SEG_LHand]);
+            // FIX (T-pose foot direction reference): pin foot-yaw anchor.
+            // В T-pose стопы смотрят вперёд по +X в pelvis-yaw-frame;
+            // anchor берётся из 500-кадрового averaging T-позы.  После
+            // этого foot-yaw drift correction использует pelvis-yaw как
+            // reference (не lowerLeg, который меняется при flex'е колена).
+            m_viewport->setTposeFootAnchor(
+                m_setup.tposeReference[SEG_Pelvis],
+                m_setup.tposeReference[SEG_RFoot],
+                m_setup.tposeReference[SEG_LFoot]);
         }
 
         // FIX (gloves polish): установить per-actor finger baseline,
