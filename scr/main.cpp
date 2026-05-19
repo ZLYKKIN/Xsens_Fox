@@ -402,36 +402,52 @@ void SkeletonXsens::buildLengths(const ActorConfig& actor)
         const double defLegM = 0.491 * h;
         legScale = (defLegM > 1e-6) ? (legPerSideM / defLegM) : 1.0;
     }
+    // FIX issue 5: hip width / shoulder width / trunk length.
+    // hip stub L[17]/L[22] = pelvis → hip joint (полширины таза).
+    // scapular stub L[7]/L[16] = T8 → плечевой сустав (полширины плеч).
+    // trunk segments L[0..5] = pelvis→neck (6 vertebrae).
+    const double pelvisHalfM = (actor.hipWidthCm > 0.0)
+        ? std::max(0.05, actor.hipWidthCm / 200.0)
+        : 0.10 * trunkScale;
+    const double scapHalfM = (actor.shoulderWidthCm > 0.0)
+        ? std::max(0.05, actor.shoulderWidthCm / 200.0)
+        : 0.05 * trunkScale;
+    // Дефолтная сумма длин spine + head = 0.55h (по hipose).  Если actor
+    // ввёл свою длину туловища, нормируем 6 сегментов spine по этому
+    // значению (head→top-of-head не масштабируется — это часть черепа).
+    const double trunkSegScale = (actor.trunkLengthCm > 0.0)
+        ? std::max(0.30, actor.trunkLengthCm / 100.0) / (0.55 * h)
+        : trunkScale;
 
     const std::array<float, kXsensSegmentCountWithDummies> L = {
         // ----- spine + head -----
-        float(0.10 * trunkScale),   // pelvis → L5
-        float(0.10 * trunkScale),   // L5 → L3
-        float(0.10 * trunkScale),   // L3 → T12
-        float(0.15 * trunkScale),   // T12 → T8
-        float(0.10 * trunkScale),   // T8 → neck
-        float(0.05 * trunkScale),   // neck → head
-        float(0.130 * h),           // head → top-of-head (vertex)
+        float(0.10 * trunkSegScale),  // pelvis → L5
+        float(0.10 * trunkSegScale),  // L5 → L3
+        float(0.10 * trunkSegScale),  // L3 → T12
+        float(0.15 * trunkSegScale),  // T12 → T8
+        float(0.10 * trunkSegScale),  // T8 → neck
+        float(0.05 * trunkSegScale),  // neck → head
+        float(0.130 * h),             // head → top-of-head (vertex)
         // ----- right arm -----
-        float(0.05 * trunkScale),
+        float(scapHalfM),             // T8 → R-scapular stub
         float(0.10 * trunkScale),
         float(0.186 * h * armScale),
         float(0.146 * h * armScale),
         float(0.108 * h * armScale),
         // ----- left arm (mirror) -----
-        float(0.05 * trunkScale),
+        float(scapHalfM),             // T8 → L-scapular stub
         float(0.10 * trunkScale),
         float(0.186 * h * armScale),
         float(0.146 * h * armScale),
         float(0.108 * h * armScale),
         // ----- right leg -----
-        float(0.10 * trunkScale),   // pelvis stub  (pelvis → hip joint)
-        float(0.245 * h * legScale),// upper leg    (hip    → knee)
-        float(0.246 * h * legScale),// lower leg    (knee   → ankle)
-        float(0.60  * fl),          // foot (heel → ball, ~60 % of foot length)
-        float(0.40  * fl),          // toe  (ball → tip,  ~40 % of foot length)
+        float(pelvisHalfM),           // pelvis stub  (pelvis → hip joint)
+        float(0.245 * h * legScale),  // upper leg    (hip    → knee)
+        float(0.246 * h * legScale),  // lower leg    (knee   → ankle)
+        float(0.60  * fl),            // foot (heel → ball, ~60 % of foot length)
+        float(0.40  * fl),            // toe  (ball → tip,  ~40 % of foot length)
         // ----- left leg (mirror) -----
-        float(0.10 * trunkScale),
+        float(pelvisHalfM),
         float(0.245 * h * legScale),
         float(0.246 * h * legScale),
         float(0.60  * fl),
@@ -1336,6 +1352,10 @@ void foxLocoResetStatics() { /* no-op — state is now per-instance */ }
         m_pose = PoseUnknown;
         m_poseTicks = 0;
         m_zuptTicks = 0;
+        m_lowZTicksR = m_lowZTicksL = 0;
+        m_zSnapBlendTicks = 0;
+        m_confRFrozenForRoll = m_confLFrozenForRoll = false;
+        m_confRFrozenValue = m_confLFrozenValue = 0.0;
 
         foxLocoResetStatics();
     }
@@ -1456,6 +1476,25 @@ QVector3D LocomotionSolver::update(const Quat& qR,
 
         const float fkMinZ = std::min(fkR.z(), fkL.z());
 
+        // FIX issue 9: low-Z счётчик нужен для мягкого блёнда при посадке.
+        // PoseSquat-commit форсит world.z=0, но только если стопа реально
+        // была низко несколько кадров подряд — иначе блёндим.
+        m_lowZTicksR = (fkR.z() - fkMinZ < float(m_lowZBandM))
+                       ? std::min(m_lowZTicksR + 1, 4096) : 0;
+        m_lowZTicksL = (fkL.z() - fkMinZ < float(m_lowZBandM))
+                       ? std::min(m_lowZTicksL + 1, 4096) : 0;
+
+        // FIX issue 10: rolling-foot detector.  Стопа быстро вращается
+        // (|angV| > 2 rad/s) при почти стоячем FK-XY (range<3cm) =
+        // перекат мыска-на-мысок.  В таком состоянии не двигаем якорь
+        // и не меняем committed/released флаги — иначе скелет смещается.
+        const float rangeR = xyRange(m_rFKXY);
+        const float rangeL = xyRange(m_lFKXY);
+        const bool rollingR = (m_rAngV > m_rollAngVThresh)
+                           && (rangeR < float(m_rollXYRangeMax));
+        const bool rollingL = (m_lAngV > m_rollAngVThresh)
+                           && (rangeL < float(m_rollXYRangeMax));
+
         // 5. Initialisation on first frame.
         if (!m_initialised) {
             // Put pelvis at the pose-expected world height; anchor feet at
@@ -1506,8 +1545,28 @@ QVector3D LocomotionSolver::update(const Quat& qR,
             const double r = (raw > prev) ? rise : fall;
             return (1.0 - r) * prev + r * raw;
         };
-        m_confR = smooth(m_confR, rawCR, m_confRiseRate, m_confFallRate);
-        m_confL = smooth(m_confL, rawCL, m_confRiseRate, m_confFallRate);
+        const double newConfR = smooth(m_confR, rawCR, m_confRiseRate, m_confFallRate);
+        const double newConfL = smooth(m_confL, rawCL, m_confRiseRate, m_confFallRate);
+
+        // FIX issue 10: гистерезис.  Если стопа сейчас в режиме roll AND
+        // новая conf падает в полосу вокруг commit/release порогов —
+        // удерживаем conf на «замороженном» значении, чтобы не дрейфовать
+        // через порог.  Когда rolling кончился — расшифровываемся.
+        auto applyRollHyst = [&](bool rolling, double oldConf, double newConf,
+                                 bool& frozen, double& frozenVal) -> double {
+            const double bandLo = m_confRelease - m_confHystBand;
+            const double bandHi = m_confCommit  + m_confHystBand;
+            if (rolling && newConf >= bandLo && newConf <= bandHi) {
+                if (!frozen) { frozen = true; frozenVal = oldConf; }
+                return frozenVal;
+            }
+            frozen = false;
+            return newConf;
+        };
+        m_confR = applyRollHyst(rollingR, m_confR, newConfR,
+                                m_confRFrozenForRoll, m_confRFrozenValue);
+        m_confL = applyRollHyst(rollingL, m_confL, newConfL,
+                                m_confLFrozenForRoll, m_confLFrozenValue);
 
         const double pelvisRotKill = std::max(0.0, std::min(1.0, (m_pelvisAngV - 0.6) / 0.8));
         const bool pelvisRotating = pelvisRotKill > 0.5;
@@ -1541,8 +1600,11 @@ QVector3D LocomotionSolver::update(const Quat& qR,
         const bool wasCommittedR = m_committedR;
         const bool wasCommittedL = m_committedL;
         auto maybeCommitRelease = [&](double conf, bool& committed,
-                                      QVector3D& anchor, const QVector3D& fk) {
-            if (pelvisRotating || yawFreeze) return;
+                                      QVector3D& anchor, const QVector3D& fk,
+                                      bool isRight, bool rolling) {
+            // FIX issue 10: rolling-foot — заморожен commit/release,
+            // skeleton XY не скачет от перехода через порог.
+            if (pelvisRotating || yawFreeze || rolling) return;
             if (!committed && conf >= m_confCommit) {
                 // FIX: оценка таза от ДРУГОЙ committed-ноги (мгновенная),
                 // а не от LP-сглаженного m_offsetLast.
@@ -1550,8 +1612,22 @@ QVector3D LocomotionSolver::update(const Quat& qR,
                 QVector3D world(fk.x() + pelvis.x(),
                                 fk.y() + pelvis.y(),
                                 fk.z() + pelvis.z());
-                if (m_pose == PoseStand || m_pose == PoseSquat)
+                // FIX issue 9: PoseStand — жёсткий snap как раньше
+                // (ходьба работает).  PoseSquat — только если стопа
+                // была низко >= m_lowZTicksRequired кадров; иначе
+                // оставляем естественный world.z и блёндим offsetZ
+                // позже.  Без этого при переходе stand→sit таз
+                // 'падает' за 10 cm до пола в момент commit.
+                if (m_pose == PoseStand) {
                     world.setZ(0.0f);
+                } else if (m_pose == PoseSquat) {
+                    const int lowTicks = isRight ? m_lowZTicksR : m_lowZTicksL;
+                    if (lowTicks >= m_lowZTicksRequired) {
+                        world.setZ(0.0f);
+                        m_zSnapBlendTicks = m_zSnapBlendFrames;
+                    }
+                    // else: world.z = fk.z + pelvis.z (естественный)
+                }
                 anchor = world;
                 committed = true;
                 didCommitThisFrame = true;
@@ -1559,8 +1635,8 @@ QVector3D LocomotionSolver::update(const Quat& qR,
                 committed = false;   // anchor unchanged
             }
         };
-        maybeCommitRelease(m_confR, m_committedR, m_anchorR, fkR);
-        maybeCommitRelease(m_confL, m_committedL, m_anchorL, fkL);
+        maybeCommitRelease(m_confR, m_committedR, m_anchorR, fkR, true,  rollingR);
+        maybeCommitRelease(m_confL, m_committedL, m_anchorL, fkL, false, rollingL);
         if (didCommitThisFrame) m_recentCommitTicks = 12;
         else if (m_recentCommitTicks > 0) --m_recentCommitTicks;
 
@@ -1630,9 +1706,18 @@ QVector3D LocomotionSolver::update(const Quat& qR,
         const double xyRate = m_offsetRateDouble
                             + (m_offsetRatePrimary - m_offsetRateDouble) * imbalance;
         const double effXyRate = xyRate * (1.0 - pelvisRotKill);
-        const double zRate  = (m_pelvisAngV > m_pelvisStillRad)
+        double zRate = (m_pelvisAngV > m_pelvisStillRad)
                               ? m_zRatePelvisMoving
                               : m_zRatePelvisStill;
+
+        // FIX issue 9: пока активен soft Z blend (PoseSquat-commit запустил
+        // его), boost-им zRate чтобы за m_zSnapBlendFrames кадров доехать
+        // до целевого Z мягко вместо мгновенного snap.  Декрементируется
+        // ниже после применения newOff.
+        if (m_zSnapBlendTicks > 0) {
+            const double blendRate = 1.0 / double(std::max(1, m_zSnapBlendTicks));
+            zRate = std::max(zRate, blendRate);
+        }
 
         QVector3D newOff = m_offsetLast;
         if (total > 1e-3) {
@@ -1700,6 +1785,7 @@ QVector3D LocomotionSolver::update(const Quat& qR,
         m_offsetLast = newOff;
         m_offsetReady = true;
         m_yawFrozenPrev = yawFreeze;
+        if (m_zSnapBlendTicks > 0) --m_zSnapBlendTicks;
 
         // Legacy: for UI / debugging, expose which foot is currently dominant.
         m_contact.rightDown = m_committedR;
@@ -2422,11 +2508,23 @@ static void parseErgoHand(const float* degs20, bool isLeft,
     // ============================================================
     constexpr double kThumbCmcRadialDeg     = 40.0;
     constexpr double kThumbCmcOppositionDeg = 15.0;
+    // FIX issue 3: для LEFT-руки инвертируем знаки радиальной и
+    // оппозиционной осей.  Manus отдаёт обе руки в идентичной локальной
+    // системе, и хотя render-pipeline применяет yflip к ПОЗИЦИЯМ
+    // (mirrorManusL), thumbPreRot заходит в КВАТЕРНИОН outQ.  Для
+    // правой руки знаки положительные → большой палец смотрит
+    // forward-radial + opposition к ладони.  Для левой нужны
+    // отрицательные знаки в обеих компонентах, чтобы анатомия
+    // отзеркалилась симметрично.  Защитный флаг — на случай если
+    // визуально потребуется откат.
+    static constexpr bool kEnableLeftThumbVariant = true;
+    const double radSign = (isLeft && kEnableLeftThumbVariant) ? -1.0 : +1.0;
+    const double oppSign = (isLeft && kEnableLeftThumbVariant) ? -1.0 : +1.0;
     const Quat thumbPreRot = quat_mult(
         axisAngleQuat(QVector3D(0,0,1),
-                      kThumbCmcRadialDeg     * M_PI / 180.0),
+                      radSign * kThumbCmcRadialDeg     * M_PI / 180.0),
         axisAngleQuat(QVector3D(1,0,0),
-                     -kThumbCmcOppositionDeg * M_PI / 180.0)
+                      oppSign * -kThumbCmcOppositionDeg * M_PI / 180.0)
     ).normalized();
 
     for (int f = 0; f < 5; ++f) {
@@ -3908,6 +4006,12 @@ static const Tr kTr[] = {
     {"bk_thigh",           "Бедро",                             "Thigh"},
     {"bk_shin",            "Голень",                            "Shin"},
     {"bk_foot",            "Стопа",                             "Foot"},
+    {"bk_hip",             "Ширина таза",                       "Hip width"},
+    {"bk_shoulder",        "Ширина плеч",                       "Shoulder width"},
+    {"bk_trunk_len",       "Длина туловища",                    "Trunk length"},
+    {"body_hip_width",     "Ширина таза",                       "Hip width"},
+    {"body_shoulder_width","Ширина плеч",                       "Shoulder width"},
+    {"body_trunk_length",  "Длина туловища",                    "Trunk length"},
     {"calib_title",        "Калибровка",                        "Calibration"},
     {"tpose",              "T-поза",                            "T-Pose"},
     {"npose",              "N-поза",                            "N-Pose"},
@@ -4461,6 +4565,13 @@ void NewSessionWizard::buildPages()
         configSpin(m_arm,      0.0,   0.0, 250.0, 0.5);
         m_leg = new QDoubleSpinBox(p);
         configSpin(m_leg,      0.0,   0.0, 130.0, 0.5);
+        // FIX issue 5: новые опциональные поля.  0 = вычислить из роста.
+        m_hip      = new QDoubleSpinBox(p);
+        configSpin(m_hip,      0.0,   0.0,  60.0, 0.5);
+        m_shoulder = new QDoubleSpinBox(p);
+        configSpin(m_shoulder, 0.0,   0.0,  70.0, 0.5);
+        m_trunk    = new QDoubleSpinBox(p);
+        configSpin(m_trunk,    0.0,   0.0, 120.0, 0.5);
 
         // True "select-all-on-focus" — attached via an event filter on
         // each spin's internal QLineEdit.  Needed because QAbstractSpinBox
@@ -4475,19 +4586,26 @@ void NewSessionWizard::buildPages()
             }
         };
         static SelAllFilter s_selAll;
-        for (auto* s : { m_height, m_foot, m_arm, m_leg }) {
+        for (auto* s : { m_height, m_foot, m_arm, m_leg,
+                         m_hip, m_shoulder, m_trunk }) {
             if (auto* le = s->findChild<QLineEdit*>())
                 le->installEventFilter(&s_selAll);
         }
 
-        m_lblHeight = new QLabel(p);
-        m_lblFoot   = new QLabel(p);
-        m_lblArm    = new QLabel(p);
-        m_lblLeg    = new QLabel(p);
-        m_lblHeight->setStyleSheet("font-weight:600;");
-        m_lblFoot  ->setStyleSheet("font-weight:600;");
-        m_lblArm   ->setStyleSheet("font-weight:600;");
-        m_lblLeg   ->setStyleSheet("font-weight:600;");
+        m_lblHeight   = new QLabel(p);
+        m_lblFoot     = new QLabel(p);
+        m_lblArm      = new QLabel(p);
+        m_lblLeg      = new QLabel(p);
+        m_lblHip      = new QLabel(p);
+        m_lblShoulder = new QLabel(p);
+        m_lblTrunk    = new QLabel(p);
+        m_lblHeight  ->setStyleSheet("font-weight:600;");
+        m_lblFoot    ->setStyleSheet("font-weight:600;");
+        m_lblArm     ->setStyleSheet("font-weight:600;");
+        m_lblLeg     ->setStyleSheet("font-weight:600;");
+        m_lblHip     ->setStyleSheet("font-weight:600;");
+        m_lblShoulder->setStyleSheet("font-weight:600;");
+        m_lblTrunk   ->setStyleSheet("font-weight:600;");
 
         auto* primaryBox = new QGroupBox(p);
         primaryBox->setProperty("isPrimaryDims", true);
@@ -4499,11 +4617,17 @@ void NewSessionWizard::buildPages()
         primaryLay->addWidget(m_height,    0, 1);
         primaryLay->addWidget(m_lblFoot,   1, 0, Qt::AlignRight | Qt::AlignVCenter);
         primaryLay->addWidget(m_foot,      1, 1);
-        // FIX: добавляем размах рук и длину ноги в ту же сетку.
         primaryLay->addWidget(m_lblArm,    2, 0, Qt::AlignRight | Qt::AlignVCenter);
         primaryLay->addWidget(m_arm,       2, 1);
         primaryLay->addWidget(m_lblLeg,    3, 0, Qt::AlignRight | Qt::AlignVCenter);
         primaryLay->addWidget(m_leg,       3, 1);
+        // FIX issue 5: hip/shoulder/trunk — три новых ряда.
+        primaryLay->addWidget(m_lblHip,      4, 0, Qt::AlignRight | Qt::AlignVCenter);
+        primaryLay->addWidget(m_hip,         4, 1);
+        primaryLay->addWidget(m_lblShoulder, 5, 0, Qt::AlignRight | Qt::AlignVCenter);
+        primaryLay->addWidget(m_shoulder,    5, 1);
+        primaryLay->addWidget(m_lblTrunk,    6, 0, Qt::AlignRight | Qt::AlignVCenter);
+        primaryLay->addWidget(m_trunk,       6, 1);
 
         // --- Secondary: anthropometric breakdown (read-only, live update) ---
         // Mirrors the 27 segment_lengths that hipose SkeletonXsens consumes —
@@ -4517,9 +4641,11 @@ void NewSessionWizard::buildPages()
         bg->setHorizontalSpacing(40);
         bg->setVerticalSpacing(6);
 
-        const char* rowKeys[6] = {
+        const char* rowKeys[9] = {
             "bk_trunk", "bk_upper_arm", "bk_forearm",
-            "bk_thigh", "bk_shin", "bk_foot"
+            "bk_thigh", "bk_shin", "bk_foot",
+            // FIX issue 5: новые разбивки в breakdown.
+            "bk_hip", "bk_shoulder", "bk_trunk_len"
         };
         auto makeLabel = [&](int row, const char* captionKey) {
             auto* cap = new QLabel(p);
@@ -4534,7 +4660,7 @@ void NewSessionWizard::buildPages()
             bg->addWidget(cap, row, 0);
             bg->addWidget(val, row, 1);
         };
-        for (int i = 0; i < 6; ++i) makeLabel(i, rowKeys[i]);
+        for (int i = 0; i < 9; ++i) makeLabel(i, rowKeys[i]);
 
         auto updateBreakdown = [this, p]() {
             const double h  = m_height->value() / 100.0;
@@ -4558,15 +4684,28 @@ void NewSessionWizard::buildPages()
                 const double defLegM = 0.491 * h;
                 legScale = (defLegM > 1e-6) ? (legPerSideM / defLegM) : 1.0;
             }
-            // Same ratios SkeletonXsens + XESNSE biomech use.
+            // FIX issue 5: hip / shoulder / trunk breakdowns.
+            const double trunkScale = h / 1.75;
+            const double hipCm = m_hip ? m_hip->value() : 0.0;
+            const double hipM   = (hipCm > 0.0) ? std::max(0.05, hipCm / 200.0)
+                                                : 0.10 * trunkScale;
+            const double shldCm = m_shoulder ? m_shoulder->value() : 0.0;
+            const double shldM  = (shldCm > 0.0) ? std::max(0.05, shldCm / 200.0)
+                                                 : 0.05 * trunkScale;
+            const double trunkCm = m_trunk ? m_trunk->value() : 0.0;
+            const double trunkM  = (trunkCm > 0.0) ? std::max(0.30, trunkCm / 100.0)
+                                                   : 0.55 * h;
             struct V { const char* k; double m; };
-            V vals[6] = {
+            V vals[9] = {
                 { "bk_trunk",     0.288 * h               },
                 { "bk_upper_arm", 0.186 * h * armScale    },
                 { "bk_forearm",   0.146 * h * armScale    },
                 { "bk_thigh",     0.245 * h * legScale    },
                 { "bk_shin",      0.246 * h * legScale    },
                 { "bk_foot",      fl                      },
+                { "bk_hip",       hipM * 2.0              },  // показываем full width
+                { "bk_shoulder",  shldM * 2.0             },
+                { "bk_trunk_len", trunkM                  },
             };
             for (auto* lab : p->findChildren<QLabel*>()) {
                 if (!lab->property("isBreakdownVal").toBool()) continue;
@@ -4582,6 +4721,12 @@ void NewSessionWizard::buildPages()
         connect(m_arm,    QOverload<double>::of(&QDoubleSpinBox::valueChanged),
                 p, [updateBreakdown](double){ updateBreakdown(); });
         connect(m_leg,    QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+                p, [updateBreakdown](double){ updateBreakdown(); });
+        connect(m_hip,    QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+                p, [updateBreakdown](double){ updateBreakdown(); });
+        connect(m_shoulder, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+                p, [updateBreakdown](double){ updateBreakdown(); });
+        connect(m_trunk,  QOverload<double>::of(&QDoubleSpinBox::valueChanged),
                 p, [updateBreakdown](double){ updateBreakdown(); });
         updateBreakdown();
 
@@ -4802,6 +4947,10 @@ void NewSessionWizard::retranslate()
     // FIX: переведённые подписи к новым полям размаха рук и длины ноги.
     if (m_lblArm)         m_lblArm->setText(Lang::t("body_arm_span") + ":");
     if (m_lblLeg)         m_lblLeg->setText(Lang::t("body_leg_length") + ":");
+    // FIX issue 5: подписи для трёх новых полей.
+    if (m_lblHip)         m_lblHip->setText(Lang::t("body_hip_width") + ":");
+    if (m_lblShoulder)    m_lblShoulder->setText(Lang::t("body_shoulder_width") + ":");
+    if (m_lblTrunk)       m_lblTrunk->setText(Lang::t("body_trunk_length") + ":");
     if (m_dimsHint)       m_dimsHint->setText(Lang::t("dims_hint"));
     for (QGroupBox* gb : findChildren<QGroupBox*>()) {
         if (gb->property("isPrimaryDims"  ).toBool()) gb->setTitle(Lang::t("dims_primary"));
@@ -4951,8 +5100,12 @@ void NewSessionWizard::goNext()
         // FIX: размах рук и длина ноги теперь захватываются здесь же,
         // а не во вьюпорте.  0 → SkeletonXsens::buildLengths использует
         // антропометрический фоллбэк по росту.
-        m_result.armSpanCm    = m_arm  ? m_arm->value()  : 0.0;
-        m_result.legLengthCm  = m_leg  ? m_leg->value()  : 0.0;
+        m_result.armSpanCm        = m_arm      ? m_arm->value()      : 0.0;
+        m_result.legLengthCm      = m_leg      ? m_leg->value()      : 0.0;
+        // FIX issue 5: hip width / shoulder width / trunk length.
+        m_result.hipWidthCm       = m_hip      ? m_hip->value()      : 0.0;
+        m_result.shoulderWidthCm  = m_shoulder ? m_shoulder->value() : 0.0;
+        m_result.trunkLengthCm    = m_trunk    ? m_trunk->value()    : 0.0;
     }
     if (m_pageIdx < m_pages->count() - 1) {
         ++m_pageIdx;
@@ -5627,27 +5780,95 @@ void NewSessionWizard::onCaptureTick()
         std::array<bool, kXsensSegmentCount> s2sFused{};
         std::array<int,  kXsensSegmentCount> mountType{};
         {
-            auto detectMountSymmetry = [&](int rSeg, int lSeg) -> int {
-                if (m_accumCountT[rSeg] < 10 || m_accumCountT[lSeg] < 10) return 0;
-                const QVector3D aR = (m_accAccumT[rSeg] / float(m_accumCountT[rSeg])).normalized();
-                const QVector3D aL = (m_accAccumT[lSeg] / float(m_accumCountT[lSeg])).normalized();
-                const QVector3D mY_aL(aL.x(), -aL.y(), aL.z());
-                const float mirrDot = float(QVector3D::dotProduct(aR, mY_aL));
-                const float parDot  = float(QVector3D::dotProduct(aR, aL));
-                if (mirrDot > 0.85f && mirrDot >= parDot + 0.1f) return 1;
-                if (parDot  > 0.85f && parDot  >= mirrDot + 0.1f) return 2;
+            // FIX issue 4 (правое колено в позе цапли гнётся вбок): mount-detection
+            // только по T-pose accel ненадёжна для ног — gravity почти полностью
+            // вдоль сенсорного Z, Y-компонента ≈ 0 → mirrDot ≈ parDot ≈ 1.
+            // Расширяем сигналы: T+N accel + K-pose gyro (для ног — основной).
+            // K-pose поза "колено вверх" даёт сильный угловой импульс вокруг
+            // body-lateral, который однозначно различает mirror-Y vs parallel.
+            // Для рук K-pose gyro = шум (руки не двигаются между T и K), поэтому
+            // их вес 0 — поведение для рук остаётся как раньше (acc-T-only).
+            auto voteFromPair = [&](const QVector3D& vR, const QVector3D& vL) -> std::pair<int, double> {
+                if (vR.length() < 1e-3f || vL.length() < 1e-3f) return {0, 0.0};
+                const QVector3D nR = vR.normalized();
+                const QVector3D nL = vL.normalized();
+                const QVector3D mY_nL(nL.x(), -nL.y(), nL.z());
+                const double mirrDot = double(QVector3D::dotProduct(nR, mY_nL));
+                const double parDot  = double(QVector3D::dotProduct(nR, nL));
+                if (std::abs(mirrDot) < 0.05 && std::abs(parDot) < 0.05) return {0, 0.0};
+                const int type   = (std::abs(mirrDot) >= std::abs(parDot)) ? 1 : 2;
+                const double sc  = std::abs(std::abs(mirrDot) - std::abs(parDot));
+                return {type, sc};
+            };
+
+            auto detectMountSymmetry = [&](int rSeg, int lSeg, double* outScore = nullptr) -> int {
+                if (m_accumCountT[rSeg] < 10 || m_accumCountT[lSeg] < 10) {
+                    if (outScore) *outScore = 0.0;
+                    return 0;
+                }
+                const bool isLeg = (rSeg == SEG_RUpperLeg) || (rSeg == SEG_LUpperLeg)
+                                || (rSeg == SEG_RLowerLeg) || (rSeg == SEG_LLowerLeg);
+
+                const QVector3D aR_T = m_accAccumT[rSeg] / float(m_accumCountT[rSeg]);
+                const QVector3D aL_T = m_accAccumT[lSeg] / float(m_accumCountT[lSeg]);
+                auto voteT = voteFromPair(aR_T, aL_T);
+
+                std::pair<int, double> voteN = {0, 0.0};
+                if (m_accumCountN[rSeg] >= 10 && m_accumCountN[lSeg] >= 10) {
+                    const QVector3D aR_N = m_accAccumN[rSeg] / float(m_accumCountN[rSeg]);
+                    const QVector3D aL_N = m_accAccumN[lSeg] / float(m_accumCountN[lSeg]);
+                    voteN = voteFromPair(aR_N, aL_N);
+                }
+
+                std::pair<int, double> voteG = {0, 0.0};
+                if (isLeg && m_accumCountK[rSeg] >= 10 && m_accumCountK[lSeg] >= 10) {
+                    const QVector3D gR_K = m_gyrAccumK[rSeg] / float(m_accumCountK[rSeg]);
+                    const QVector3D gL_K = m_gyrAccumK[lSeg] / float(m_accumCountK[lSeg]);
+                    if (gR_K.length() > 5.0f && gL_K.length() > 5.0f) {
+                        // K-pose даёт реальный rotation — gyro magnitude > 5°/s
+                        voteG = voteFromPair(gR_K, gL_K);
+                    }
+                }
+
+                // Per-segment weights.  Arms keep current acc-T-dominant behavior;
+                // legs lean heavily on K-pose gyro when present.
+                double wT = 1.0, wN = 0.0, wG = 0.0;
+                if (isLeg) {
+                    if (voteG.second > 0.05) { wT = 0.2; wN = 0.3; wG = 0.5; }
+                    else                      { wT = 0.4; wN = 0.6; wG = 0.0; }
+                }
+
+                double sMirr = 0.0, sPar = 0.0;
+                if (voteT.first == 1) sMirr += wT * voteT.second;
+                if (voteT.first == 2) sPar  += wT * voteT.second;
+                if (voteN.first == 1) sMirr += wN * voteN.second;
+                if (voteN.first == 2) sPar  += wN * voteN.second;
+                if (voteG.first == 1) sMirr += wG * voteG.second;
+                if (voteG.first == 2) sPar  += wG * voteG.second;
+
+                const double score = std::abs(sMirr - sPar);
+                if (outScore) *outScore = score;
+                if (sMirr > sPar && score > 0.10) return 1;
+                if (sPar > sMirr && score > 0.10) return 2;
                 return 0;
             };
 
             auto procrustesPair = [&](int rSeg, int lSeg) {
                 if (s2sNewMode[rSeg] == 2 || s2sNewMode[lSeg] == 2) return;
-                const int mType = detectMountSymmetry(rSeg, lSeg);
+                double score = 0.0;
+                const int mType = detectMountSymmetry(rSeg, lSeg, &score);
                 mountType[rSeg] = mountType[lSeg] = mType;
                 const Quat qR = s2sNew[rSeg];
                 const Quat qL = s2sNew[lSeg];
                 const double devMirr = mirrorYDeviationDeg(qR, qL);
                 const double devPar  = parallelDeviationDeg(qR, qL);
-                const bool useMirror = (mType == 1) || (mType == 0 && devMirr <= devPar);
+                // FIX issue 4: trust strong vote (score >= 0.5) including
+                // explicit "parallel" — old code defaulted to mirror when
+                // mType==0 via devMirr<=devPar (which was the common case
+                // for legs because gravity dominates).
+                const bool trustVote = (score >= 0.5);
+                const bool useMirror = (mType == 1) ||
+                                       (mType == 0 && !trustVote && devMirr <= devPar);
                 const double dev = useMirror ? devMirr : devPar;
                 const char* sym = useMirror ? "mirror-Y" : "parallel";
                 if (m_test) {
@@ -5768,6 +5989,41 @@ void NewSessionWizard::onCaptureTick()
             symYawS2S_K(SEG_RLowerLeg,  SEG_LLowerLeg);
             symYawS2S_K(SEG_RFoot,      SEG_LFoot);
             symYawS2S_K(SEG_RToe,       SEG_LToe);
+        }
+
+        // FIX issue 1/4: yaw-anchor для ног через K-pose gyro.
+        // K-pose (колено вверх / нога согнута) — это в основном rotation
+        // вокруг body-lateral оси (±X в NWU).  Средний gyro вектор в
+        // сенсорной системе, после применения s2s, должен ложиться в
+        // латеральную плоскость.  Остаточный yaw — это ошибка установки
+        // сенсора (вращение вокруг bone axis при монтаже); убираем её
+        // per-leg независимо.  Безопасно: при |yawErr|>0.6 rad (~34°)
+        // или малом |g| возвращаем s2s as-is.
+        {
+            auto correctLegYaw = [&](int seg, const Quat& s2s) -> Quat {
+                const int c = m_accumCountK[seg];
+                if (c < 10) return s2s;
+                const QVector3D g = m_gyrAccumK[seg] / float(c);
+                if (g.length() < 5.0f) return s2s;            // deg/s threshold
+                const QVector3D gBody = vec_rotate(g.normalized(), s2s.inv());
+                const double yawRes = std::atan2(double(gBody.y()), double(gBody.x()));
+                const double expected = (gBody.y() > 0) ? +M_PI/2 : -M_PI/2;
+                const double yawErr = std::atan2(std::sin(yawRes - expected),
+                                                 std::cos(yawRes - expected));
+                if (std::abs(yawErr) > 0.6) return s2s;
+                const Quat yawCorr = axisAngleQuat(QVector3D(0,0,1), -yawErr);
+                if (m_test) {
+                    std::cout << "[calib K] leg yaw correction "
+                              << kSegmentNames[seg]
+                              << " yawErr=" << std::fixed << std::setprecision(2)
+                              << yawErr * 180.0 / M_PI << "°\n";
+                }
+                return quat_mult(yawCorr, s2s).normalized();
+            };
+            for (int seg : { SEG_RUpperLeg, SEG_LUpperLeg,
+                             SEG_RLowerLeg, SEG_LLowerLeg }) {
+                s2sNew[seg] = correctLegYaw(seg, s2sNew[seg]);
+            }
         }
 
         std::array<float, kXsensSegmentCount> segGain{};
@@ -6132,25 +6388,66 @@ void NewSessionWizard::onCaptureTick()
 
     std::array<bool, kXsensSegmentCount> s2sFusedN{};
     {
-        auto detectMountSymmetryN = [&](int rSeg, int lSeg) -> int {
-            if (m_accumCountT[rSeg] < 10 || m_accumCountT[lSeg] < 10) return 0;
-            const QVector3D aR = (m_accAccumT[rSeg] / float(m_accumCountT[rSeg])).normalized();
-            const QVector3D aL = (m_accAccumT[lSeg] / float(m_accumCountT[lSeg])).normalized();
-            const QVector3D mY_aL(aL.x(), -aL.y(), aL.z());
-            const float mirrDot = float(QVector3D::dotProduct(aR, mY_aL));
-            const float parDot  = float(QVector3D::dotProduct(aR, aL));
-            if (mirrDot > 0.85f && mirrDot >= parDot + 0.1f) return 1;
-            if (parDot  > 0.85f && parDot  >= mirrDot + 0.1f) return 2;
+        // FIX issue 4 (parallel-path в режиме без K-pose).  Расширяем
+        // mount-detection T+N accel (K-gyro здесь недоступен — K не
+        // захватывалась).  Поведение для рук остаётся acc-T-only,
+        // ноги получают двойной T+N сигнал.
+        auto voteFromPairN = [&](const QVector3D& vR, const QVector3D& vL) -> std::pair<int, double> {
+            if (vR.length() < 1e-3f || vL.length() < 1e-3f) return {0, 0.0};
+            const QVector3D nR = vR.normalized();
+            const QVector3D nL = vL.normalized();
+            const QVector3D mY_nL(nL.x(), -nL.y(), nL.z());
+            const double mirrDot = double(QVector3D::dotProduct(nR, mY_nL));
+            const double parDot  = double(QVector3D::dotProduct(nR, nL));
+            if (std::abs(mirrDot) < 0.05 && std::abs(parDot) < 0.05) return {0, 0.0};
+            const int type   = (std::abs(mirrDot) >= std::abs(parDot)) ? 1 : 2;
+            const double sc  = std::abs(std::abs(mirrDot) - std::abs(parDot));
+            return {type, sc};
+        };
+        auto detectMountSymmetryN = [&](int rSeg, int lSeg, double* outScore = nullptr) -> int {
+            if (m_accumCountT[rSeg] < 10 || m_accumCountT[lSeg] < 10) {
+                if (outScore) *outScore = 0.0;
+                return 0;
+            }
+            const bool isLeg = (rSeg == SEG_RUpperLeg) || (rSeg == SEG_LUpperLeg)
+                            || (rSeg == SEG_RLowerLeg) || (rSeg == SEG_LLowerLeg);
+            const QVector3D aR_T = m_accAccumT[rSeg] / float(m_accumCountT[rSeg]);
+            const QVector3D aL_T = m_accAccumT[lSeg] / float(m_accumCountT[lSeg]);
+            auto voteT = voteFromPairN(aR_T, aL_T);
+
+            std::pair<int, double> voteN = {0, 0.0};
+            if (m_accumCountN[rSeg] >= 10 && m_accumCountN[lSeg] >= 10) {
+                const QVector3D aR_N = m_accAccumN[rSeg] / float(m_accumCountN[rSeg]);
+                const QVector3D aL_N = m_accAccumN[lSeg] / float(m_accumCountN[lSeg]);
+                voteN = voteFromPairN(aR_N, aL_N);
+            }
+
+            double wT = 1.0, wN = 0.0;
+            if (isLeg) { wT = 0.4; wN = 0.6; }
+
+            double sMirr = 0.0, sPar = 0.0;
+            if (voteT.first == 1) sMirr += wT * voteT.second;
+            if (voteT.first == 2) sPar  += wT * voteT.second;
+            if (voteN.first == 1) sMirr += wN * voteN.second;
+            if (voteN.first == 2) sPar  += wN * voteN.second;
+
+            const double score = std::abs(sMirr - sPar);
+            if (outScore) *outScore = score;
+            if (sMirr > sPar && score > 0.10) return 1;
+            if (sPar > sMirr && score > 0.10) return 2;
             return 0;
         };
         auto procrustesPairN = [&](int rSeg, int lSeg) {
             if (s2sMode[rSeg] == 2 || s2sMode[lSeg] == 2) return;
-            const int mType = detectMountSymmetryN(rSeg, lSeg);
+            double score = 0.0;
+            const int mType = detectMountSymmetryN(rSeg, lSeg, &score);
             const Quat qR = s2s[rSeg];
             const Quat qL = s2s[lSeg];
             const double devMirr = mirrorYDeviationDeg(qR, qL);
             const double devPar  = parallelDeviationDeg(qR, qL);
-            const bool useMirror = (mType == 1) || (mType == 0 && devMirr <= devPar);
+            const bool trustVote = (score >= 0.5);
+            const bool useMirror = (mType == 1) ||
+                                   (mType == 0 && !trustVote && devMirr <= devPar);
             const double dev = useMirror ? devMirr : devPar;
             const char* sym = useMirror ? "mirror-Y" : "parallel";
             if (m_test) {
@@ -6971,6 +7268,9 @@ void MocapViewport::setActor(const ActorConfig& actor)
         && m_actor.footLengthCm == actor.footLengthCm
         && m_actor.armSpanCm == actor.armSpanCm
         && m_actor.legLengthCm == actor.legLengthCm
+        && m_actor.hipWidthCm == actor.hipWidthCm
+        && m_actor.shoulderWidthCm == actor.shoulderWidthCm
+        && m_actor.trunkLengthCm == actor.trunkLengthCm
         && m_actor.useGloves == actor.useGloves)
         return;
     m_actor = actor;
@@ -7091,6 +7391,13 @@ void MocapViewport::updatePose(const std::array<Quat, kXsensSegmentCount>& orien
                 const bool calmPelvis = pelvisYawRate < 0.20;
                 const bool allCalm = calmHand && calmFA && calmPelvis;
 
+                // FIX issue 11: счётчик "спокойствия" — растёт пока allCalm
+                // держится непрерывно.  При >=5 сек применяем доп. damped
+                // twist коррекцию (она снижает накопленный yaw дрейф вокруг
+                // продольной оси предплечья).
+                if (allCalm) m_calmSeconds[i] += dt;
+                else         m_calmSeconds[i] = 0.0;
+
                 const Quat dA_h = m_skel ? m_skel->defAngFor(i)        : Quat(1, 0, 0, 0);
                 const Quat dA_f = m_skel ? m_skel->defAngFor(iForearm) : Quat(1, 0, 0, 0);
                 const Quat hWorld = quat_mult(orient[i],        dA_h).normalized();
@@ -7110,7 +7417,10 @@ void MocapViewport::updatePose(const std::array<Quat, kXsensSegmentCount>& orien
                     }
                     const double sw = std::min(1.0, std::abs(drift.w));
                     const double driftAngle = 2.0 * std::acos(sw);
-                    const double driftBudget = M_PI / 4.0;
+                    // FIX issue 11: бюджет 45°→30°.  Wrist в покое редко
+                    // отклоняется от anchor>30°; сужение даёт быстрее
+                    // отрабатывать "медленное плавание" кисти.
+                    const double driftBudget = M_PI / 6.0;
 
                     if (allCalm && driftAngle < driftBudget) {
                         const double alpha = std::min(1.0, dt / 3.0);
@@ -7129,6 +7439,20 @@ void MocapViewport::updatePose(const std::array<Quat, kXsensSegmentCount>& orien
                         const Quat correctionWorld = quat_mult(fWorld, quat_mult(dLSwingInv, fWorld.inv())).normalized();
                         const Quat hCorrectedWorld = quat_mult(correctionWorld, hWorld).normalized();
                         filtered[i] = quat_mult(hCorrectedWorld, dA_h.inv()).normalized();
+
+                        // FIX issue 11: damped twist correction при долгой
+                        // стабильности.  Берём 50% твист-коррекции —
+                        // полная может резко крутнуть thumb при дрейфе на
+                        // границе бюджета.  Только когда allCalm >= 5s.
+                        if (m_calmSeconds[i] >= 5.0) {
+                            const Quat dLTwistInv = dLTwist.inv();
+                            const Quat twistWorld = quat_mult(fWorld,
+                                                       quat_mult(dLTwistInv, fWorld.inv())).normalized();
+                            const Quat twistHalf  = slerp_quat(Quat(1,0,0,0), twistWorld, 0.5);
+                            const Quat hWithTwist = quat_mult(twistHalf,
+                                                       quat_mult(filtered[i], dA_h)).normalized();
+                            filtered[i] = quat_mult(hWithTwist, dA_h.inv()).normalized();
+                        }
                     }
                 }
                 const auto& cfg = (i == SEG_RHand) ? m_wristCfgR : m_wristCfgL;
@@ -7140,6 +7464,64 @@ void MocapViewport::updatePose(const std::array<Quat, kXsensSegmentCount>& orien
                             cfg.maxFlexRad, cfg.maxLatDevRad, cfg.twistWeight,
                             i == SEG_RHand);
                     filtered[i] = quat_mult(hConstrainedWorld, dA_h.inv()).normalized();
+                }
+            }
+
+            // FIX issue 7: foot yaw stabilization при перекрёстных позах.
+            // Аналогично wrist-блоку, но другая ось разложения — корректируем
+            // только yaw (вокруг world-Z), бюджет 15°, активируется только
+            // когда стопа + голень + таз спокойны >= 2 сек.  Носки (RToe/LToe)
+            // слейв стоп, поэтому их направление автоматически фиксится.
+            if (i == SEG_RFoot || i == SEG_LFoot) {
+                const int iLowerLeg = (i == SEG_RFoot) ? SEG_RLowerLeg : SEG_LLowerLeg;
+                const double llAngV  = m_angVelLP[iLowerLeg];
+                const bool calmFoot   = m_angVelLP[i] < 1.5;
+                const bool calmLL     = llAngV       < 1.5;
+                const bool calmPelvis = pelvisYawRate < 0.20;
+                const bool allCalm = calmFoot && calmLL && calmPelvis;
+
+                if (allCalm) m_calmSeconds[i] += dt;
+                else         m_calmSeconds[i] = 0.0;
+
+                const Quat dA_f = m_skel ? m_skel->defAngFor(i) : Quat(1, 0, 0, 0);
+                const Quat dA_ll = m_skel ? m_skel->defAngFor(iLowerLeg) : Quat(1, 0, 0, 0);
+                const Quat fWorld  = quat_mult(filtered[i],         dA_f).normalized();
+                const Quat llWorld = quat_mult(filtered[iLowerLeg], dA_ll).normalized();
+
+                if (m_locked[i]) {
+                    m_anchorLocal[i] = quat_mult(llWorld.inv(), fWorld).normalized();
+                    m_anchorValid[i] = true;
+                    m_driftLocal[i]  = nlerpQ(m_driftLocal[i], Quat(1, 0, 0, 0),
+                                              std::min(1.0, dt / 5.0));
+                } else if (m_anchorValid[i] && m_calmSeconds[i] >= 2.0) {
+                    const Quat current_local = quat_mult(llWorld.inv(), fWorld).normalized();
+                    Quat drift = quat_mult(current_local, m_anchorLocal[i].inv()).normalized();
+                    if (drift.w < 0) {
+                        drift.w = -drift.w; drift.x = -drift.x;
+                        drift.y = -drift.y; drift.z = -drift.z;
+                    }
+                    const double sw = std::min(1.0, std::abs(drift.w));
+                    const double driftAngle = 2.0 * std::acos(sw);
+                    // Бюджет 15° — стопа в покое почти не отклоняется,
+                    // ужесточаем чтобы убрать настоящий yaw drift.
+                    const double driftBudget = M_PI / 12.0;
+                    if (allCalm && driftAngle < driftBudget) {
+                        const double alpha = std::min(1.0, dt / 3.0);
+                        m_driftLocal[i] = nlerpQ(m_driftLocal[i], drift, alpha);
+                    }
+                    // Корректируем только TWIST вокруг мирового +Z (yaw),
+                    // swing (наклон стопы) НЕ ТРОГАЕМ.
+                    const Quat& dL = m_driftLocal[i];
+                    const double dw = std::min(1.0, std::abs(dL.w));
+                    if (2.0 * std::acos(dw) > 1e-4) {
+                        Quat dLSwing, dLTwist;
+                        swingTwistDecompose(dL, QVector3D(0.0f, 0.0f, 1.0f), dLSwing, dLTwist);
+                        const Quat dLTwistInv = dLTwist.inv();
+                        const Quat correctionWorld = quat_mult(llWorld,
+                                                       quat_mult(dLTwistInv, llWorld.inv())).normalized();
+                        const Quat fCorrected = quat_mult(correctionWorld, fWorld).normalized();
+                        filtered[i] = quat_mult(fCorrected, dA_f.inv()).normalized();
+                    }
                 }
             }
 
@@ -7350,6 +7732,42 @@ void MocapViewport::drawSkeleton()
     // Cache the final on-screen pelvis so the Reset button can zero out XY
     // on the next click without guessing the loco offset.
     m_lastRenderedPelvis = kp[SEG_Pelvis];
+
+    // FIX issue 6: prayer-pose сходимость кистей.  При drift'е wrist S2S
+    // кисти могут не сходиться точно когда пользователь складывает ладони.
+    // Если запястья ближе 15 cm И ладони смотрят друг на друга (палм-нормали
+    // противоположны), мягко притягиваем оба wrist к XY-серединой.
+    // Z не трогаем (не топим руки вниз).  Сила пропорциональна близости.
+    // Триггерится только в реальном prayer'е, не в обычных жестах.
+    {
+        const QVector3D pR = kp[SEG_RHand];
+        const QVector3D pL = kp[SEG_LHand];
+        const float d = (pR - pL).length();
+        constexpr float kPrayerRange = 0.15f;
+        if (d < kPrayerRange && d > 1e-3f) {
+            const Quat qRW = quat_mult(m_orient[SEG_RHand], m_skel->defAngFor(SEG_RHand));
+            const Quat qLW = quat_mult(m_orient[SEG_LHand], m_skel->defAngFor(SEG_LHand));
+            const QVector3D nR = vec_rotate(QVector3D(0, 1, 0), qRW);
+            const QVector3D nL = vec_rotate(QVector3D(0, 1, 0), qLW);
+            if (QVector3D::dotProduct(nR, nL) < -0.5f) {
+                const QVector3D mid = 0.5f * (pR + pL);
+                const float w = 0.15f * (1.0f - d / kPrayerRange);
+                const QVector3D shiftR(w * (mid.x() - pR.x()),
+                                       w * (mid.y() - pR.y()), 0.0f);
+                const QVector3D shiftL(w * (mid.x() - pL.x()),
+                                       w * (mid.y() - pL.y()), 0.0f);
+                // Применяем тот же сдвиг к wrist и кончику пальца (24/25),
+                // чтобы вся кисть двигалась как одно целое.  Пальцы рисуются
+                // от wrist+rel, поэтому они автоматически следуют.
+                kp[SEG_RHand] += shiftR;
+                kp[SEG_LHand] += shiftL;
+                if (kXsensKeypointCount >= 26) {
+                    kp[24] += shiftR;
+                    kp[25] += shiftL;
+                }
+            }
+        }
+    }
 
     // Bones (GL_LINES).  Orange.
     glLineWidth(3.0f);
@@ -8725,11 +9143,14 @@ MainWindow::MainWindow(MocapReceiver* rx,
 
     // Actor config derived from wizard result.
     ActorConfig actor;
-    actor.heightCm     = m_setup.heightCm;
-    actor.footLengthCm = m_setup.footLengthCm;
-    actor.armSpanCm    = m_setup.armSpanCm;
-    actor.legLengthCm  = m_setup.legLengthCm;
-    actor.useGloves    = m_setup.useGloves;
+    actor.heightCm        = m_setup.heightCm;
+    actor.footLengthCm    = m_setup.footLengthCm;
+    actor.armSpanCm       = m_setup.armSpanCm;
+    actor.legLengthCm     = m_setup.legLengthCm;
+    actor.hipWidthCm      = m_setup.hipWidthCm;
+    actor.shoulderWidthCm = m_setup.shoulderWidthCm;
+    actor.trunkLengthCm   = m_setup.trunkLengthCm;
+    actor.useGloves       = m_setup.useGloves;
 
     m_viewport = new MocapViewport(actor, m_setup.poseKind, this);
     m_skel     = std::make_unique<SkeletonXsens>(actor, m_setup.poseKind);
@@ -8759,25 +9180,33 @@ MainWindow::MainWindow(MocapReceiver* rx,
 
     {
         ActorConfig defaults;
-        defaults.heightCm     = m_setup.heightCm;
-        defaults.footLengthCm = m_setup.footLengthCm;
-        defaults.armSpanCm    = m_setup.armSpanCm;
-        defaults.legLengthCm  = m_setup.legLengthCm;
-        defaults.useGloves    = m_setup.useGloves;
+        defaults.heightCm        = m_setup.heightCm;
+        defaults.footLengthCm    = m_setup.footLengthCm;
+        defaults.armSpanCm       = m_setup.armSpanCm;
+        defaults.legLengthCm     = m_setup.legLengthCm;
+        defaults.hipWidthCm      = m_setup.hipWidthCm;
+        defaults.shoulderWidthCm = m_setup.shoulderWidthCm;
+        defaults.trunkLengthCm   = m_setup.trunkLengthCm;
+        defaults.useGloves       = m_setup.useGloves;
         m_panel->setActorDefaults(defaults);
     }
     connect(m_panel, &SensorIndicatorsPanel::actorChanged,
             this, [this](ActorConfig a) {
-        m_setup.heightCm     = a.heightCm;
-        m_setup.footLengthCm = a.footLengthCm;
-        m_setup.armSpanCm    = a.armSpanCm;
-        m_setup.legLengthCm  = a.legLengthCm;
-        a.useGloves          = m_setup.useGloves;
+        m_setup.heightCm        = a.heightCm;
+        m_setup.footLengthCm    = a.footLengthCm;
+        m_setup.armSpanCm       = a.armSpanCm;
+        m_setup.legLengthCm     = a.legLengthCm;
+        m_setup.hipWidthCm      = a.hipWidthCm;
+        m_setup.shoulderWidthCm = a.shoulderWidthCm;
+        m_setup.trunkLengthCm   = a.trunkLengthCm;
+        a.useGloves             = m_setup.useGloves;
         if (m_viewport) m_viewport->setActor(a);
         if (m_skel) m_skel = std::make_unique<SkeletonXsens>(a, m_setup.poseKind);
         std::ostringstream ss;
         ss << "[actor] h=" << a.heightCm << " foot=" << a.footLengthCm
-           << " arm=" << a.armSpanCm << " leg=" << a.legLengthCm;
+           << " arm=" << a.armSpanCm << " leg=" << a.legLengthCm
+           << " hip=" << a.hipWidthCm << " shld=" << a.shoulderWidthCm
+           << " trunk=" << a.trunkLengthCm;
         logTest(ss.str());
     });
 

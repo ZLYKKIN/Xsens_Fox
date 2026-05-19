@@ -179,11 +179,16 @@ extern const char* kFingerChainNames[kFingerChainCount];
 // ============================================================================
 
 struct ActorConfig {
-    double heightCm      = 175.0;
-    double footLengthCm  = 26.0;
-    double armSpanCm     = 0.0;
-    double legLengthCm   = 0.0;
-    bool   useGloves     = false;
+    double heightCm        = 175.0;
+    double footLengthCm    = 26.0;
+    double armSpanCm       = 0.0;
+    double legLengthCm     = 0.0;
+    // FIX issue 5: дополнительные анатомические размеры.  0 = вычислить
+    // из роста по дефолтной пропорции (h/1.75 × baseline).
+    double hipWidthCm      = 0.0;
+    double shoulderWidthCm = 0.0;
+    double trunkLengthCm   = 0.0;
+    bool   useGloves       = false;
 };
 
 // ============================================================================
@@ -313,6 +318,22 @@ private:
         // >= m_zuptTicksThresh frames → offset fully frozen.
         int       m_zuptTicks         = 0;
 
+        // FIX issue 9 (sit-snap 10 cm падение): мягкий переход Z вместо
+        // мгновенного setZ(0).  При переходе stand→sit таз идёт вниз,
+        // но пока стопы не реально низко, мы НЕ форсируем Z на пол —
+        // блёндим за ~10 кадров.
+        int       m_lowZTicksR        = 0;
+        int       m_lowZTicksL        = 0;
+        int       m_zSnapBlendTicks   = 0;     // оставшиеся кадры бленда
+
+        // FIX issue 10 (toe-roll глобальный сдвиг): пока стопа быстро
+        // вращается без перемещения XY, замораживаем commit/release и
+        // удерживаем conf в полосе вокруг порогов.
+        bool      m_confRFrozenForRoll = false;
+        bool      m_confLFrozenForRoll = false;
+        double    m_confRFrozenValue   = 0.0;
+        double    m_confLFrozenValue   = 0.0;
+
         // --- tunables ---------------------------------------------------------
         // FIX «walks in place / 5-10 cm jumps»: тюнинг параметров локомоции.
         //
@@ -346,6 +367,18 @@ private:
         double    m_lieTiltCosThresh  = 0.50;   // cos(60°) — pelvis tilt
         double    m_squatKneeThresh   = 0.30;   // m — |pelvis-to-foot Z|
         double    m_sitKneeThresh     = 0.55;   // m — pelvis-to-foot Z for sit
+
+        // FIX issue 9: soft Z transition tunables
+        int       m_lowZTicksRequired = 6;       // ~67 ms @ 90 Hz: foot must
+                                                 // be near floor this long
+                                                 // before we trust a sit-floor
+        double    m_lowZBandM         = 0.04;    // 4 cm от fkMinZ → "low"
+        int       m_zSnapBlendFrames  = 10;      // ~110 ms taper до Z=0
+
+        // FIX issue 10: toe-roll detector + conf hysteresis
+        double    m_rollAngVThresh    = 2.0;     // rad/s — стопа быстро крутится
+        double    m_rollXYRangeMax    = 0.03;    // m — но XY почти не двигается
+        double    m_confHystBand      = 0.05;    // полоса вокруг commit/release
         // Actor height — must be set by owner after construction via
         // setActorHeight() before the first update() call.
         double    m_actorHeightM      = 1.75;
@@ -612,6 +645,10 @@ public:
         double footLengthCm = 26.0;
         double armSpanCm = 0.0;
         double legLengthCm = 0.0;
+        // FIX issue 5: новые поля размеров.  0 = compute from height.
+        double hipWidthCm      = 0.0;
+        double shoulderWidthCm = 0.0;
+        double trunkLengthCm   = 0.0;
         std::string poseKind = "tpose";
         std::array<Quat, kXsensSegmentCount> calibReference{};
         std::array<Quat, kXsensSegmentCount> tposeReference{};
@@ -676,10 +713,17 @@ private:
     class QLabel*          m_lblFoot   = nullptr;
     class QLabel*          m_lblArm    = nullptr;   // FIX: размах рук перенесён сюда
     class QLabel*          m_lblLeg    = nullptr;   // FIX: длина ноги перенесена сюда
+    // FIX issue 5: новые опциональные поля (0 = вычислить из роста).
+    class QLabel*          m_lblHip    = nullptr;
+    class QLabel*          m_lblShoulder = nullptr;
+    class QLabel*          m_lblTrunk  = nullptr;
     class QDoubleSpinBox*  m_height = nullptr;
     class QDoubleSpinBox*  m_foot   = nullptr;
     class QDoubleSpinBox*  m_arm    = nullptr;      // FIX: arm span (опц., 0 = по росту)
     class QDoubleSpinBox*  m_leg    = nullptr;      // FIX: leg length (опц., 0 = по росту)
+    class QDoubleSpinBox*  m_hip      = nullptr;    // FIX issue 5: hip width
+    class QDoubleSpinBox*  m_shoulder = nullptr;    // FIX issue 5: shoulder width
+    class QDoubleSpinBox*  m_trunk    = nullptr;    // FIX issue 5: trunk length
     class QLabel*          m_dimsHint  = nullptr;
 
     // Page 4 (calibration)
@@ -958,6 +1002,11 @@ private:
     std::array<Quat, kXsensSegmentCount>   m_anchorLocal{};
     std::array<bool, kXsensSegmentCount>   m_anchorValid{};
     std::array<Quat, kXsensSegmentCount>   m_driftLocal{};
+    // FIX issue 11/7: время непрерывной "тишины" сегмента (allCalm).
+    // Когда сегмент 5+ секунд спокоен — применяем дополнительную damped
+    // twist коррекцию (для wrist в issue 11) или yaw-коррекцию (для foot
+    // в issue 7), чтобы убрать накопленный gyro дрейф.
+    std::array<double, kXsensSegmentCount> m_calmSeconds{};
     bool                                    m_havePrevQ = false;
     double                                  m_lastRenderT = 0.0;
 
