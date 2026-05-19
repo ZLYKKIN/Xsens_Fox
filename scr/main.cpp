@@ -798,6 +798,63 @@ static double ecompResidualDeg(const Quat& q_s2b,
     return std::acos(c) * 180.0 / M_PI;
 }
 
+static const std::array<Quat, 24> kCubeRotations = {
+    Quat(1.0, 0.0, 0.0, 0.0),
+    Quat(0.7071067811865476, 0.7071067811865476, 0.0, 0.0),
+    Quat(0.0, 1.0, 0.0, 0.0),
+    Quat(0.7071067811865476, -0.7071067811865476, 0.0, 0.0),
+    Quat(0.7071067811865476, 0.0, 0.7071067811865476, 0.0),
+    Quat(0.0, 0.0, 1.0, 0.0),
+    Quat(0.7071067811865476, 0.0, -0.7071067811865476, 0.0),
+    Quat(0.7071067811865476, 0.0, 0.0, 0.7071067811865476),
+    Quat(0.0, 0.0, 0.0, 1.0),
+    Quat(0.7071067811865476, 0.0, 0.0, -0.7071067811865476),
+    Quat(0.5,  0.5,  0.5,  0.5),
+    Quat(0.5, -0.5, -0.5, -0.5),
+    Quat(0.5,  0.5, -0.5, -0.5),
+    Quat(0.5, -0.5,  0.5, -0.5),
+    Quat(0.5, -0.5, -0.5,  0.5),
+    Quat(0.5,  0.5,  0.5, -0.5),
+    Quat(0.5,  0.5, -0.5,  0.5),
+    Quat(0.5, -0.5,  0.5,  0.5),
+    Quat(0.0, 0.7071067811865476, 0.7071067811865476, 0.0),
+    Quat(0.0, 0.7071067811865476, -0.7071067811865476, 0.0),
+    Quat(0.0, 0.7071067811865476, 0.0, 0.7071067811865476),
+    Quat(0.0, 0.7071067811865476, 0.0, -0.7071067811865476),
+    Quat(0.0, 0.0, 0.7071067811865476, 0.7071067811865476),
+    Quat(0.0, 0.0, 0.7071067811865476, -0.7071067811865476),
+};
+
+static Quat solveS2sBestAxisPermutation(
+    const QVector3D& v1b, const QVector3D& v2b,
+    const QVector3D& v1s, const QVector3D& v2s,
+    const QVector3D& v3b, const QVector3D& v3s,
+    bool haveThird,
+    double& outResidual)
+{
+    Quat best(1.0, 0.0, 0.0, 0.0);
+    double bestRes = 1e9;
+    for (const auto& qPerm : kCubeRotations) {
+        const QVector3D v1sr = vec_rotate(v1s, qPerm);
+        const QVector3D v2sr = vec_rotate(v2s, qPerm);
+        const Quat qCore = triadSolve(v1b, v2b, v1sr, v2sr);
+        double r = triadResidualDeg(qCore, v1b, v2b, v1sr, v2sr);
+        if (haveThird) {
+            const QVector3D v3sr = vec_rotate(v3s, qPerm);
+            const double r3 = ecompResidualDeg(qCore, v3b, v3sr);
+            r = std::max(r, r3);
+        }
+        if (r < bestRes) {
+            const Quat composed = quat_mult(qCore, qPerm).normalized();
+            bestRes = r;
+            best = composed;
+        }
+    }
+    outResidual = bestRes;
+    if (best.w < 0.0) best = Quat(-best.w, -best.x, -best.y, -best.z);
+    return best;
+}
+
 static double confidenceFromResidual(double residualDeg, int mode)
 {
     if (mode == 2) return 0.0;
@@ -1355,7 +1412,8 @@ QVector3D LocomotionSolver::update(const Quat& qR,
         const double imbalance = (total > 1e-3) ? std::abs(effR - effL) / total : 0.0;
         const double xyRate = m_offsetRateDouble
                             + (m_offsetRatePrimary - m_offsetRateDouble) * imbalance;
-        const double effXyRate = xyRate * (1.0 - pelvisRotKill);
+        const double xyRotKill = std::min(1.0, pelvisRotKill * 0.5);
+        const double effXyRate = xyRate * (1.0 - xyRotKill);
         // m_pelvisAngV > m_pelvisStillRad jumped the Z-blend rate
         const double zRateLo = 0.5 * m_pelvisStillRad;
         const double zRateHi = 1.5 * m_pelvisStillRad;
@@ -1377,7 +1435,9 @@ QVector3D LocomotionSolver::update(const Quat& qR,
                               + zRate * rawOff.z()));
         }
 
-        if (m_zuptTicks > m_pelvisStillTicksThresh
+        if (m_zuptTicks > 2 * m_pelvisStillTicksThresh) {
+            newOff.setZ(m_offsetLast.z());
+        } else if (m_zuptTicks > m_pelvisStillTicksThresh
             && std::abs(double(newOff.z() - m_offsetLast.z())) < m_zStillDeadbandM) {
             newOff.setZ(m_offsetLast.z());
         }
@@ -5291,44 +5351,39 @@ void NewSessionWizard::onCaptureTick()
 
                 if (dev <= 3.0) return;
                 if (dev >= 12.0) {
-                    const double cR = std::clamp(1.0 - s2sResidual[rSeg] / 30.0, 0.0, 1.0);
-                    const double cL = std::clamp(1.0 - s2sResidual[lSeg] / 30.0, 0.0, 1.0);
-                    if (std::max(cR, cL) > 0.5 && std::min(cR, cL) < 0.2) {
-                        int srcSeg, dstSeg;
-                        if (cR > cL) { srcSeg = rSeg; dstSeg = lSeg; }
-                        else         { srcSeg = lSeg; dstSeg = rSeg; }
-                        const Quat& qSrc = s2sNew[srcSeg];
-                        s2sNew[dstSeg] = canonical_hemisphere(applyToL(qSrc, useMode));
-                        s2sFused[srcSeg] = s2sFused[dstSeg] = true;
-                        m_asymmetricMount[srcSeg] = m_asymmetricMount[dstSeg] = true;
-                        if (m_test) {
-                            std::cout << "[calib refine] paired " << kSegmentNames[rSeg]
-                                      << "/" << kSegmentNames[lSeg]
-                                      << " copied from " << kSegmentNames[srcSeg]
-                                      << " via " << sym
-                                      << " (asymmetric mount, cR=" << std::fixed << std::setprecision(2)
-                                      << cR << " cL=" << cL << ")\n";
-                        }
-                        return;
-                    }
-                    if (std::max(cR, cL) < 0.3) {
-                        s2sNewMode[rSeg] = 2;
-                        s2sNewMode[lSeg] = 2;
-                        s2sResidual[rSeg] = 99.0;
-                        s2sResidual[lSeg] = 99.0;
-                        m_asymmetricMount[rSeg] = m_asymmetricMount[lSeg] = true;
-                        if (m_test) {
-                            std::cout << "[calib refine] paired " << kSegmentNames[rSeg]
-                                      << "/" << kSegmentNames[lSeg]
-                                      << " — both sides asymmetric beyond fusion, marked identity (mode=2)\n";
-                        }
-                        return;
-                    }
+                    auto solveIndependently = [&](int seg) -> double {
+                        if (m_accumCountT[seg] < 10 || m_accumCountN[seg] < 10) return s2sResidual[seg];
+                        const QVector3D gT_bs = gravityInBodyFrame(defAng_T[seg]).normalized();
+                        const QVector3D gN_bs = gravityInBodyFrame(defAng_N[seg]).normalized();
+                        const QVector3D aT_ss = (m_accAccumT[seg] / float(m_accumCountT[seg])).normalized();
+                        const QVector3D aN_ss = (m_accAccumN[seg] / float(m_accumCountN[seg])).normalized();
+                        const bool haveK = m_accumCountK[seg] >= 10;
+                        const QVector3D gK_bs = haveK
+                            ? gravityInBodyFrame(defAng_K[seg]).normalized()
+                            : QVector3D(0, 0, -1);
+                        const QVector3D aK_ss = haveK
+                            ? (m_accAccumK[seg] / float(m_accumCountK[seg])).normalized()
+                            : QVector3D(0, 0, -1);
+                        double res = 1e9;
+                        const Quat qBest = solveS2sBestAxisPermutation(
+                            gT_bs, gN_bs, aT_ss, aN_ss, gK_bs, aK_ss, haveK, res);
+                        const Quat qInv = qBest.inv().normalized();
+                        s2sNew[seg] = canonical_hemisphere(qInv);
+                        s2sNewMode[seg] = 0;
+                        s2sResidual[seg] = res;
+                        return res;
+                    };
+                    const double rNew = solveIndependently(rSeg);
+                    const double lNew = solveIndependently(lSeg);
+                    s2sFused[rSeg] = s2sFused[lSeg] = true;
+                    m_asymmetricMount[rSeg] = m_asymmetricMount[lSeg] = true;
                     if (m_test) {
                         std::cout << "[calib refine] paired " << kSegmentNames[rSeg]
                                   << "/" << kSegmentNames[lSeg]
-                                  << " " << sym << "_dev=" << std::fixed << std::setprecision(2) << dev
-                                  << "° — too large, skipping (real asymmetry)\n";
+                                  << " independently re-solved via axis-permutation brute force, "
+                                  << "R=" << std::fixed << std::setprecision(2) << rNew << "°, "
+                                  << "L=" << lNew << "° (was R=" << s2sResidual[rSeg]
+                                  << "°, L=" << s2sResidual[lSeg] << "° before)\n";
                     }
                     return;
                 }
@@ -6980,7 +7035,10 @@ void MocapViewport::drawSkeleton()
     float minZ = kp[0].z();
     for (const auto& p : kp) if (p.z() < minZ) minZ = p.z();
     if (minZ < -0.02f) {
-        const QVector3D shift(0, 0, -minZ);
+        static float s_viewLiftEma = 0.0f;
+        const float rawLift = std::min(0.10f, -minZ);
+        s_viewLiftEma = 0.85f * s_viewLiftEma + 0.15f * rawLift;
+        const QVector3D shift(0, 0, s_viewLiftEma);
         for (auto& p : kp) p += shift;
     }
 
@@ -8908,7 +8966,10 @@ void MainWindow::onRenderTick()
             float minZ = kp[0].z();
             for (const auto& p : kp) if (p.z() < minZ) minZ = p.z();
             if (minZ < -0.02f) {
-                const QVector3D up(0.0f, 0.0f, -minZ);
+                static float s_liftEma = 0.0f;
+                const float rawLift = std::min(0.10f, -minZ);
+                s_liftEma = 0.85f * s_liftEma + 0.15f * rawLift;
+                const QVector3D up(0.0f, 0.0f, s_liftEma);
                 for (auto& p : kp) p += up;
             }
             const float yaw = m_viewport->sceneYaw();
