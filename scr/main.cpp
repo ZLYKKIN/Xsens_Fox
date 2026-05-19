@@ -1354,7 +1354,6 @@ void foxLocoResetStatics() { /* no-op — state is now per-instance */ }
         m_pelvisAngV      = 0.0;
         m_pelvisYawAngV   = 0.0;
         m_yawFrozenPrev   = false;
-        m_pelvisStillTicks= 0;
         for (auto& v : m_rFKXY) v = QVector2D(0, 0);
         for (auto& v : m_lFKXY) v = QVector2D(0, 0);
         m_fkxyHead  = 0;
@@ -1471,12 +1470,6 @@ QVector3D LocomotionSolver::update(const Quat& qR,
         m_lastT = t; m_haveLast = true;
         m_contact.rightAngV = m_rAngV;
         m_contact.leftAngV  = m_lAngV;
-
-        // 2. Pelvis-stillness counter.
-        if (m_pelvisAngV < m_pelvisStillRad)
-            m_pelvisStillTicks = std::min(m_pelvisStillTicks + 1, 4096);
-        else
-            m_pelvisStillTicks = 0;
 
         // 3. FK-XY ring buffers + stability check.
         m_rFKXY[m_fkxyHead] = QVector2D(fkR.x(), fkR.y());
@@ -1904,12 +1897,6 @@ QVector3D LocomotionSolver::update(const Quat& qR,
             return m_offsetLast;
         }
 
-        // 9. Pelvis-stillness XY freeze (short-window version).
-        //    Allows pose-aware Z drift-kill to still act, but XY locked.
-        const bool feetReasonablyStill = (m_rAngV < 0.15) && (m_lAngV < 0.15);
-        (void)feetReasonablyStill;
-        const bool pelvisFreeze = false;
-
         // 10. Weighted dual-anchor raw offset.
         const double effR = m_committedR ? m_confR : 0.0;
         const double effL = m_committedL ? m_confL : 0.0;
@@ -1952,7 +1939,7 @@ QVector3D LocomotionSolver::update(const Quat& qR,
         // anchor его нельзя оценить надёжно — лучше не двигать чем
         // ошибиться в направлении.
         if (m_pose != PoseAirborne && total > 1e-3) {
-            if (!pelvisFreeze && !yawFreeze) {
+            if (!yawFreeze) {
                 newOff.setX(float((1.0 - effXyRate) * m_offsetLast.x()
                                   + effXyRate * rawOff.x()));
                 newOff.setY(float((1.0 - effXyRate) * m_offsetLast.y()

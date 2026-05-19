@@ -300,7 +300,6 @@ private:
         double    m_pelvisAngV        = 0.0;
         double    m_pelvisYawAngV     = 0.0;
         bool      m_yawFrozenPrev     = false;
-        int       m_pelvisStillTicks  = 0;
 
         // FK-XY history ring buffers (planted-despite-rotating criterion).
         // 10 samples ≈ 111 ms at 90 Hz.
@@ -396,7 +395,6 @@ private:
                                                 // 4-cm jitter в planted FK
         double    m_pelvisStillRad    = 0.20;   // было 0.12 — реже триггерим
                                                 // pelvis-stillness gate во время ходьбы
-        int       m_pelvisStillTicksThresh = 30;
         // Confidence hysteresis / LP rates
         double    m_confCommit        = 0.35;   // было 0.70 — commit быстрее
         double    m_confRelease       = 0.25;   // было 0.30 — release быстрее тоже
