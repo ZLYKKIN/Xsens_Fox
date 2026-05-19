@@ -27,4 +27,8 @@ if errorlevel 1 exit /b 1
 
 echo.
 echo === done ===
-dir build\bin\fox_mocap.exe 2>nul
+if exist build\bin\fox_mocap.exe (
+  for %%I in (build\bin\fox_mocap.exe) do echo %%~zI bytes  %%~tI  %%~fI
+)
+endlocal
+exit /b 0
