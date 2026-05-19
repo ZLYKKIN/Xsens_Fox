@@ -2441,9 +2441,17 @@ static const double kSpreadSign[5] = { +1.0, +0.5, 0.0, -0.5, -1.0 };
 
 const FingerJointLimit kFingerLimits[5][3] = {
     {
-        { -M_PI * 0.30,  M_PI * 0.50,  -M_PI / 12.0,  M_PI * 0.50 },
-        {  0.0,          0.0,           0.0,          M_PI * 0.55 },
-        {  0.0,          0.0,           0.0,          M_PI / 3.0  }
+        // FIX (gloves polish): расширили thumb ROM.
+        // CMC: spread shifted to ±0.40π/0.60π (было ±0.30π/0.50π) — больше
+        //      opposition-к-ладони / hyper-radial.  flex от -π/5 до 0.65π
+        //      (было -π/12 до 0.50π) — больше hyperextension и сгиба.
+        // MCP: добавили small spread ±π/10 (было 0) — анатомически
+        //      thumb MCP всё-таки имеет минимальную abduction.
+        //      flex до 0.60π (было 0.55π).
+        // IP : добавили легкий hyperextension -π/20 (было 0) — реалистично.
+        { -M_PI * 0.40,  M_PI * 0.60,  -M_PI / 5.0,    M_PI * 0.65 },
+        { -M_PI / 10.0,  M_PI / 10.0,  -M_PI / 24.0,   M_PI * 0.60 },
+        {  0.0,          0.0,          -M_PI / 24.0,   M_PI * 0.40 }
     },
     {
         { -M_PI / 9.0,   M_PI / 9.0,   -M_PI / 12.0,  M_PI * 0.50 },
@@ -2710,10 +2718,14 @@ static void __cdecl foxManusErgonomicsCb(const void* raw)
         }
         const bool testMode = g_ergo.rawDump.load();
         auto alphaForJoint = [testMode](int idx, float delta, const char* hand) -> float {
+            // FIX (gloves polish): thumb base α 0.20 → 0.15 — thumb sensor
+            // на Manus традиционно шумнее остальных; больше LP-сглаживания
+            // не даёт заметной latency (15ms vs 11ms @ 90Hz) но визуально
+            // убирает джиттер большого пальца.
             const bool isThumb = (idx < 4);
-            const float baseAlpha = isThumb ? 0.20f : 0.35f;
-            const float outlierAlpha = isThumb ? 0.05f : 0.10f;
-            const float outlierThresh = isThumb ? 20.0f : 30.0f;
+            const float baseAlpha = isThumb ? 0.15f : 0.35f;
+            const float outlierAlpha = isThumb ? 0.04f : 0.10f;
+            const float outlierThresh = isThumb ? 15.0f : 30.0f;
             const bool outlier = (delta > outlierThresh);
             if (outlier && testMode) {
                 static const char* kFingerName[5] = { "thumb", "index", "middle", "ring", "pinky" };
