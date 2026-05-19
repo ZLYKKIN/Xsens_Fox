@@ -313,6 +313,22 @@ private:
         // >= m_zuptTicksThresh frames → offset fully frozen.
         int       m_zuptTicks         = 0;
 
+        // FIX issue 9 (sit-snap 10 cm падение): мягкий переход Z вместо
+        // мгновенного setZ(0).  При переходе stand→sit таз идёт вниз,
+        // но пока стопы не реально низко, мы НЕ форсируем Z на пол —
+        // блёндим за ~10 кадров.
+        int       m_lowZTicksR        = 0;
+        int       m_lowZTicksL        = 0;
+        int       m_zSnapBlendTicks   = 0;     // оставшиеся кадры бленда
+
+        // FIX issue 10 (toe-roll глобальный сдвиг): пока стопа быстро
+        // вращается без перемещения XY, замораживаем commit/release и
+        // удерживаем conf в полосе вокруг порогов.
+        bool      m_confRFrozenForRoll = false;
+        bool      m_confLFrozenForRoll = false;
+        double    m_confRFrozenValue   = 0.0;
+        double    m_confLFrozenValue   = 0.0;
+
         // --- tunables ---------------------------------------------------------
         // FIX «walks in place / 5-10 cm jumps»: тюнинг параметров локомоции.
         //
@@ -346,6 +362,18 @@ private:
         double    m_lieTiltCosThresh  = 0.50;   // cos(60°) — pelvis tilt
         double    m_squatKneeThresh   = 0.30;   // m — |pelvis-to-foot Z|
         double    m_sitKneeThresh     = 0.55;   // m — pelvis-to-foot Z for sit
+
+        // FIX issue 9: soft Z transition tunables
+        int       m_lowZTicksRequired = 6;       // ~67 ms @ 90 Hz: foot must
+                                                 // be near floor this long
+                                                 // before we trust a sit-floor
+        double    m_lowZBandM         = 0.04;    // 4 cm от fkMinZ → "low"
+        int       m_zSnapBlendFrames  = 10;      // ~110 ms taper до Z=0
+
+        // FIX issue 10: toe-roll detector + conf hysteresis
+        double    m_rollAngVThresh    = 2.0;     // rad/s — стопа быстро крутится
+        double    m_rollXYRangeMax    = 0.03;    // m — но XY почти не двигается
+        double    m_confHystBand      = 0.05;    // полоса вокруг commit/release
         // Actor height — must be set by owner after construction via
         // setActorHeight() before the first update() call.
         double    m_actorHeightM      = 1.75;

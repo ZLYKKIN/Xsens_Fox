@@ -1336,6 +1336,10 @@ void foxLocoResetStatics() { /* no-op — state is now per-instance */ }
         m_pose = PoseUnknown;
         m_poseTicks = 0;
         m_zuptTicks = 0;
+        m_lowZTicksR = m_lowZTicksL = 0;
+        m_zSnapBlendTicks = 0;
+        m_confRFrozenForRoll = m_confLFrozenForRoll = false;
+        m_confRFrozenValue = m_confLFrozenValue = 0.0;
 
         foxLocoResetStatics();
     }
@@ -1456,6 +1460,25 @@ QVector3D LocomotionSolver::update(const Quat& qR,
 
         const float fkMinZ = std::min(fkR.z(), fkL.z());
 
+        // FIX issue 9: low-Z счётчик нужен для мягкого блёнда при посадке.
+        // PoseSquat-commit форсит world.z=0, но только если стопа реально
+        // была низко несколько кадров подряд — иначе блёндим.
+        m_lowZTicksR = (fkR.z() - fkMinZ < float(m_lowZBandM))
+                       ? std::min(m_lowZTicksR + 1, 4096) : 0;
+        m_lowZTicksL = (fkL.z() - fkMinZ < float(m_lowZBandM))
+                       ? std::min(m_lowZTicksL + 1, 4096) : 0;
+
+        // FIX issue 10: rolling-foot detector.  Стопа быстро вращается
+        // (|angV| > 2 rad/s) при почти стоячем FK-XY (range<3cm) =
+        // перекат мыска-на-мысок.  В таком состоянии не двигаем якорь
+        // и не меняем committed/released флаги — иначе скелет смещается.
+        const float rangeR = xyRange(m_rFKXY);
+        const float rangeL = xyRange(m_lFKXY);
+        const bool rollingR = (m_rAngV > m_rollAngVThresh)
+                           && (rangeR < float(m_rollXYRangeMax));
+        const bool rollingL = (m_lAngV > m_rollAngVThresh)
+                           && (rangeL < float(m_rollXYRangeMax));
+
         // 5. Initialisation on first frame.
         if (!m_initialised) {
             // Put pelvis at the pose-expected world height; anchor feet at
@@ -1506,8 +1529,28 @@ QVector3D LocomotionSolver::update(const Quat& qR,
             const double r = (raw > prev) ? rise : fall;
             return (1.0 - r) * prev + r * raw;
         };
-        m_confR = smooth(m_confR, rawCR, m_confRiseRate, m_confFallRate);
-        m_confL = smooth(m_confL, rawCL, m_confRiseRate, m_confFallRate);
+        const double newConfR = smooth(m_confR, rawCR, m_confRiseRate, m_confFallRate);
+        const double newConfL = smooth(m_confL, rawCL, m_confRiseRate, m_confFallRate);
+
+        // FIX issue 10: гистерезис.  Если стопа сейчас в режиме roll AND
+        // новая conf падает в полосу вокруг commit/release порогов —
+        // удерживаем conf на «замороженном» значении, чтобы не дрейфовать
+        // через порог.  Когда rolling кончился — расшифровываемся.
+        auto applyRollHyst = [&](bool rolling, double oldConf, double newConf,
+                                 bool& frozen, double& frozenVal) -> double {
+            const double bandLo = m_confRelease - m_confHystBand;
+            const double bandHi = m_confCommit  + m_confHystBand;
+            if (rolling && newConf >= bandLo && newConf <= bandHi) {
+                if (!frozen) { frozen = true; frozenVal = oldConf; }
+                return frozenVal;
+            }
+            frozen = false;
+            return newConf;
+        };
+        m_confR = applyRollHyst(rollingR, m_confR, newConfR,
+                                m_confRFrozenForRoll, m_confRFrozenValue);
+        m_confL = applyRollHyst(rollingL, m_confL, newConfL,
+                                m_confLFrozenForRoll, m_confLFrozenValue);
 
         const double pelvisRotKill = std::max(0.0, std::min(1.0, (m_pelvisAngV - 0.6) / 0.8));
         const bool pelvisRotating = pelvisRotKill > 0.5;
@@ -1541,8 +1584,11 @@ QVector3D LocomotionSolver::update(const Quat& qR,
         const bool wasCommittedR = m_committedR;
         const bool wasCommittedL = m_committedL;
         auto maybeCommitRelease = [&](double conf, bool& committed,
-                                      QVector3D& anchor, const QVector3D& fk) {
-            if (pelvisRotating || yawFreeze) return;
+                                      QVector3D& anchor, const QVector3D& fk,
+                                      bool isRight, bool rolling) {
+            // FIX issue 10: rolling-foot — заморожен commit/release,
+            // skeleton XY не скачет от перехода через порог.
+            if (pelvisRotating || yawFreeze || rolling) return;
             if (!committed && conf >= m_confCommit) {
                 // FIX: оценка таза от ДРУГОЙ committed-ноги (мгновенная),
                 // а не от LP-сглаженного m_offsetLast.
@@ -1550,8 +1596,22 @@ QVector3D LocomotionSolver::update(const Quat& qR,
                 QVector3D world(fk.x() + pelvis.x(),
                                 fk.y() + pelvis.y(),
                                 fk.z() + pelvis.z());
-                if (m_pose == PoseStand || m_pose == PoseSquat)
+                // FIX issue 9: PoseStand — жёсткий snap как раньше
+                // (ходьба работает).  PoseSquat — только если стопа
+                // была низко >= m_lowZTicksRequired кадров; иначе
+                // оставляем естественный world.z и блёндим offsetZ
+                // позже.  Без этого при переходе stand→sit таз
+                // 'падает' за 10 cm до пола в момент commit.
+                if (m_pose == PoseStand) {
                     world.setZ(0.0f);
+                } else if (m_pose == PoseSquat) {
+                    const int lowTicks = isRight ? m_lowZTicksR : m_lowZTicksL;
+                    if (lowTicks >= m_lowZTicksRequired) {
+                        world.setZ(0.0f);
+                        m_zSnapBlendTicks = m_zSnapBlendFrames;
+                    }
+                    // else: world.z = fk.z + pelvis.z (естественный)
+                }
                 anchor = world;
                 committed = true;
                 didCommitThisFrame = true;
@@ -1559,8 +1619,8 @@ QVector3D LocomotionSolver::update(const Quat& qR,
                 committed = false;   // anchor unchanged
             }
         };
-        maybeCommitRelease(m_confR, m_committedR, m_anchorR, fkR);
-        maybeCommitRelease(m_confL, m_committedL, m_anchorL, fkL);
+        maybeCommitRelease(m_confR, m_committedR, m_anchorR, fkR, true,  rollingR);
+        maybeCommitRelease(m_confL, m_committedL, m_anchorL, fkL, false, rollingL);
         if (didCommitThisFrame) m_recentCommitTicks = 12;
         else if (m_recentCommitTicks > 0) --m_recentCommitTicks;
 
@@ -1630,9 +1690,18 @@ QVector3D LocomotionSolver::update(const Quat& qR,
         const double xyRate = m_offsetRateDouble
                             + (m_offsetRatePrimary - m_offsetRateDouble) * imbalance;
         const double effXyRate = xyRate * (1.0 - pelvisRotKill);
-        const double zRate  = (m_pelvisAngV > m_pelvisStillRad)
+        double zRate = (m_pelvisAngV > m_pelvisStillRad)
                               ? m_zRatePelvisMoving
                               : m_zRatePelvisStill;
+
+        // FIX issue 9: пока активен soft Z blend (PoseSquat-commit запустил
+        // его), boost-им zRate чтобы за m_zSnapBlendFrames кадров доехать
+        // до целевого Z мягко вместо мгновенного snap.  Декрементируется
+        // ниже после применения newOff.
+        if (m_zSnapBlendTicks > 0) {
+            const double blendRate = 1.0 / double(std::max(1, m_zSnapBlendTicks));
+            zRate = std::max(zRate, blendRate);
+        }
 
         QVector3D newOff = m_offsetLast;
         if (total > 1e-3) {
@@ -1700,6 +1769,7 @@ QVector3D LocomotionSolver::update(const Quat& qR,
         m_offsetLast = newOff;
         m_offsetReady = true;
         m_yawFrozenPrev = yawFreeze;
+        if (m_zSnapBlendTicks > 0) --m_zSnapBlendTicks;
 
         // Legacy: for UI / debugging, expose which foot is currently dominant.
         m_contact.rightDown = m_committedR;
