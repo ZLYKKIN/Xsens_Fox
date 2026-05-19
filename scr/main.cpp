@@ -8239,6 +8239,23 @@ bool LiveStreamSender::start(const LiveSettings& cfg, QString* err)
         };
         const qint32 segCount   = cfg.useGloves ? 63 : 23;
         const quint8 fingerHdr  = cfg.useGloves ? 40 : 0;     // фикс: было 0
+        // FIX (stream polish): защита от пустого tposeOriginM.  Если все 23
+        // элемента нулевые — MXTP13 уходит со scale=0 и плагины не могут
+        // отнормировать pelvis (в LiveLinkMvnSource scale становится 0
+        // и pelvis улетает на ~47x или клампится).  Проверяем и логируем.
+        bool tposeOriginsValid = false;
+        for (int i = 0; i < kXsensSegmentCount; ++i) {
+            if (cfg.tposeOriginM[i].lengthSquared() > 1e-6f) {
+                tposeOriginsValid = true;
+                break;
+            }
+        }
+        if (!tposeOriginsValid) {
+            std::cout << "[stream] WARNING: MXTP13 tposeOriginM is empty —"
+                         " plugins may render rig at wrong scale.  "
+                         "Caller must populate cfg.tposeOriginM[] from FK "
+                         "before LiveStreamSender::start().\n";
+        }
         QByteArray payload;
         appendInt32BE(payload, segCount);
         for (int i = 0; i < kXsensSegmentCount; ++i) {
