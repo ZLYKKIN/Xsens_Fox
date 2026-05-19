@@ -491,6 +491,7 @@ static Quat constrain_shoulder_cone(const Quat& q_seg, const Quat& q_pelvis,
                                      bool isRight);
 static Quat constrain_wrist_twist(const Quat& q_hand_world,
                                   const Quat& q_forearm_world,
+                                  const Quat& q_anchor_local,
                                   double maxFlexRad, double maxLatDevRad,
                                   double twistWeight, bool isRight);
 
@@ -879,19 +880,29 @@ static Quat constrain_shoulder_cone(const Quat& q_seg, const Quat& q_pelvis,
 
 static Quat constrain_wrist_twist(const Quat& q_hand_world,
                                   const Quat& q_forearm_world,
+                                  const Quat& q_anchor_local,
                                   double maxFlexRad, double maxLatDevRad,
                                   double twistWeight, bool isRight)
 {
     (void)isRight;
+    // Hand-in-forearm-local frame.
     const Quat qFAinv = q_forearm_world.inv();
     Quat qLocal = quat_mult(qFAinv, q_hand_world).normalized();
-    if (qLocal.w < 0) {
-        qLocal.w = -qLocal.w; qLocal.x = -qLocal.x;
-        qLocal.y = -qLocal.y; qLocal.z = -qLocal.z;
+
+    // FIX (gloves polish): swing/twist decompose производим относительно
+    // T-pose anchor, а не identity.  Без этого "нулевая поза" соответствует
+    // identity в hand-local frame, но анатомически T-поза ладонью вниз —
+    // НЕ identity (там defAngFor задаёт Rz(±π/2)).  Поэтому clamp
+    // flex/lat-dev раньше работал относительно неправильного нуля.
+    // Теперь clamp применяется к "отклонению от T-pose позы".
+    Quat qLocalRel = quat_mult(q_anchor_local.inv(), qLocal).normalized();
+    if (qLocalRel.w < 0) {
+        qLocalRel.w = -qLocalRel.w; qLocalRel.x = -qLocalRel.x;
+        qLocalRel.y = -qLocalRel.y; qLocalRel.z = -qLocalRel.z;
     }
 
     Quat swing, twist;
-    swingTwistDecompose(qLocal, QVector3D(1.0f, 0.0f, 0.0f), swing, twist);
+    swingTwistDecompose(qLocalRel, QVector3D(1.0f, 0.0f, 0.0f), swing, twist);
 
     double twistHalf = std::atan2(twist.x, twist.w);
     double twistAng = 2.0 * twistHalf * twistWeight;
@@ -918,7 +929,10 @@ static Quat constrain_wrist_twist(const Quat& q_hand_world,
         swingOut = Quat(std::cos(half), 0.0, flexC * s, devC * s);
     }
 
-    const Quat qLocalOut = quat_mult(swingOut, twistOut).normalized();
+    // Recompose: anchor * swing-clamped * twist-clamped — затем вернуть
+    // в world через forearm.
+    const Quat qLocalRelOut = quat_mult(swingOut, twistOut).normalized();
+    const Quat qLocalOut = quat_mult(q_anchor_local, qLocalRelOut).normalized();
     return quat_mult(q_forearm_world, qLocalOut).normalized();
 }
 
@@ -7490,8 +7504,14 @@ void MocapViewport::updatePose(const std::array<Quat, kXsensSegmentCount>& orien
                 if (cfg.enabled && !m_locked[i]) {
                     const Quat hWorldFiltered = quat_mult(filtered[i],        dA_h).normalized();
                     const Quat fWorldFiltered = quat_mult(filtered[iForearm], dA_f).normalized();
+                    // FIX (gloves polish): clamp wrist flex/lat-dev
+                    // относительно T-pose anchor (= ладонь вниз).  Если
+                    // anchor невалиден (T-pose skip) — identity = старое
+                    // поведение.
+                    const Quat anchorLocal = m_anchorValid[i]
+                            ? m_anchorLocal[i] : Quat(1, 0, 0, 0);
                     const Quat hConstrainedWorld = constrain_wrist_twist(
-                            hWorldFiltered, fWorldFiltered,
+                            hWorldFiltered, fWorldFiltered, anchorLocal,
                             cfg.maxFlexRad, cfg.maxLatDevRad, cfg.twistWeight,
                             i == SEG_RHand);
                     filtered[i] = quat_mult(hConstrainedWorld, dA_h.inv()).normalized();
