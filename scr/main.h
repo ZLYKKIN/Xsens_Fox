@@ -229,11 +229,23 @@ public:
     // it to detect "pelvis is actually holding still" — the master gate
     // for freezing the offset against isolated-limb motion (scenario A) and
     // preventing feet-up-on-chair from dropping the avatar (scenario C).
+    //
+    // FIX (heel/toe contact discrimination): сигнатура расширена тремя
+    // FK-точками стопы (heel/ball/tip), а не одной "lowest"-точкой.
+    // Solver сам по footPitchZ выбирает activeContact из этих точек:
+    // heel-contact (pitch>+15°) → heel; toe-contact (pitch<-15°) → ball;
+    // в середине → lowest3.  Без этой правки anchor для стояния на
+    // мыске фиксирует heel-keypoint на полу — лодыжка проваливается
+    // на ~13 см.
     QVector3D update(const Quat& rightFootQuat,
                      const Quat& leftFootQuat,
                      const Quat& pelvisQuat,
-                     const QVector3D& fkRightFoot,
-                     const QVector3D& fkLeftFoot,
+                     const QVector3D& fkRightHeel,
+                     const QVector3D& fkRightBall,
+                     const QVector3D& fkRightTip,
+                     const QVector3D& fkLeftHeel,
+                     const QVector3D& fkLeftBall,
+                     const QVector3D& fkLeftTip,
                      double tSeconds);
 
     ContactState contact() const { return m_contact; }
@@ -309,8 +321,10 @@ private:
         int       m_recentCommitTicks = 0;
 
         // v3: pose classification state (set each frame in update()).
+        // PoseAirborne добавлен в FIX (airborne phase): override через
+        // pelvisZVel + feetLifted detection в update().
         enum PoseKind { PoseUnknown = 0, PoseStand = 1, PoseSit = 2,
-                        PoseSquat = 3, PoseLying = 4 };
+                        PoseSquat = 3, PoseLying = 4, PoseAirborne = 5 };
         PoseKind  m_pose              = PoseUnknown;
         int       m_poseTicks         = 0;
 
@@ -333,6 +347,42 @@ private:
         bool      m_confLFrozenForRoll = false;
         double    m_confRFrozenValue   = 0.0;
         double    m_confLFrozenValue   = 0.0;
+
+        // FIX (heel/toe contact discrimination): sin(pitch) каждой стопы,
+        // LP α=0.30.  vec_rotate((1,0,0), qFoot).z = 2*(qx*qz - qw*qy).
+        // > 0  → ball выше heel (носок поднят, опора на пятке)
+        // < 0  → ball ниже heel (пятка поднята, опора на мыске).
+        // defAngFor(SEG_RFoot/LFoot) = identity в tpose/npose, поэтому
+        // qR/qL уже совпадает с world quat стопы.
+        double    m_footPitchZR        = 0.0;
+        double    m_footPitchZL        = 0.0;
+        // Сглаженный contact blend: +1 = heel-contact, -1 = toe-contact, 0 = neutral.
+        // LP α=0.20 (~55ms response).  Используется для re-snap anchor при
+        // смене contact-point (Phase 3).
+        double    m_contactBlendR      = 0.0;
+        double    m_contactBlendL      = 0.0;
+
+        // FIX (squat heel-lift): smoothstep confidence что пятка поднята
+        // именно в позе Squat/Sit.  LP α=0.10 (333ms), heel-lift в приседе
+        // обычно держится секундами.  m_heelLiftR/L bool — пороговое значение.
+        double    m_heelLiftConfR      = 0.0;
+        double    m_heelLiftConfL      = 0.0;
+        bool      m_heelLiftR          = false;
+        bool      m_heelLiftL          = false;
+        // Foot length (метры), нужен для Z-snap при heel-lifted squat.
+        double    m_footLengthM        = 0.26;
+
+        // FIX (airborne phase): отдельная PoseAirborne фаза.
+        // m_pelvisZVel оценивается из delta-offset.z по dt, LP α=0.30.
+        // Активация: feetLifted + pelvisZVel > 0.50 m/s (ballistic),
+        //  либо feetLifted + !committed обе + zVel > 0.15 (drift fallback).
+        // Стабилизирована >= 5 кадров (55ms) → pose = PoseAirborne.
+        // Выход → m_landedTicks=12 (133ms re-anchor ramp).
+        double    m_pelvisZVel         = 0.0;
+        double    m_pelvisZPrev        = 0.0;
+        bool      m_havePelvisZPrev    = false;
+        int       m_airborneTicks      = 0;
+        int       m_landedTicks        = 0;
 
         // --- tunables ---------------------------------------------------------
         // FIX «walks in place / 5-10 cm jumps»: тюнинг параметров локомоции.
@@ -392,6 +442,10 @@ private:
 
       public:
         void setActorHeight(double h) { m_actorHeightM = std::max(0.5, h); }
+        // FIX (heel-lift Z-snap): foot length задаётся owner'ом из
+        // ActorConfig.footLengthCm.  Используется в Phase 3 commit-блоке
+        // для расчёта world.z = bone_foot * sin(pitch) при heel-lifted squat.
+        void setFootLength(double m) { m_footLengthM = std::max(0.10, m); }
 
       private:
         PoseKind _classifyPose(const Quat& qPelvis,
@@ -960,6 +1014,23 @@ public:
     void setTposeHandAnchor(const Quat& forearmR_T, const Quat& handR_T,
                             const Quat& forearmL_T, const Quat& handL_T);
 
+    // FIX (T-pose foot direction reference): pin foot-yaw anchor from
+    // T-pose calibration.  В T-pose обе стопы смотрят вперёд (+X в
+    // pelvis-yaw-frame).  Сохраняем foot orientation rel-to-pelvis-yaw
+    // как ground truth — после этого foot-yaw drift correction работает
+    // не относительно lowerLeg (который меняется при flex'е колена), а
+    // относительно стабильного pelvis-yaw frame.
+    void setTposeFootAnchor(const Quat& pelvis_T,
+                            const Quat& rFoot_T, const Quat& lFoot_T);
+
+    // FIX (cross-legged direction protection): hints set externally by
+    // MainWindow::onRenderTick.  При cross-legged drift correction
+    // attenuates по crossConf чтобы не разворачивать стопу неправильно.
+    void setCrossLeggedHints(bool r, bool l, double cR, double cL) {
+        m_crossLeggedR = r; m_crossLeggedL = l;
+        m_crossLeggedConfR = cR; m_crossLeggedConfL = cL;
+    }
+
     QSize sizeHint() const override { return QSize(800, 600); }
 
     const std::array<Quat, kXsensSegmentCount>& filteredOrient() const { return m_orient; }
@@ -970,8 +1041,12 @@ public:
     QVector3D lastRenderedPelvis() const { return m_lastRenderedPelvis; }
 
     QVector3D tickLoco(const std::array<Quat, kXsensSegmentCount>& q,
-                       const QVector3D& fkRFoot,
-                       const QVector3D& fkLFoot,
+                       const QVector3D& fkRHeel,
+                       const QVector3D& fkRBall,
+                       const QVector3D& fkRTip,
+                       const QVector3D& fkLHeel,
+                       const QVector3D& fkLBall,
+                       const QVector3D& fkLTip,
                        double tSec);
     QVector3D lastLocoOffset() const { return m_lastLocoOffset; }
 
@@ -1025,6 +1100,11 @@ private:
     std::array<Quat, kXsensSegmentCount>   m_prevQ{};
     std::array<Quat, kXsensSegmentCount>   m_outPrevQ{};
     std::array<double, kXsensSegmentCount> m_unlockBlend{};
+    // FIX (terminator smoothing): симметричный lock-in blend.  Раньше
+    // m_locked[i]=true моментально подставлял m_lockQuat[i] в filtered[i],
+    // что создавало visible 0.5°-1° step при входе в lock.  С этим blend
+    // 7-кадровый ramp (~77ms @ 90Hz) делает переход незаметным.
+    std::array<double, kXsensSegmentCount> m_lockBlend{};
     std::array<Quat, kXsensSegmentCount>   m_anchorLocal{};
     std::array<bool, kXsensSegmentCount>   m_anchorValid{};
     std::array<Quat, kXsensSegmentCount>   m_driftLocal{};
@@ -1032,6 +1112,19 @@ private:
     // зафиксировано из T-pose calibration и больше не обновляется по
     // lock-моментам — кисть всегда "тянется" к T-pose геометрии.
     bool                                    m_tposeHandAnchorValid = false;
+
+    // FIX (T-pose foot direction reference): foot-quat в pelvis-yaw frame
+    // во время T-pose calibration.  Используется в foot-yaw drift correction
+    // как stable reference (вместо lowerLeg, который меняется при flex'е).
+    Quat                                    m_tposeFootRefPelR{1, 0, 0, 0};
+    Quat                                    m_tposeFootRefPelL{1, 0, 0, 0};
+    bool                                    m_tposeFootAnchorValid = false;
+
+    // FIX (cross-legged): hints set externally per-frame.
+    bool                                    m_crossLeggedR = false;
+    bool                                    m_crossLeggedL = false;
+    double                                  m_crossLeggedConfR = 0.0;
+    double                                  m_crossLeggedConfL = 0.0;
     // FIX issue 11/7: время непрерывной "тишины" сегмента (allCalm).
     // Когда сегмент 5+ секунд спокоен — применяем дополнительную damped
     // twist коррекцию (для wrist в issue 11) или yaw-коррекцию (для foot

@@ -1371,6 +1371,17 @@ void foxLocoResetStatics() { /* no-op — state is now per-instance */ }
         m_confRFrozenForRoll = m_confLFrozenForRoll = false;
         m_confRFrozenValue = m_confLFrozenValue = 0.0;
 
+        // FIX (heel/toe + airborne reset)
+        m_footPitchZR = m_footPitchZL = 0.0;
+        m_contactBlendR = m_contactBlendL = 0.0;
+        m_heelLiftConfR = m_heelLiftConfL = 0.0;
+        m_heelLiftR = m_heelLiftL = false;
+        m_pelvisZVel = 0.0;
+        m_pelvisZPrev = 0.0;
+        m_havePelvisZPrev = false;
+        m_airborneTicks = 0;
+        m_landedTicks = 0;
+
         foxLocoResetStatics();
     }
 
@@ -1386,11 +1397,44 @@ static double quatAngVel(const Quat& a, const Quat& b, double dt)
 QVector3D LocomotionSolver::update(const Quat& qR,
                                        const Quat& qL,
                                        const Quat& qPelvis,
-                                       const QVector3D& fkR,
-                                       const QVector3D& fkL,
+                                       const QVector3D& fkRHeel,
+                                       const QVector3D& fkRBall,
+                                       const QVector3D& fkRTip,
+                                       const QVector3D& fkLHeel,
+                                       const QVector3D& fkLBall,
+                                       const QVector3D& fkLTip,
                                        double t)
     {
         const double dt = m_haveLast ? std::max(1e-3, t - m_lastT) : 0.01;
+
+        // FIX (heel/toe contact discrimination): pick active contact point
+        // based on foot pitch.  При pitch≈0 (плоская стопа) = lowest3 как
+        // раньше.  pitch > +15° (heel-down toe-up) → fkHeel.  pitch < -15°
+        // (heel-up toe-down) → fkBall (ball of foot = front part).
+        //
+        // m_footPitchZR/L пока что 0 на первом кадре — поэтому до тех пор
+        // пока pitch не накопится через LP, используется lowest3 (zero weights).
+        // На последующих кадрах pitch обновится сразу же.
+        auto lowest3 = [](const QVector3D& a, const QVector3D& b, const QVector3D& c){
+            const QVector3D& ab = a.z() < b.z() ? a : b;
+            return ab.z() < c.z() ? ab : c;
+        };
+        auto sstep_local = [](double x){ x = std::clamp(x,0.0,1.0); return x*x*(3.0-2.0*x); };
+        const QVector3D fkRLowest = lowest3(fkRHeel, fkRBall, fkRTip);
+        const QVector3D fkLLowest = lowest3(fkLHeel, fkLBall, fkLTip);
+        // smoothstep zone: |sin(pitch)| ∈ [0.17..0.34] = [≈10°..≈20°]
+        const double heelContactWR_pre = sstep_local((m_footPitchZR - 0.17) / 0.17);
+        const double toeContactWR_pre  = sstep_local((-m_footPitchZR - 0.17) / 0.17);
+        const double heelContactWL_pre = sstep_local((m_footPitchZL - 0.17) / 0.17);
+        const double toeContactWL_pre  = sstep_local((-m_footPitchZL - 0.17) / 0.17);
+        const double neutralR = std::max(0.0, 1.0 - heelContactWR_pre - toeContactWR_pre);
+        const double neutralL = std::max(0.0, 1.0 - heelContactWL_pre - toeContactWL_pre);
+        const QVector3D fkR = float(neutralR) * fkRLowest
+                            + float(heelContactWR_pre) * fkRHeel
+                            + float(toeContactWR_pre)  * fkRBall;
+        const QVector3D fkL = float(neutralL) * fkLLowest
+                            + float(heelContactWL_pre) * fkLHeel
+                            + float(toeContactWL_pre)  * fkLBall;
 
         // 1. Angular velocities of feet + pelvis (LP-smoothed).
         auto angVel = [](const Quat& a, const Quat& b, double dt_) {
@@ -1457,7 +1501,17 @@ QVector3D LocomotionSolver::update(const Quat& qR,
         // which is why the skeleton "walked in place" — anchors never
         // updated.  0.5 rad/s reserves yawFreeze for actual deliberate
         // turning.
-        const bool yawFreeze = (m_pelvisYawAngV > 0.50);
+        // FIX (terminator smoothing): smoothstep zone [0.35..0.65] rad/s
+        // вместо жёсткого 0.50, чтобы при ходьбе с heel-strike-yaw-oscillation
+        // ~0.4 rad/s не было flicker'а в rFKXYStable.  Bool yawFreeze
+        // оставляем для edge-handler ниже (ring buffer clear), который
+        // должен срабатывать ровно один раз на переходе.
+        auto smoothstep01 = [](double x) {
+            x = std::clamp(x, 0.0, 1.0);
+            return x * x * (3.0 - 2.0 * x);
+        };
+        const double yawFreezeW = smoothstep01((m_pelvisYawAngV - 0.35) / 0.30);
+        const bool yawFreeze = (yawFreezeW > 0.5);
 
         if (yawFreeze && !m_yawFrozenPrev) {
             m_fkxyHead  = 0;
@@ -1476,8 +1530,19 @@ QVector3D LocomotionSolver::update(const Quat& qR,
             m_fkxyCount = 0;
         }
 
-        const bool rFKXYStable = yawFreeze ? true : (xyRange(m_rFKXY) < float(m_fkxyStableRange));
-        const bool lFKXYStable = yawFreeze ? true : (xyRange(m_lFKXY) < float(m_fkxyStableRange));
+        // FIX (terminator smoothing): rFKXYStable теперь continuous weight.
+        // Smoothstep zone [stableRange*0.5 .. stableRange*1.5] = [0.02..0.06].
+        // При xy < 0.02 m → stableW=1; при xy > 0.06 → 0; в середине плавно.
+        const float xyR = xyRange(m_rFKXY);
+        const float xyL = xyRange(m_lFKXY);
+        const double stableHi = m_fkxyStableRange * 1.5;
+        const double stableDen = std::max(1e-6, m_fkxyStableRange);
+        const double rFKXYStableW = std::max(yawFreezeW,
+                smoothstep01((stableHi - double(xyR)) / stableDen));
+        const double lFKXYStableW = std::max(yawFreezeW,
+                smoothstep01((stableHi - double(xyL)) / stableDen));
+        const bool rFKXYStable = (rFKXYStableW > 0.5);
+        const bool lFKXYStable = (lFKXYStableW > 0.5);
 
         // 4. Classify pose.
         double tiltCos = 1.0;
@@ -1498,16 +1563,53 @@ QVector3D LocomotionSolver::update(const Quat& qR,
         m_lowZTicksL = (fkL.z() - fkMinZ < float(m_lowZBandM))
                        ? std::min(m_lowZTicksL + 1, 4096) : 0;
 
-        // FIX issue 10: rolling-foot detector.  Стопа быстро вращается
-        // (|angV| > 2 rad/s) при почти стоячем FK-XY (range<3cm) =
-        // перекат мыска-на-мысок.  В таком состоянии не двигаем якорь
-        // и не меняем committed/released флаги — иначе скелет смещается.
-        const float rangeR = xyRange(m_rFKXY);
-        const float rangeL = xyRange(m_lFKXY);
-        const bool rollingR = (m_rAngV > m_rollAngVThresh)
-                           && (rangeR < float(m_rollXYRangeMax));
-        const bool rollingL = (m_lAngV > m_rollAngVThresh)
-                           && (rangeL < float(m_rollXYRangeMax));
+        // FIX (heel/toe contact discrimination): отслеживаем sin(pitch)
+        // обеих стоп.  defAngFor(SEG_RFoot/LFoot)==identity → qR/qL уже
+        // совпадает с world quat стопы; X = vec_rotate((1,0,0), q) =
+        // (1-2(y²+z²), 2(xy+wz), 2(xz-wy)).  Z-компонента = 2*(qx*qz - qw*qy).
+        //   z > 0  → ball выше heel (носок поднят, опора на пятке)
+        //   z < 0  → ball ниже heel (пятка поднята, опора на мыске)
+        const double pzR = 2.0 * (qR.x * qR.z - qR.w * qR.y);
+        const double pzL = 2.0 * (qL.x * qL.z - qL.w * qL.y);
+        m_footPitchZR = 0.70 * m_footPitchZR + 0.30 * pzR;
+        m_footPitchZL = 0.70 * m_footPitchZL + 0.30 * pzL;
+
+        // FIX (squat heel-lift): smoothstep confidence в полосе 21°..33°
+        // (sin: 0.36..0.55).  Активируется только в Squat/Sit — в Stand
+        // pitch такой величины встречается на ходу (heel strike) и не
+        // должен переключать contact-point.  LP α=0.10 (333ms) — heel-lift
+        // в приседе обычно держится секундами; быстрая фильтрация уберёт
+        // ложные пики.
+        auto sstep = [](double x){ x = std::clamp(x,0.0,1.0); return x*x*(3.0-2.0*x); };
+        const bool poseAllowsHeelLift = (m_pose == PoseSquat || m_pose == PoseSit);
+        const double hlR_raw = poseAllowsHeelLift
+                ? sstep((-m_footPitchZR - 0.36) / 0.19) : 0.0;
+        const double hlL_raw = poseAllowsHeelLift
+                ? sstep((-m_footPitchZL - 0.36) / 0.19) : 0.0;
+        m_heelLiftConfR = 0.90 * m_heelLiftConfR + 0.10 * hlR_raw;
+        m_heelLiftConfL = 0.90 * m_heelLiftConfL + 0.10 * hlL_raw;
+        m_heelLiftR = (m_heelLiftConfR > 0.5);
+        m_heelLiftL = (m_heelLiftConfL > 0.5);
+
+        // FIX issue 10 + terminator smoothing: rolling-foot detector.
+        // Стопа быстро вращается (|angV| ~2 rad/s) при почти стоячем
+        // FK-XY (range ~3cm) = перекат мыска-на-мысок.
+        // Smoothstep angV [1.5..2.5] rad/s, range [stableRange/3 .. stableRange*2/3]
+        // (т.е. [0.013..0.027] вокруг 0.03), bool rollingR=W>0.5 для downstream
+        // hysteresis (replaces hard cliff at exactly 2.0 rad/s).
+        const float rangeR = xyR;   // already computed above for FK-XY-stable
+        const float rangeL = xyL;
+        const double angFastR = smoothstep01((m_rAngV - (m_rollAngVThresh - 0.5)) / 1.0);
+        const double angFastL = smoothstep01((m_lAngV - (m_rollAngVThresh - 0.5)) / 1.0);
+        const double xyHi    = m_rollXYRangeMax * 1.33;     // ~0.04
+        const double xyLo    = m_rollXYRangeMax * 0.67;     // ~0.02
+        const double xyDen   = std::max(1e-6, xyHi - xyLo);
+        const double xyTightR = smoothstep01((xyHi - double(rangeR)) / xyDen);
+        const double xyTightL = smoothstep01((xyHi - double(rangeL)) / xyDen);
+        const double rollingWR = angFastR * xyTightR;
+        const double rollingWL = angFastL * xyTightL;
+        const bool rollingR = (rollingWR > 0.5);
+        const bool rollingL = (rollingWL > 0.5);
 
         // 5. Initialisation on first frame.
         if (!m_initialised) {
@@ -1551,10 +1653,10 @@ QVector3D LocomotionSolver::update(const Quat& qR,
             double s = 1.0 - dz / std::max(m_heightMarginSlow, 1e-3);
             return std::max(0.0, std::min(1.0, s));
         };
-        const double rawCR = std::max(sStill(m_rAngV), rFKXYStable ? 1.0 : 0.0)
-                           * sLow(fkR);
-        const double rawCL = std::max(sStill(m_lAngV), lFKXYStable ? 1.0 : 0.0)
-                           * sLow(fkL);
+        // FIX (terminator smoothing): use continuous rFKXYStableW (0..1)
+        // вместо bool — плавный переход в погранзоне stable/non-stable.
+        const double rawCR = std::max(sStill(m_rAngV), rFKXYStableW) * sLow(fkR);
+        const double rawCL = std::max(sStill(m_lAngV), lFKXYStableW) * sLow(fkL);
         auto smooth = [](double prev, double raw, double rise, double fall) {
             const double r = (raw > prev) ? rise : fall;
             return (1.0 - r) * prev + r * raw;
@@ -1585,6 +1687,56 @@ QVector3D LocomotionSolver::update(const Quat& qR,
         const double pelvisRotKill = std::max(0.0, std::min(1.0, (m_pelvisAngV - 0.6) / 0.8));
         const bool pelvisRotating = pelvisRotKill > 0.5;
 
+        // FIX (airborne phase): отдельная PoseAirborne фаза для прыжков.
+        // Оценка vertical velocity таза по изменению m_offsetLast.z за dt.
+        // Активация двумя путями:
+        //   (a) ballistic: feetLifted (confR/L<0.10) + zVel > 0.50 m/s
+        //   (b) drift:     feetLifted + ни одна нога не committed +
+        //                  (airborneTicks>0 || zVel>0.15) — fallback для
+        //                  низкоскоростных подскоков.
+        // Стабилизация >= 5 кадров (55ms @ 90Hz) → m_pose = PoseAirborne.
+        // Выход → m_landedTicks = 12 (133ms ramp в landing re-anchor).
+        {
+            // bestPelvisEstimate() ещё не определён в lambda, но мы можем
+            // повторить ту же логику: pelvisZ from anchor ноги, иначе offsetLast.
+            double zNow;
+            if (m_committedR && !m_committedL) zNow = m_anchorR.z() - fkR.z();
+            else if (m_committedL && !m_committedR) zNow = m_anchorL.z() - fkL.z();
+            else zNow = m_offsetLast.z();
+            if (m_havePelvisZPrev) {
+                const double rawVZ = (zNow - m_pelvisZPrev) / dt;
+                m_pelvisZVel = 0.70 * m_pelvisZVel + 0.30 * rawVZ;
+            }
+            m_pelvisZPrev = zNow;
+            m_havePelvisZPrev = true;
+
+            const bool feetLifted = (m_confR < 0.10) && (m_confL < 0.10);
+            const bool ballistic  = feetLifted && (m_pelvisZVel > 0.50);
+            const bool driftAir   = feetLifted && (!m_committedR) && (!m_committedL)
+                                  && (m_airborneTicks > 0 || m_pelvisZVel > 0.15);
+
+            if (ballistic || driftAir) {
+                m_airborneTicks = std::min(m_airborneTicks + 1, 4096);
+                if (m_airborneTicks >= 5 && m_pose != PoseLying) {
+                    // Override: PoseAirborne для последующих блоков.
+                    // _classifyPose уже отработал, m_pose установлен; меняем.
+                    if (m_pose != PoseAirborne) {
+                        m_pose = PoseAirborne;
+                        m_poseTicks = 0;
+                    } else {
+                        m_poseTicks = std::min(m_poseTicks + 1, 4096);
+                    }
+                }
+            } else {
+                if (m_airborneTicks > 0) {
+                    // Только что приземлились — взводим re-anchor ramp.
+                    m_landedTicks = 12;
+                }
+                m_airborneTicks = 0;
+            }
+            if (m_landedTicks > 0) --m_landedTicks;
+        }
+
         // FIX «walks in place»: при commit нового анкора используем
         // НАИБОЛЕЕ АКТУАЛЬНУЮ оценку pelvis_world, а не отстающий
         // m_offsetLast.  Если другая нога committed — её anchor минус её
@@ -1606,6 +1758,34 @@ QVector3D LocomotionSolver::update(const Quat& qR,
             // (это надёжнее на момент когда обе ноги в воздухе).
             return m_offsetLast;
         };
+
+        // FIX (heel/toe contact discrimination): при смене contact-point
+        // на той же ноге, anchor "помнит" старую точку → offset = anchor-fk
+        // делает скачок на длину стопы × sin(pitch) (~13см при 30°).
+        // Решение: soft anchor shift в сторону актуального FK + offsetLast.
+        // m_contactBlendR ∈ [-1..+1]: +1=heel, -1=toe.  Скачок > 0.05 в
+        // contact-blend = реальная смена точки контакта.
+        const double cbR_new = heelContactWR_pre - toeContactWR_pre;
+        const double cbL_new = heelContactWL_pre - toeContactWL_pre;
+        if (m_committedR && std::abs(cbR_new - m_contactBlendR) > 0.05) {
+            const double alpha = std::min(1.0, 0.40 * std::abs(cbR_new - m_contactBlendR));
+            const QVector3D pelvis = bestPelvisEstimate();
+            const QVector3D newAnchorR(fkR.x() + pelvis.x(),
+                                       fkR.y() + pelvis.y(),
+                                       m_anchorR.z());   // Z держим (zSnap-logic ниже)
+            m_anchorR = (1.0 - float(alpha)) * m_anchorR + float(alpha) * newAnchorR;
+        }
+        if (m_committedL && std::abs(cbL_new - m_contactBlendL) > 0.05) {
+            const double alpha = std::min(1.0, 0.40 * std::abs(cbL_new - m_contactBlendL));
+            const QVector3D pelvis = bestPelvisEstimate();
+            const QVector3D newAnchorL(fkL.x() + pelvis.x(),
+                                       fkL.y() + pelvis.y(),
+                                       m_anchorL.z());
+            m_anchorL = (1.0 - float(alpha)) * m_anchorL + float(alpha) * newAnchorL;
+        }
+        // LP-фильтр m_contactBlend (α=0.20, ~55ms response).
+        m_contactBlendR = 0.80 * m_contactBlendR + 0.20 * cbR_new;
+        m_contactBlendL = 0.80 * m_contactBlendL + 0.20 * cbL_new;
 
         // 7. Commit / release anchors with hysteresis.
         //    - rising edge (conf >= COMMIT && !committed): snap anchor
@@ -1636,13 +1816,45 @@ QVector3D LocomotionSolver::update(const Quat& qR,
                     world.setZ(0.0f);
                 } else if (m_pose == PoseSquat) {
                     const int lowTicks = isRight ? m_lowZTicksR : m_lowZTicksL;
+                    const bool heelLifted = isRight ? m_heelLiftR : m_heelLiftL;
                     if (lowTicks >= m_lowZTicksRequired) {
-                        world.setZ(0.0f);
+                        if (heelLifted) {
+                            // FIX (squat heel-lift): при поднятой пятке anchor
+                            // НЕ снапим к z=0 — реальный пол под носком, а fk
+                            // (после A.2 это active-contact = ball) и так
+                            // близко к полу.  Heel-keypoint висит выше пола
+                            // на bone_foot * sin(|pitch|).  anchor.z должен
+                            // отражать ЭТО: высота над полом на ту же величину.
+                            const double bone = 0.60 * m_footLengthM;  // heel→ball
+                            const double sinp = isRight
+                                    ? std::abs(m_footPitchZR)
+                                    : std::abs(m_footPitchZL);
+                            // fk здесь — active contact point (ball-like), z
+                            // близко к полу.  Чтобы commit fkZ ≈ 0 на полу
+                            // → anchor.z = world.z уже выставлено выше (fk.z+pelvis.z).
+                            // Snapшимся как в plain squat, но не до 0:
+                            world.setZ(float(bone * sinp));
+                        } else {
+                            world.setZ(0.0f);
+                        }
                         m_zSnapBlendTicks = m_zSnapBlendFrames;
                     }
                     // else: world.z = fk.z + pelvis.z (естественный)
                 }
-                anchor = world;
+                // FIX (airborne): soft re-anchor при приземлении.
+                // m_landedTicks отсчитывается от 12 (только что landed) к 0.
+                // anchor = blend(currentEst, world, t) где t = 1 - landedTicks/12.
+                // Без этого XY-anchor мгновенно прыгает на новое место →
+                // skeleton "телепортируется" на pol 5-10cm после прыжка.
+                if (m_landedTicks > 0) {
+                    const double t = 1.0 - double(m_landedTicks) / 12.0;
+                    const QVector3D currentEst(fk.x() + m_offsetLast.x(),
+                                               fk.y() + m_offsetLast.y(),
+                                               fk.z() + m_offsetLast.z());
+                    anchor = float(1.0 - t) * currentEst + float(t) * world;
+                } else {
+                    anchor = world;
+                }
                 committed = true;
                 didCommitThisFrame = true;
             } else if (committed && conf < m_confRelease) {
@@ -1734,7 +1946,12 @@ QVector3D LocomotionSolver::update(const Quat& qR,
         }
 
         QVector3D newOff = m_offsetLast;
-        if (total > 1e-3) {
+        // FIX (airborne): когда PoseAirborne, заморозим offset (XY и Z).
+        // Безопасное приближение: персонаж "висит" на месте, ожидая
+        // landing.  Реальное movement в воздухе обычно < 0.5м, а без
+        // anchor его нельзя оценить надёжно — лучше не двигать чем
+        // ошибиться в направлении.
+        if (m_pose != PoseAirborne && total > 1e-3) {
             if (!pelvisFreeze && !yawFreeze) {
                 newOff.setX(float((1.0 - effXyRate) * m_offsetLast.x()
                                   + effXyRate * rawOff.x()));
@@ -1744,6 +1961,7 @@ QVector3D LocomotionSolver::update(const Quat& qR,
             newOff.setZ(float((1.0 - zRate) * m_offsetLast.z()
                               + zRate * rawOff.z()));
         }
+        // else: PoseAirborne — newOff = m_offsetLast (полная заморозка).
 
         {
             // Per-frame offset cap.  FIX «walks in place»: старые
@@ -7349,6 +7567,7 @@ MocapViewport::MocapViewport(const ActorConfig& actor, const std::string& pose,
 {
     m_skel = std::make_unique<SkeletonXsens>(actor, pose);
     m_loco.setActorHeight(actor.heightCm / 100.0);
+    m_loco.setFootLength(actor.footLengthCm / 100.0);
     setFocusPolicy(Qt::StrongFocus);
     setMouseTracking(true);
 }
@@ -7358,6 +7577,7 @@ void MocapViewport::setPose(const std::string& pose)
     m_skel = std::make_unique<SkeletonXsens>(m_actor, pose);
     m_loco.reset();           // fresh calibration = fresh anchor
     m_loco.setActorHeight(m_actor.heightCm / 100.0);
+    m_loco.setFootLength(m_actor.footLengthCm / 100.0);
     update();
 }
 
@@ -7378,6 +7598,7 @@ void MocapViewport::setActor(const ActorConfig& actor)
         m_skel = std::make_unique<SkeletonXsens>(actor, pose);
     }
     m_loco.setActorHeight(actor.heightCm / 100.0);
+    m_loco.setFootLength(actor.footLengthCm / 100.0);
     update();
 }
 
@@ -7405,6 +7626,33 @@ void MocapViewport::setTposeHandAnchor(const Quat& fR, const Quat& hR,
     m_tposeHandAnchorValid   = true;
     m_driftLocal[SEG_RHand]  = Quat(1, 0, 0, 0);
     m_driftLocal[SEG_LHand]  = Quat(1, 0, 0, 0);
+}
+
+// FIX (T-pose foot direction reference): pin foot-yaw anchor from T-pose
+// calibration.  В T-pose обе стопы смотрят вперёд по +X.  Сохраняем
+// foot-quat в pelvis-yaw frame как ground truth.  Это лучше анкора по
+// lowerLeg (используемого в FIX issue 7), потому что lowerLeg меняется
+// при flex'е колена 30-60° → искажает yaw reference.  Pelvis-yaw frame
+// стабилен — меняется только при повороте таза.
+//
+// defAngFor(SEG_Pelvis) != identity (в T-pose это Rot_Y(-π/2)), поэтому
+// сначала переводим raw pelvis sensor в world, потом извлекаем yaw.
+// Аналогично для стоп — но defAngFor(SEG_RFoot/LFoot) == identity, так что
+// raw sensor quat = world quat.
+void MocapViewport::setTposeFootAnchor(const Quat& pelvis_T,
+                                       const Quat& rFoot_T, const Quat& lFoot_T)
+{
+    const Quat dA_pel = m_skel ? m_skel->defAngFor(SEG_Pelvis) : Quat(1, 0, 0, 0);
+    const Quat dA_rf  = m_skel ? m_skel->defAngFor(SEG_RFoot)  : Quat(1, 0, 0, 0);
+    const Quat dA_lf  = m_skel ? m_skel->defAngFor(SEG_LFoot)  : Quat(1, 0, 0, 0);
+    const Quat pelvisWorld = quat_mult(pelvis_T, dA_pel).normalized();
+    const Quat rFootWorld  = quat_mult(rFoot_T,  dA_rf).normalized();
+    const Quat lFootWorld  = quat_mult(lFoot_T,  dA_lf).normalized();
+    const Quat pelvisYaw    = yaw_only_quat(pelvisWorld);
+    const Quat pelvisYawInv = pelvisYaw.inv();
+    m_tposeFootRefPelR = quat_mult(pelvisYawInv, rFootWorld).normalized();
+    m_tposeFootRefPelL = quat_mult(pelvisYawInv, lFootWorld).normalized();
+    m_tposeFootAnchorValid = true;
 }
 
 void MocapViewport::updatePose(const std::array<Quat, kXsensSegmentCount>& orient,
@@ -7491,6 +7739,11 @@ void MocapViewport::updatePose(const std::array<Quat, kXsensSegmentCount>& orien
                     // Engage lock — freeze at current quat.
                     m_locked[i]   = true;
                     m_lockQuat[i] = m_prevQ[i];
+                    // FIX (terminator smoothing): start lock-in ramp at 0 → 1
+                    // over ~7 frames (77ms @90Hz).  Without this lock jumps
+                    // from orient[i] straight to m_lockQuat[i] which may
+                    // differ by 0.5°-1° → visible step.
+                    m_lockBlend[i] = 0.0;
                 }
             } else {
                 // Motion detected → release lock, reset counter.
@@ -7499,7 +7752,15 @@ void MocapViewport::updatePose(const std::array<Quat, kXsensSegmentCount>& orien
             }
 
             if (m_locked[i]) {
-                filtered[i] = m_lockQuat[i];
+                // FIX (terminator smoothing): lock-in blend — ramp от orient
+                // в сторону m_lockQuat за ~77ms.  m_lockBlend[i]==1 → full
+                // lock как раньше; <1 → linear-ish blend.
+                if (m_lockBlend[i] < 1.0) {
+                    filtered[i] = nlerpQ(orient[i], m_lockQuat[i], m_lockBlend[i]);
+                    m_lockBlend[i] = std::min(1.0, m_lockBlend[i] + 0.15);
+                } else {
+                    filtered[i] = m_lockQuat[i];
+                }
                 m_unlockBlend[i] = 0.30;
             } else if (m_unlockBlend[i] < 1.0) {
                 filtered[i] = nlerpQ(m_outPrevQ[i], orient[i], m_unlockBlend[i]);
@@ -7621,17 +7882,46 @@ void MocapViewport::updatePose(const std::array<Quat, kXsensSegmentCount>& orien
 
                 const Quat dA_f = m_skel ? m_skel->defAngFor(i) : Quat(1, 0, 0, 0);
                 const Quat dA_ll = m_skel ? m_skel->defAngFor(iLowerLeg) : Quat(1, 0, 0, 0);
+                const Quat dA_pel = m_skel ? m_skel->defAngFor(SEG_Pelvis) : Quat(1, 0, 0, 0);
                 const Quat fWorld  = quat_mult(filtered[i],         dA_f).normalized();
                 const Quat llWorld = quat_mult(filtered[iLowerLeg], dA_ll).normalized();
+                const Quat pelvisWorld = quat_mult(filtered[SEG_Pelvis], dA_pel).normalized();
+
+                // FIX (T-pose foot direction reference + cross-legged):
+                // если есть T-pose anchor → используем pelvis-yaw как
+                // stable reference (lowerLeg уезжает при flex'е колена,
+                // искажая yaw drift detection).  Cross-legged confidence
+                // (0..1) глушит коррекцию: при перекрёщенных ногах
+                // lowerLeg/pelvis-yaw геометрия "запутана" и коррекция
+                // может развернуть стопу неправильно.
+                const bool useTposeRef = m_tposeFootAnchorValid;
+                const Quat refWorld = useTposeRef
+                                    ? yaw_only_quat(pelvisWorld)
+                                    : llWorld;
+                const double crossConf = (i == SEG_RFoot) ? m_crossLeggedConfR
+                                                          : m_crossLeggedConfL;
+                const bool   crossLeg  = (i == SEG_RFoot) ? m_crossLeggedR
+                                                          : m_crossLeggedL;
+                const double gateAttn = std::max(0.0, 1.0 - crossConf);
+                const Quat tposeAnchorLocal = (i == SEG_RFoot)
+                                            ? m_tposeFootRefPelR
+                                            : m_tposeFootRefPelL;
 
                 if (m_locked[i]) {
-                    m_anchorLocal[i] = quat_mult(llWorld.inv(), fWorld).normalized();
-                    m_anchorValid[i] = true;
+                    // Анкор: если T-pose pinned — НЕ перезаписываем (как
+                    // в hand block для T-pose hand anchor).  Иначе старый
+                    // путь: lowerLeg-relative.
+                    if (!useTposeRef) {
+                        m_anchorLocal[i] = quat_mult(llWorld.inv(), fWorld).normalized();
+                        m_anchorValid[i] = true;
+                    }
                     m_driftLocal[i]  = nlerpQ(m_driftLocal[i], Quat(1, 0, 0, 0),
                                               std::min(1.0, dt / 5.0));
-                } else if (m_anchorValid[i] && m_calmSeconds[i] >= 2.0) {
-                    const Quat current_local = quat_mult(llWorld.inv(), fWorld).normalized();
-                    Quat drift = quat_mult(current_local, m_anchorLocal[i].inv()).normalized();
+                } else if ((useTposeRef || m_anchorValid[i]) && m_calmSeconds[i] >= 2.0) {
+                    const Quat anchorLocal = useTposeRef ? tposeAnchorLocal
+                                                         : m_anchorLocal[i];
+                    const Quat current_local = quat_mult(refWorld.inv(), fWorld).normalized();
+                    Quat drift = quat_mult(current_local, anchorLocal.inv()).normalized();
                     if (drift.w < 0) {
                         drift.w = -drift.w; drift.x = -drift.x;
                         drift.y = -drift.y; drift.z = -drift.z;
@@ -7641,9 +7931,19 @@ void MocapViewport::updatePose(const std::array<Quat, kXsensSegmentCount>& orien
                     // Бюджет 15° — стопа в покое почти не отклоняется,
                     // ужесточаем чтобы убрать настоящий yaw drift.
                     const double driftBudget = M_PI / 12.0;
-                    if (allCalm && driftAngle < driftBudget) {
-                        const double alpha = std::min(1.0, dt / 3.0);
-                        m_driftLocal[i] = nlerpQ(m_driftLocal[i], drift, alpha);
+                    // FIX (terminator smoothing): smoothstep attenuation
+                    // [0.7*budget .. budget].  Старый код hard-cut при
+                    // driftAngle >= budget — коррекция мгновенно отключалась.
+                    // Теперь плавно затухает в полосе 10.5°..15°.
+                    // FIX (cross-legged): дополнительно глушим при crossLeg.
+                    if (allCalm && !crossLeg) {
+                        auto smoothstep01 = [](double x){ x = std::clamp(x,0.0,1.0); return x*x*(3.0-2.0*x); };
+                        const double budgetAttn = smoothstep01(
+                                (driftBudget - driftAngle) / (driftBudget * 0.3));
+                        if (budgetAttn > 0.0) {
+                            const double alpha = std::min(1.0, dt / 3.0) * budgetAttn * gateAttn;
+                            m_driftLocal[i] = nlerpQ(m_driftLocal[i], drift, alpha);
+                        }
                     }
                     // Корректируем только TWIST вокруг мирового +Z (yaw),
                     // swing (наклон стопы) НЕ ТРОГАЕМ.
@@ -7652,9 +7952,14 @@ void MocapViewport::updatePose(const std::array<Quat, kXsensSegmentCount>& orien
                     if (2.0 * std::acos(dw) > 1e-4) {
                         Quat dLSwing, dLTwist;
                         swingTwistDecompose(dL, QVector3D(0.0f, 0.0f, 1.0f), dLSwing, dLTwist);
-                        const Quat dLTwistInv = dLTwist.inv();
-                        const Quat correctionWorld = quat_mult(llWorld,
-                                                       quat_mult(dLTwistInv, llWorld.inv())).normalized();
+                        Quat dLTwistInv = dLTwist.inv();
+                        // FIX (cross-legged): дополнительно слегка damp
+                        // twist correction при crossConf > 0.
+                        if (crossConf > 0.0) {
+                            dLTwistInv = slerp_quat(dLTwistInv, Quat(1, 0, 0, 0), crossConf);
+                        }
+                        const Quat correctionWorld = quat_mult(refWorld,
+                                                       quat_mult(dLTwistInv, refWorld.inv())).normalized();
                         const Quat fCorrected = quat_mult(correctionWorld, fWorld).normalized();
                         filtered[i] = quat_mult(fCorrected, dA_f.inv()).normalized();
                     }
@@ -7669,6 +7974,7 @@ void MocapViewport::updatePose(const std::array<Quat, kXsensSegmentCount>& orien
             m_stillTicks[i] = 0.0;
             m_locked[i] = false;
             m_unlockBlend[i] = 1.0;
+            m_lockBlend[i] = 1.0;
             m_outPrevQ[i] = orient[i];
             m_anchorValid[i] = false;
             m_anchorLocal[i] = Quat(1, 0, 0, 0);
@@ -7807,13 +8113,18 @@ void MocapViewport::drawReferenceFrame()
 
 QVector3D MocapViewport::tickLoco(
         const std::array<Quat, kXsensSegmentCount>& q,
-        const QVector3D& fkRFoot,
-        const QVector3D& fkLFoot,
+        const QVector3D& fkRHeel,
+        const QVector3D& fkRBall,
+        const QVector3D& fkRTip,
+        const QVector3D& fkLHeel,
+        const QVector3D& fkLBall,
+        const QVector3D& fkLTip,
         double tSec)
 {
     m_lastLocoOffset = m_loco.update(
             q[SEG_RFoot], q[SEG_LFoot], q[SEG_Pelvis],
-            fkRFoot,      fkLFoot,
+            fkRHeel, fkRBall, fkRTip,
+            fkLHeel, fkLBall, fkLTip,
             tSec);
     return m_lastLocoOffset;
 }
@@ -9482,6 +9793,15 @@ MainWindow::MainWindow(MocapReceiver* rx,
                 m_setup.tposeReference[SEG_RHand],
                 m_setup.tposeReference[SEG_LForearm],
                 m_setup.tposeReference[SEG_LHand]);
+            // FIX (T-pose foot direction reference): pin foot-yaw anchor.
+            // В T-pose стопы смотрят вперёд по +X в pelvis-yaw-frame;
+            // anchor берётся из 500-кадрового averaging T-позы.  После
+            // этого foot-yaw drift correction использует pelvis-yaw как
+            // reference (не lowerLeg, который меняется при flex'е колена).
+            m_viewport->setTposeFootAnchor(
+                m_setup.tposeReference[SEG_Pelvis],
+                m_setup.tposeReference[SEG_RFoot],
+                m_setup.tposeReference[SEG_LFoot]);
         }
 
         // FIX (gloves polish): установить per-actor finger baseline,
@@ -9793,26 +10113,39 @@ void MainWindow::onRenderTick()
             const bool gyroQuiet =
                 (f.gyrSensor[SEG_Pelvis].lengthSquared() < (25.0f * 25.0f)) &&
                 (f.gyrSensor[i].lengthSquared()          < (25.0f * 25.0f));
-            if (jumpDeg > 35.0 && gyroQuiet) {
-                if (m_test) {
-                    std::cout << "[fk-jump] seg[" << i << "] " << kSegmentNames[i]
-                              << " jump=" << std::fixed << std::setprecision(1) << jumpDeg
-                              << "° rejected (gyrQuiet, pelvisGyr="
-                              << std::sqrt(double(f.gyrSensor[SEG_Pelvis].lengthSquared()))
-                              << " segGyr=" << std::sqrt(double(f.gyrSensor[i].lengthSquared()))
-                              << ")\n";
-                }
-                cand = s_lastOut[i];
-            } else if (jumpDeg > 20.0 && m_test) {
-                static std::array<int, kXsensSegmentCount> s_lastLogTick{};
-                static int s_globalTick = 0;
-                s_globalTick++;
-                if (s_globalTick - s_lastLogTick[i] > 60) {
-                    s_lastLogTick[i] = s_globalTick;
-                    std::cout << "[fk-large] seg[" << i << "] " << kSegmentNames[i]
-                              << " jump=" << std::fixed << std::setprecision(1) << jumpDeg
-                              << "° accepted (segGyr="
-                              << std::sqrt(double(f.gyrSensor[i].lengthSquared())) << ")\n";
+            // FIX (terminator smoothing): smoothstep blend [20..35]°.
+            // Раньше: hard cliff на 35° — 34.9° принимается полностью,
+            // 35.1° отвергается полностью.  Теперь: rejectW=0 при <20°,
+            // rejectW=1 при >35°, плавный slerp_quat в середине.  Соблюдаем
+            // gyroQuiet gate — IMU должен быть тихим, иначе доверяем.
+            if (gyroQuiet && jumpDeg > 20.0) {
+                auto smoothstep01 = [](double x){ x = std::clamp(x,0.0,1.0); return x*x*(3.0-2.0*x); };
+                const double rejectW = smoothstep01((jumpDeg - 20.0) / 15.0);
+                if (rejectW > 0.999) {
+                    if (m_test) {
+                        std::cout << "[fk-jump] seg[" << i << "] " << kSegmentNames[i]
+                                  << " jump=" << std::fixed << std::setprecision(1) << jumpDeg
+                                  << "° full-reject (gyrQuiet, pelvisGyr="
+                                  << std::sqrt(double(f.gyrSensor[SEG_Pelvis].lengthSquared()))
+                                  << " segGyr=" << std::sqrt(double(f.gyrSensor[i].lengthSquared()))
+                                  << ")\n";
+                    }
+                    cand = s_lastOut[i];
+                } else if (rejectW > 0.0) {
+                    cand = slerp_quat(cand, s_lastOut[i], rejectW);
+                    if (m_test) {
+                        static std::array<int, kXsensSegmentCount> s_lastLogTick{};
+                        static int s_globalTick = 0;
+                        s_globalTick++;
+                        if (s_globalTick - s_lastLogTick[i] > 60) {
+                            s_lastLogTick[i] = s_globalTick;
+                            std::cout << "[fk-jump] seg[" << i << "] " << kSegmentNames[i]
+                                      << " jump=" << std::fixed << std::setprecision(1) << jumpDeg
+                                      << "° blend rejectW=" << std::setprecision(2) << rejectW
+                                      << " (segGyr=" << std::sqrt(double(f.gyrSensor[i].lengthSquared()))
+                                      << ")\n";
+                        }
+                    }
                 }
             }
         }
@@ -9963,15 +10296,40 @@ void MainWindow::onRenderTick()
     if (m_skel) {
         const float pelvisZ_loco = float(m_setup.heightCm * 0.55 / 100.0);
         auto kpLoco = m_skel->computeKeypoints(qOut, QVector3D(0.0f, 0.0f, pelvisZ_loco));
-        auto lowest3 = [](const QVector3D& a, const QVector3D& b, const QVector3D& c) -> QVector3D {
-            const QVector3D& ab = a.z() < b.z() ? a : b;
-            return ab.z() < c.z() ? ab : c;
-        };
-        const QVector3D fkRFoot = lowest3(kpLoco[SEG_RFoot], kpLoco[SEG_RToe], kpLoco[26]);
-        const QVector3D fkLFoot = lowest3(kpLoco[SEG_LFoot], kpLoco[SEG_LToe], kpLoco[27]);
+        // FIX (heel/toe contact discrimination): передаём heel/ball/tip
+        // трёх точек стопы, а не lowest.  Solver сам определит active
+        // contact point по footPitchZ.
+        // kpLoco индексы: SEG_RFoot=17 (heel), SEG_RToe=18 (ball), 26 (tip);
+        //                  SEG_LFoot=21, SEG_LToe=22, 27.
         const double tSec = std::chrono::duration<double>(
                 std::chrono::steady_clock::now().time_since_epoch()).count();
-        m_viewport->tickLoco(qOut, fkRFoot, fkLFoot, tSec);
+
+        // FIX (cross-legged direction protection): determine cross-legged
+        // state in pelvis-yaw frame.  В Xsens NWU pelvis +Y = left, +X = forward.
+        // Right foot expected: rPel.y < 0; left foot: lPel.y > 0.  Cross =
+        // когда знак инвертирован.  crossConf = smoothstep(y / 0.08m) на
+        // wrong side, 0 на правильной стороне.
+        {
+            auto sstep01 = [](double x){ x = std::clamp(x,0.0,1.0); return x*x*(3.0-2.0*x); };
+            const QVector3D pelvisXY(kpLoco[SEG_Pelvis].x(),
+                                     kpLoco[SEG_Pelvis].y(), 0.0f);
+            const QVector3D rXY(kpLoco[SEG_RFoot].x() - pelvisXY.x(),
+                                kpLoco[SEG_RFoot].y() - pelvisXY.y(), 0.0f);
+            const QVector3D lXY(kpLoco[SEG_LFoot].x() - pelvisXY.x(),
+                                kpLoco[SEG_LFoot].y() - pelvisXY.y(), 0.0f);
+            const Quat qPYawInv = yaw_only_quat(qOut[SEG_Pelvis]).inv();
+            const QVector3D rPel = vec_rotate(rXY, qPYawInv);
+            const QVector3D lPel = vec_rotate(lXY, qPYawInv);
+            // Right cross when rPel.y > 0; left cross when lPel.y < 0.
+            const double cR = sstep01(double(rPel.y()) / 0.08);
+            const double cL = sstep01(double(-lPel.y()) / 0.08);
+            m_viewport->setCrossLeggedHints(cR > 0.5, cL > 0.5, cR, cL);
+        }
+
+        m_viewport->tickLoco(qOut,
+                             kpLoco[SEG_RFoot], kpLoco[SEG_RToe], kpLoco[26],
+                             kpLoco[SEG_LFoot], kpLoco[SEG_LToe], kpLoco[27],
+                             tSec);
     }
 
     // --- Live streaming --------------------------------------------------
