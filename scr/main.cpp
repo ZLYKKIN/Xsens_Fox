@@ -1546,6 +1546,7 @@ QVector3D LocomotionSolver::update(const Quat& qR,
         // 4. Classify pose.
         double tiltCos = 1.0;
         const PoseKind newPose = _classifyPose(qPelvis, fkR, fkL, tiltCos);
+        m_lastTiltCos = tiltCos;
         if (newPose == m_pose)
             m_poseTicks = std::min(m_poseTicks + 1, 4096);
         else
@@ -2488,6 +2489,19 @@ struct MocapReceiver::Impl {
     std::array<QVector3D, kXsensSegmentCount> dbgGyrBody{};   // deg/s, body frame
     std::array<QVector3D, kXsensSegmentCount> dbgMagBody{};   // norm, body frame
     std::array<QVector3D, kXsensSegmentCount> dbgGyrFused{};  // deg/s, post-bias
+    // -test per-stage capture so [FUSED SNAPSHOT] can print every transform of
+    // every axis from arrival to filter input: raw SDI -> reconstructed ->
+    // acc-norm -> gyr-bias -> mag soft-iron -> s2s.  Receiver-thread only.
+    std::array<QVector3D, kXsensSegmentCount> dbgVelInc{};    // raw Δv (SDI)
+    std::array<QVector3D, kXsensSegmentCount> dbgDqXyz{};     // raw Δq.xyz (SDI)
+    std::array<QVector3D, kXsensSegmentCount> dbgAccPre{};    // g, post-SDI, pre-cal
+    std::array<QVector3D, kXsensSegmentCount> dbgGyrPre{};    // deg/s, post-SDI, pre-cal
+    std::array<QVector3D, kXsensSegmentCount> dbgMagPre{};    // raw mag, pre soft-iron
+    std::array<QVector3D, kXsensSegmentCount> dbgAccNorm{};   // g, post acc-norm
+    std::array<QVector3D, kXsensSegmentCount> dbgGyrUnbias{}; // deg/s, post gyr-bias
+    std::array<QVector3D, kXsensSegmentCount> dbgMagSoft{};   // post soft-iron/norm
+    std::array<Quat,      kXsensSegmentCount> dbgFusedQuat{}; // fusion output (world)
+    std::array<quint8,    kXsensSegmentCount> dbgChainFlags{};// bit0 haveMag bit1 SDI bit2 absAccGyr
 
     std::array<std::array<double, 9>, kXsensSegmentCount> magSoftMat{};
     std::array<QVector3D, kXsensSegmentCount>             magSoftOff{};
@@ -3946,6 +3960,20 @@ void MocapReceiver::run()
                 if (haveMag) staging.magSensor[targetSeg] = mag;
             }
 
+            // -test: capture the raw SDI increments and the post-SDI,
+            // pre-calibration sample so [FUSED] can trace every axis from
+            // arrival forward.  Receiver-thread only (same thread as the dump).
+            if (I.test && targetSeg >= 0 && targetSeg < kXsensSegmentCount) {
+                I.dbgVelInc[targetSeg] = velInc;
+                I.dbgDqXyz[targetSeg]  = QVector3D(float(dq.x), float(dq.y), float(dq.z));
+                I.dbgAccPre[targetSeg] = accForFilter;
+                I.dbgGyrPre[targetSeg] = gyrForFilter;
+                I.dbgMagPre[targetSeg] = mag;
+                I.dbgChainFlags[targetSeg] =
+                    quint8((haveMag ? 1 : 0) | ((haveVelInc && haveDq) ? 2 : 0)
+                           | ((haveAcc && haveGyr) ? 4 : 0));
+            }
+
             // Hipose apply_imu_calibration, in order:
             //   acc_cal = acc / acc_magn   (unit-g scaled)
             //   gyr_cal = gyr - gyr_bias   (DC offset removed)
@@ -3958,6 +3986,8 @@ void MocapReceiver::run()
                 const double a = cal.accMagn;
                 if (a > 1e-6) accForFilter = accForFilter / float(a);
             }
+            if (I.test && targetSeg >= 0 && targetSeg < kXsensSegmentCount)
+                I.dbgAccNorm[targetSeg] = accForFilter;
 
             // Gyro DC-bias removal — without this a sensor's tiny constant
             // drift accumulates into a visible yaw/pitch creep over the
@@ -3966,6 +3996,8 @@ void MocapReceiver::run()
             if (cal.gyrBiasActive) {
                 gyrForFilter = gyrForFilter - cal.gyrBias;
             }
+            if (I.test && targetSeg >= 0 && targetSeg < kXsensSegmentCount)
+                I.dbgGyrUnbias[targetSeg] = gyrForFilter;
 
             if (cal.magSoftActive && haveMag)
             {
@@ -3984,6 +4016,8 @@ void MocapReceiver::run()
                 const double m = cal.magMagn;
                 if (m > 1e-6) mag = mag / float(m);
             }
+            if (I.test && targetSeg >= 0 && targetSeg < kXsensSegmentCount)
+                I.dbgMagSoft[targetSeg] = mag;
 
             // Sensor-to-segment rotation so the fusion output is already
             // in body-segment-world space.
@@ -4114,6 +4148,7 @@ void MocapReceiver::run()
                     fusedQuat = Quat(fq.element.w, fq.element.x,
                                      fq.element.y, fq.element.z).normalized();
                     haveFused = true;
+                    if (I.test) I.dbgFusedQuat[targetSeg] = fusedQuat;
                 } else {
                     // Filter state went non-finite — drop it and force a clean
                     // re-init on the next packet so the sensor can recover.
@@ -4328,6 +4363,43 @@ void MocapReceiver::run()
                        << " magB=("  << std::setw(8) << mb.x() << "," << std::setw(8) << mb.y()
                                      << "," << std::setw(8) << mb.z() << ")\n";
                 }
+                // -test: full per-axis transform chain from arrival to fusion
+                // input for every sensor that produced a sample this snapshot.
+                // Values are the EXACT ones the fusion loop used (single source),
+                // so a per-axis sign/scale/units bug is visible without the
+                // viewport.  Verbose, but periodic (every 1.5 s) — detail, not
+                // frequency, per the logging spec.
+                ss << std::setprecision(4);
+                ss << "--- per-axis sensor transform chain (raw SDI -> recon -> "
+                      "accNorm/gyrBias/magSoft -> s2s body -> fused) ---\n";
+                {
+                    auto V = [&](const QVector3D& v){
+                        ss << "(" << std::setw(8) << v.x() << "," << std::setw(8) << v.y()
+                           << "," << std::setw(8) << v.z() << ")"; };
+                    for (int i = 0; i < kXsensSegmentCount; ++i) {
+                        const quint8 fl = I.dbgChainFlags[i];
+                        if (fl == 0) continue;              // no sample from this sensor
+                        const char* src = (fl & 2) ? "SDI" : (fl & 4) ? "absAccGyr" : "?";
+                        const Quat& fq = I.dbgFusedQuat[i];
+                        ss << "  chain[" << std::setw(2) << i << "] "
+                           << std::left << std::setw(14) << kSegmentNames[i] << std::right
+                           << " src=" << src << (fl & 1 ? " +mag" : " no-mag") << "\n";
+                        ss << "      acc velInc="; V(I.dbgVelInc[i]);
+                        ss << " pre(g)=";   V(I.dbgAccPre[i]);
+                        ss << " norm(/" << std::setw(6) << I.accMagn[i] << ")="; V(I.dbgAccNorm[i]);
+                        ss << " s2sBody="; V(I.dbgAccBody[i]); ss << "\n";
+                        ss << "      gyr dq.xyz="; V(I.dbgDqXyz[i]);
+                        ss << " pre(d/s)="; V(I.dbgGyrPre[i]);
+                        ss << " unbias=";   V(I.dbgGyrUnbias[i]);
+                        ss << " s2sBody=";  V(I.dbgGyrBody[i]);
+                        ss << " fused=";    V(I.dbgGyrFused[i]); ss << "\n";
+                        ss << "      mag raw="; V(I.dbgMagPre[i]);
+                        ss << " soft/norm="; V(I.dbgMagSoft[i]);
+                        ss << " s2sBody=";   V(I.dbgMagBody[i]); ss << "\n";
+                        ss << "      fusedQuat=(" << std::setw(8) << fq.w << "," << std::setw(8) << fq.x
+                           << "," << std::setw(8) << fq.y << "," << std::setw(8) << fq.z << ")\n";
+                    }
+                }
                 ss << std::setprecision(3);
                 // Calibration state — printed once so misreads at the
                 // raw→normalised boundary are immediately diagnosable.
@@ -4336,6 +4408,17 @@ void MocapReceiver::run()
                    << "  magNorm=" << (I.magNormActive ? "on" : "off")
                    << "  gyrBias=" << (I.gyrBiasActive ? "on" : "off")
                    << "  freq=" << std::setprecision(1) << I.freqHz << "Hz ---\n";
+                // Madgwick/xio AHRS settings (Pelvis sensor, representative) so
+                // the fusion stage's tunables are auditable from the log.
+                {
+                    const FusionAhrsSettings& fs = I.ahrsCfg[SEG_Pelvis];
+                    ss << "--- fusion (xio AHRS, seg[0] Pelvis): gain="
+                       << std::setprecision(2) << fs.gain
+                       << " gyroRange=" << std::setprecision(0) << fs.gyroscopeRange
+                       << " accelRej=" << std::setprecision(1) << fs.accelerationRejection << "°"
+                       << " magRej=" << fs.magneticRejection << "°"
+                       << " recoveryTrig=" << fs.recoveryTriggerPeriod << " ticks ---\n";
+                }
                 if (I.accNormActive || I.magNormActive || I.gyrBiasActive
                     || I.s2sActive) {
                     ss << std::setprecision(4);
@@ -8450,6 +8533,7 @@ void MocapViewport::drawSkeleton()
     // tug the whole skeleton up.  Should be rare now that locomotion pins Z.
     float minZ = kp[0].z();
     for (const auto& p : kp) if (p.z() < minZ) minZ = p.z();
+    m_lastFloorClamp = (minZ < -0.02f) ? -minZ : 0.0f;   // -test [VIEW]
     if (minZ < -0.02f) {
         const QVector3D shift(0, 0, -minZ);
         for (auto& p : kp) p += shift;
@@ -8518,6 +8602,11 @@ void MocapViewport::drawSkeleton()
             }
         }
     }
+
+    // -test [VIEW]: cache the keypoints the operator literally sees this frame
+    // (post loco + floor-clamp + yaw + shift + freeze + prayer nudge) so the
+    // log can compare on-screen pose vs raw FK without recomputing framing.
+    m_lastRenderedKp = kp;
 
     // Bones (GL_LINES).  Orange.
     glLineWidth(3.0f);
@@ -9030,6 +9119,19 @@ void LiveStreamSender::pushFrameWithGloves(quint32 sample,
         m_impl->baselineBodyQ = segQuat;
         m_impl->baselinePelvisPos = pelvisPos;
         m_impl->baselineCaptured = true;
+        if (m_cfg.verboseLog) {
+            // -test §6: the T-pose body baseline that makes the wire q identity
+            // at the calibration pose (wire q = world . baseline^-1).
+            std::ostringstream bs;
+            bs << std::fixed << std::setprecision(4)
+               << "\n========== [STREAM BASELINE] body T-pose captured ==========\n"
+               << "  pelvisPos=(" << pelvisPos.x() << "," << pelvisPos.y() << "," << pelvisPos.z() << ")\n";
+            for (int i = 0; i < kXsensSegmentCount; ++i)
+                bs << "  base[" << std::setw(2) << i << "] " << std::left << std::setw(14)
+                   << kSegmentNames[i] << std::right << " q=(" << segQuat[i].w << ","
+                   << segQuat[i].x << "," << segQuat[i].y << "," << segQuat[i].z << ")\n";
+            std::cout << bs.str(); std::cout.flush();
+        }
     }
 
     if (m_impl->fingerBaselineSamples < Impl::kFingerBaselineWindow) {
@@ -9044,6 +9146,20 @@ void LiveStreamSender::pushFrameWithGloves(quint32 sample,
             }
         }
         m_impl->fingerBaselineSamples++;
+        if (m_cfg.verboseLog && m_impl->fingerBaselineSamples == Impl::kFingerBaselineWindow) {
+            // -test §6: the averaged finger baselines (identity at T-pose).
+            std::ostringstream fb;
+            fb << std::fixed << std::setprecision(4)
+               << "\n========== [STREAM BASELINE] finger baselines captured ("
+               << Impl::kFingerBaselineWindow << " samples) ==========\n";
+            for (int i = 0; i < kFingerSegmentsHand; ++i)
+                fb << "  L[" << std::setw(2) << i << "]=(" << m_impl->baselineLeftGloveQ[i].w << ","
+                   << m_impl->baselineLeftGloveQ[i].x << "," << m_impl->baselineLeftGloveQ[i].y << ","
+                   << m_impl->baselineLeftGloveQ[i].z << ")  R[" << std::setw(2) << i << "]=("
+                   << m_impl->baselineRightGloveQ[i].w << "," << m_impl->baselineRightGloveQ[i].x << ","
+                   << m_impl->baselineRightGloveQ[i].y << "," << m_impl->baselineRightGloveQ[i].z << ")\n";
+            std::cout << fb.str(); std::cout.flush();
+        }
     }
 
     m_impl->maybeRetransmitHandshake();
@@ -10605,6 +10721,41 @@ void MainWindow::onFps(double hz)
     if (m_panel) m_panel->setFps(hz);
 }
 
+// -test render-pipeline diagnostics (main thread only).  Every field is filled
+// INSIDE the real transform in onRenderTick() — the [RENDER]/[pulse]/[evt:*]
+// logging only reads it, so the log can never diverge from the live math.
+namespace {
+struct RenderDiag {
+    // §2 calibration offset  cand[i] = raw[i] * refWorldInv[i]; jump-reject.
+    std::array<double, kXsensSegmentCount> jumpDeg{};   // |cand vs lastOut|, deg
+    std::array<double, kXsensSegmentCount> rejectW{};   // 0..1 smoothstep reject
+    std::array<bool,   kXsensSegmentCount> gyroQuiet{};
+    std::array<double, kXsensSegmentCount> localAng{};  // angle vs parent, deg
+    // §3 spine/neck smoothstep blend weights (constant, captured at source).
+    double spineW_L5 = 0.0, spineW_L3 = 0.0, spineW_T12 = 0.0, neckW = 0.5;
+    // §3 scapular-humeral coupling (per shoulder).
+    double scapUpZR = 0.0, scapAngR = 0.0, scapUpZL = 0.0, scapAngL = 0.0;
+    bool   scapActiveR = false, scapActiveL = false;
+    // §3 wrist-forearm coupling (per wrist): forearm twist follows hand twist.
+    double wTwistHalfR = 0.0, faTwistAddR = 0.0;
+    double wTwistHalfL = 0.0, faTwistAddL = 0.0;
+};
+RenderDiag g_renderDiag{};
+
+// Shared compact formatters so every -test render line reads identically and
+// is grep/column friendly.
+inline std::string fmtQ4(const Quat& q) {
+    char b[96];
+    std::snprintf(b, sizeof(b), "(% .4f,% .4f,% .4f,% .4f)", q.w, q.x, q.y, q.z);
+    return std::string(b);
+}
+inline std::string fmtV3(const QVector3D& v) {
+    char b[80];
+    std::snprintf(b, sizeof(b), "(% .4f,% .4f,% .4f)", v.x(), v.y(), v.z());
+    return std::string(b);
+}
+} // namespace
+
 void MainWindow::onRenderTick()
 {
     const SuitPose f = m_rx->snapshot();
@@ -10710,6 +10861,10 @@ void MainWindow::onRenderTick()
     for (int i = 0; i < kXsensSegmentCount; ++i) {
         if (!kTracked[i]) continue;
 
+        g_renderDiag.jumpDeg[i]   = 0.0;   // -test §2: reset per-frame
+        g_renderDiag.rejectW[i]   = 0.0;
+        g_renderDiag.gyroQuiet[i] = false;
+
         Quat cand = quat_mult(raw[i], s_refWorldInv[i]).normalized();
 
         if (f.segValid[i] && s_haveOut[i]) {
@@ -10717,6 +10872,8 @@ void MainWindow::onRenderTick()
             const bool gyroQuiet =
                 (f.gyrSensor[SEG_Pelvis].lengthSquared() < (25.0f * 25.0f)) &&
                 (f.gyrSensor[i].lengthSquared()          < (25.0f * 25.0f));
+            g_renderDiag.jumpDeg[i]   = jumpDeg;   // -test §2 capture
+            g_renderDiag.gyroQuiet[i] = gyroQuiet;
             // FIX (terminator smoothing): smoothstep blend [20..35]°.
             // Раньше: hard cliff на 35° — 34.9° принимается полностью,
             // 35.1° отвергается полностью.  Теперь: rejectW=0 при <20°,
@@ -10725,6 +10882,7 @@ void MainWindow::onRenderTick()
             if (gyroQuiet && jumpDeg > 20.0) {
                 auto smoothstep01 = [](double x){ x = std::clamp(x,0.0,1.0); return x*x*(3.0-2.0*x); };
                 const double rejectW = smoothstep01((jumpDeg - 20.0) / 15.0);
+                g_renderDiag.rejectW[i] = rejectW;   // -test §2 capture
                 if (rejectW > 0.999) {
                     if (m_test) {
                         std::cout << "[fk-jump] seg[" << i << "] " << kSegmentNames[i]
@@ -10828,6 +10986,10 @@ void MainWindow::onRenderTick()
     q[SEG_Neck] = slerp_quat(q[SEG_T8],     q[SEG_Head], 0.50);
     q[SEG_RToe] = q[SEG_RFoot];
     q[SEG_LToe] = q[SEG_LFoot];
+    g_renderDiag.spineW_L5  = smoothstep(0.22);   // -test §3 capture (single source)
+    g_renderDiag.spineW_L3  = smoothstep(0.50);
+    g_renderDiag.spineW_T12 = smoothstep(0.78);
+    g_renderDiag.neckW      = 0.50;
 
     if (m_skel) {
         const Quat dA_pel = m_skel->defAngFor(SEG_Pelvis);
@@ -10841,10 +11003,17 @@ void MainWindow::onRenderTick()
             const QVector3D armDir = vec_rotate(QVector3D(1.0f, 0.0f, 0.0f), uaWorld);
             const double upZ = std::clamp(double(armDir.z()), -1.0, 1.0);
             const double activate = 0.30;
-            if (upZ < activate) return;
+            // -test §3 capture: arm-elevation gate + applied scapular angle.
+            if (isRight) { g_renderDiag.scapUpZR = upZ; g_renderDiag.scapActiveR = (upZ >= activate); }
+            else         { g_renderDiag.scapUpZL = upZ; g_renderDiag.scapActiveL = (upZ >= activate); }
+            if (upZ < activate) {
+                if (isRight) g_renderDiag.scapAngR = 0.0; else g_renderDiag.scapAngL = 0.0;
+                return;
+            }
             const double normalised = (upZ - activate) / (1.0 - activate);
             const double scapAng = normalised * 0.30;
             const double signedAng = isRight ? -scapAng : scapAng;
+            if (isRight) g_renderDiag.scapAngR = signedAng; else g_renderDiag.scapAngL = signedAng;
             // Scapular shrug must rotate around the BODY's forward axis,
             // not world X.  When the actor yaws the body 90°, world X is
             // no longer the body's forward axis, so the old code applied
@@ -10873,6 +11042,9 @@ void MainWindow::onRenderTick()
             const double twistHalf = std::atan2(tx, tw);
             const double couplingFraction = 0.20;
             const double faAdditionalTwist = twistHalf * 2.0 * couplingFraction;
+            // -test §3 capture: hand long-axis twist that the forearm follows.
+            if (iH == SEG_RHand) { g_renderDiag.wTwistHalfR = twistHalf; g_renderDiag.faTwistAddR = faAdditionalTwist; }
+            else                 { g_renderDiag.wTwistHalfL = twistHalf; g_renderDiag.faTwistAddL = faAdditionalTwist; }
             const Quat faTwistAdd = axisAngleQuat(QVector3D(1.0, 0.0, 0.0), faAdditionalTwist);
             const Quat fWorldNew = quat_mult(fWorld, faTwistAdd).normalized();
             q[iFA] = quat_mult(fWorldNew, dA_f.inv()).normalized();
@@ -11302,6 +11474,15 @@ void MainWindow::onRenderTick()
                        << "  wristWorld=(" << std::setprecision(4)
                        << wrist.w << "," << wrist.x << "," << wrist.y << "," << wrist.z << ")"
                        << std::setprecision(3) << "\n";
+                    // §9: wrist world-frame direction so hand orientation/rotation
+                    // is readable directly (forward=+X, up=+Z, palmNormal=+Y).
+                    {
+                        const QVector3D fwd  = vec_rotate(QVector3D(1,0,0), wrist);
+                        const QVector3D up   = vec_rotate(QVector3D(0,0,1), wrist);
+                        const QVector3D palm = vec_rotate(QVector3D(0,1,0), wrist);
+                        ss << "    wristDir fwd=" << fmtV3(fwd) << " up=" << fmtV3(up)
+                           << " palmN=" << fmtV3(palm) << "\n";
+                    }
                     if (!dh.valid) { ss << "    (no ergo data this frame)\n"; return; }
                     for (int fg = 0; fg < 5; ++fg) {
                         const auto& Lm = kFingerLimits[fg];
@@ -11332,10 +11513,203 @@ void MainWindow::onRenderTick()
                 dumpHand("RIGHT", dgR, wristR, f.rightGloveQ, f.rightGloveP);
             }
 
+            // === §2  Calibration offset:  cand[i] = raw[i] · refWorld[i]^-1 ===
+            // refWorld is the T/N-pose calibration reference; the jump-reject
+            // smoothstep [20..35]° (gyroQuiet-gated) guards mag/IMU glitches.
+            ss << std::setprecision(3);
+            ss << "--- calibration offset (cand = raw . refWorld^-1; jump-reject smoothstep[20..35]deg) ---\n";
+            for (int i = 0; i < kXsensSegmentCount; ++i) {
+                if (!kTracked[i]) continue;
+                ss << "  off[" << std::setw(2) << i << "] "
+                   << std::left << std::setw(14) << kSegmentNames[i] << std::right
+                   << " refWorld=" << fmtQ4(s_refWorld[i])
+                   << " jump=" << std::setw(6) << std::setprecision(2) << g_renderDiag.jumpDeg[i] << "deg"
+                   << " rejectW=" << std::setw(5) << std::setprecision(3) << g_renderDiag.rejectW[i]
+                   << (g_renderDiag.gyroQuiet[i] ? " gyrQuiet" : " gyrLive")
+                   << (g_renderDiag.rejectW[i] > 0.999 ? "  *FULL-REJECT*"
+                       : g_renderDiag.rejectW[i] > 0.0 ? "  *blend*" : "")
+                   << "\n";
+            }
+
+            // === §3  Spine/neck smoothstep distribution + arm coupling ===
+            ss << std::setprecision(3);
+            ss << "--- spine/neck interpolation (slerp pelvis..T8..head, w=t^2(3-2t)) ---\n";
+            ss << "  L5  w=" << g_renderDiag.spineW_L5  << " q=" << fmtQ4(q[SEG_L5])
+               << " |a|=" << quat_angle_deg(q[SEG_L5])  << "deg\n";
+            ss << "  L3  w=" << g_renderDiag.spineW_L3  << " q=" << fmtQ4(q[SEG_L3])
+               << " |a|=" << quat_angle_deg(q[SEG_L3])  << "deg\n";
+            ss << "  T12 w=" << g_renderDiag.spineW_T12 << " q=" << fmtQ4(q[SEG_T12])
+               << " |a|=" << quat_angle_deg(q[SEG_T12]) << "deg\n";
+            ss << "  Nck w=" << g_renderDiag.neckW      << " q=" << fmtQ4(q[SEG_Neck])
+               << " |a|=" << quat_angle_deg(q[SEG_Neck])<< "deg\n";
+            ss << "--- arm coupling (scapular-humeral shrug; wrist->forearm twist follow) ---\n";
+            ss << "  scapular R: upZ=" << g_renderDiag.scapUpZR
+               << " active=" << (g_renderDiag.scapActiveR ? "yes" : "no")
+               << " appliedAng=" << (g_renderDiag.scapAngR * 180.0 / M_PI) << "deg | L: upZ="
+               << g_renderDiag.scapUpZL << " active=" << (g_renderDiag.scapActiveL ? "yes" : "no")
+               << " appliedAng=" << (g_renderDiag.scapAngL * 180.0 / M_PI) << "deg\n";
+            ss << "  wrist     R: handTwist=" << (g_renderDiag.wTwistHalfR * 2.0 * 180.0 / M_PI)
+               << "deg forearmFollow=" << (g_renderDiag.faTwistAddR * 180.0 / M_PI) << "deg | L: handTwist="
+               << (g_renderDiag.wTwistHalfL * 2.0 * 180.0 / M_PI) << "deg forearmFollow="
+               << (g_renderDiag.faTwistAddL * 180.0 / M_PI) << "deg\n";
+
+            // === §4  Locomotion solver — pose / feet / fast-movement context ===
+            if (m_viewport) {
+                const LocoDiag L = m_viewport->locoDiag();
+                auto footState = [](double pz){
+                    return pz > 0.17 ? "heel-down(toe-up)"
+                         : pz < -0.17 ? "toe-down(heel-up)" : "flat"; };
+                ss << "--- locomotion: pose / foot contact / heel-toe / pelvis-Z (single source) ---\n";
+                ss << "  pose=" << locoPoseName(L.pose) << " ticks=" << L.poseTicks
+                   << " support=" << (L.support==0?"RIGHT":L.support==1?"LEFT":"BOTH")
+                   << " tiltCos=" << L.tiltCos
+                   << " pelvisZVel=" << L.pelvisZVel << "m/s"
+                   << " airborneT=" << L.airborneTicks << " landedT=" << L.landedTicks
+                   << " zupt=" << L.zuptTicks << "\n";
+                ss << "  R: conf=" << L.confR << (L.committedR?"(commit)":"")
+                   << " angV=" << L.rAngV << " footPitchZ=" << L.footPitchZR
+                   << " blend=" << L.contactBlendR
+                   << " heelLift=" << L.heelLiftConfR << (L.heelLiftR?"*":"")
+                   << " stance=" << footState(L.footPitchZR)
+                   << " anchor=" << fmtV3(L.anchorR) << "\n";
+                ss << "  L: conf=" << L.confL << (L.committedL?"(commit)":"")
+                   << " angV=" << L.lAngV << " footPitchZ=" << L.footPitchZL
+                   << " blend=" << L.contactBlendL
+                   << " heelLift=" << L.heelLiftConfL << (L.heelLiftL?"*":"")
+                   << " stance=" << footState(L.footPitchZL)
+                   << " anchor=" << fmtV3(L.anchorL) << "\n";
+                ss << "  pelvisAngV=" << L.pelvisAngV << " yawAngV=" << L.pelvisYawAngV
+                   << " locoOffset=" << fmtV3(L.offset) << "\n";
+            }
+
+            // === §5  Viewport / operator view (what the operator literally sees) ===
+            if (m_viewport) {
+                const auto& rkp = m_viewport->lastRenderedKeypoints();
+                ss << "--- viewport / operator view (post loco+floor+yaw+shift+freeze) ---\n";
+                ss << std::setprecision(2);
+                ss << "  sceneYaw=" << (m_viewport->sceneYaw() * 180.0 / M_PI) << "deg"
+                   << " sceneShift=" << fmtV3(m_viewport->sceneShift())
+                   << " frozen=" << (m_viewport->isFrozen() ? "yes" : "no")
+                   << " freezeAnchor=" << fmtV3(m_viewport->freezeAnchor())
+                   << " floorClamp=" << std::setprecision(4) << m_viewport->lastFloorClamp() << "m\n";
+                ss << "  rendered pelvis=" << fmtV3(rkp[SEG_Pelvis])
+                   << " rfoot=" << fmtV3(rkp[SEG_RFoot])
+                   << " lfoot=" << fmtV3(rkp[SEG_LFoot]) << "\n";
+                ss << "  rawFK    pelvis=" << fmtV3(pts[SEG_Pelvis])
+                   << " rfoot=" << fmtV3(pts[SEG_RFoot])
+                   << " lfoot=" << fmtV3(pts[SEG_LFoot]) << "\n";
+                int lockedN = 0;
+                for (int i = 0; i < kXsensSegmentCount; ++i) if (m_viewport->segLocked(i)) ++lockedN;
+                ss << "  drift-lock held=" << lockedN << "/" << int(kXsensSegmentCount);
+                for (int i = 0; i < kXsensSegmentCount; ++i)
+                    if (m_viewport->segLocked(i)) ss << " " << kSegmentNames[i];
+                ss << "\n";
+                ss << std::setprecision(3);
+            }
+
             ss << "============================================================\n";
             std::cout << ss.str();
             std::cout.flush();
         }
+    }
+
+    // === §7  Per-frame compact pulse + §8 threshold events ===============
+    // The pulse is one line per UNIQUE sample (deduped on sampleCounter so we
+    // don't reprint a frame when the render timer outruns the suit): a
+    // continuous timeline so drift (steady angles, |w|~0) is told apart from
+    // real motion, and jitter is visible frame-by-frame.  A gap in the
+    // sampleCounter sequence in the log therefore flags a dropped frame.  At
+    // 240 Hz (Link) this is ~240 lines/s; raise kPulseStride to thin it.
+    // Events fire only on transients the periodic 2 s snapshots miss (pose
+    // change, heel<->toe, pelvis-Z spike, |w| jitter), each rate-limited so
+    // rest stays quiet.  All values are read from the single-source diag
+    // structs — no formula is recomputed here.
+    if (m_test) {
+        static constexpr quint64 kPulseStride = 1;   // emit every Nth unique sample
+        const LocoDiag L = m_viewport ? m_viewport->locoDiag() : LocoDiag{};
+        auto jAng = [&](int parent, int child){
+            return quat_angle_deg(quat_mult(q[parent].inv(), q[child])); };
+        int maxSeg = 0; double maxWdeg = 0.0;
+        for (int i = 0; i < kXsensSegmentCount; ++i) {
+            const double wdeg = s_worldOmegaLP[i] * 180.0 / M_PI;   // rad/s -> deg/s
+            if (wdeg > maxWdeg) { maxWdeg = wdeg; maxSeg = i; }
+        }
+        const QVector3D pel = m_viewport
+            ? m_viewport->lastRenderedKeypoints()[SEG_Pelvis] : QVector3D(0,0,0);
+        static quint64 s_pulseLastSample = ~quint64(0);
+        if (f.sampleCounter != s_pulseLastSample &&
+            (f.sampleCounter % kPulseStride) == 0) {
+            s_pulseLastSample = f.sampleCounter;
+            std::ostringstream ps;
+            ps << std::fixed << std::setprecision(1);
+            ps << "[pulse] f=" << f.sampleCounter << " t=" << std::setprecision(2) << now
+               << " dt=" << std::setprecision(1) << (dt * 1000.0) << "ms"
+               << " pose=" << locoPoseName(L.pose)
+               << " pelvis=(" << std::setprecision(3) << pel.x() << "," << pel.y() << "," << pel.z() << ")"
+               << std::setprecision(1)
+               << " ang{Rkn=" << jAng(SEG_RUpperLeg, SEG_RLowerLeg)
+               << " Lkn=" << jAng(SEG_LUpperLeg, SEG_LLowerLeg)
+               << " Rel=" << jAng(SEG_RUpperArm, SEG_RForearm)
+               << " Lel=" << jAng(SEG_LUpperArm, SEG_LForearm)
+               << " Rhip=" << jAng(SEG_Pelvis, SEG_RUpperLeg)
+               << " Lhip=" << jAng(SEG_Pelvis, SEG_LUpperLeg)
+               << " spine=" << jAng(SEG_Pelvis, SEG_T8)
+               << " neck=" << jAng(SEG_T8, SEG_Head) << "}"
+               << " footPitch{R=" << std::setprecision(3) << L.footPitchZR << " L=" << L.footPitchZL << "}"
+               << " heelLift{R=" << (L.heelLiftR ? 1 : 0) << " L=" << (L.heelLiftL ? 1 : 0) << "}"
+               << " pelvisZVel=" << L.pelvisZVel
+               << " maxW=" << kSegmentNames[maxSeg] << ":" << std::setprecision(1) << maxWdeg << "deg/s\n";
+            std::cout << ps.str();
+        }
+
+        static int s_evtTick = 0; s_evtTick++;
+        // (a) pose transition (Stand/Sit/Squat/Lying/Airborne).
+        static int s_prevPose = -1;
+        if (int(L.pose) != s_prevPose) {
+            std::cout << "[evt:pose] f=" << f.sampleCounter << " "
+                      << locoPoseName(s_prevPose < 0 ? 0 : s_prevPose) << " -> " << locoPoseName(L.pose)
+                      << " (tiltCos=" << std::setprecision(3) << L.tiltCos
+                      << " pelvisZVel=" << L.pelvisZVel << "m/s)\n";
+            s_prevPose = int(L.pose);
+        }
+        // (b) per-foot heel<->toe / flat stance change.
+        auto stanceOf = [](double pz){ return pz > 0.17 ? 1 : pz < -0.17 ? -1 : 0; };
+        auto stanceName = [](int s){ return s > 0 ? "heel" : s < 0 ? "toe" : "flat"; };
+        static int s_stanceR = 0, s_stanceL = 0;
+        const int srR = stanceOf(L.footPitchZR), srL = stanceOf(L.footPitchZL);
+        if (srR != s_stanceR) {
+            std::cout << "[evt:foot] f=" << f.sampleCounter << " R " << stanceName(s_stanceR)
+                      << "->" << stanceName(srR) << " footPitchZ=" << std::setprecision(3)
+                      << L.footPitchZR << " pose=" << locoPoseName(L.pose) << "\n";
+            s_stanceR = srR;
+        }
+        if (srL != s_stanceL) {
+            std::cout << "[evt:foot] f=" << f.sampleCounter << " L " << stanceName(s_stanceL)
+                      << "->" << stanceName(srL) << " footPitchZ=" << std::setprecision(3)
+                      << L.footPitchZL << " pose=" << locoPoseName(L.pose) << "\n";
+            s_stanceL = srL;
+        }
+        // (c) pelvis vertical-velocity spike (jump / land / fast squat).
+        static int s_lastPelvisZEvt = -1000;
+        if (std::abs(L.pelvisZVel) > 0.40 && (s_evtTick - s_lastPelvisZEvt) > 15) {
+            s_lastPelvisZEvt = s_evtTick;
+            std::cout << "[evt:pelvisZ] f=" << f.sampleCounter << " pelvisZVel="
+                      << std::setprecision(3) << L.pelvisZVel << "m/s pose=" << locoPoseName(L.pose)
+                      << " airborneT=" << L.airborneTicks << " landedT=" << L.landedTicks << "\n";
+        }
+        // (d) per-segment angular-velocity jitter (rate-limited per segment).
+        static std::array<int, kXsensSegmentCount> s_lastOmegaEvt{};
+        for (int i = 0; i < kXsensSegmentCount; ++i) {
+            const double wdeg = s_worldOmegaLP[i] * 180.0 / M_PI;
+            if (wdeg > 250.0 && (s_evtTick - s_lastOmegaEvt[i]) > 30) {
+                s_lastOmegaEvt[i] = s_evtTick;
+                std::cout << "[evt:omega] f=" << f.sampleCounter << " seg[" << i << "] "
+                          << kSegmentNames[i] << " |w|=" << std::setprecision(1) << wdeg
+                          << "deg/s jump=" << std::setprecision(2) << g_renderDiag.jumpDeg[i]
+                          << "deg rejectW=" << std::setprecision(3) << g_renderDiag.rejectW[i] << "\n";
+            }
+        }
+        std::cout.flush();
     }
 
     // v4: Rotate Manus-local finger positions into WORLD frame.

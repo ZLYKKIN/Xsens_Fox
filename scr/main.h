@@ -241,6 +241,41 @@ struct ContactState {
     double leftAngV   = 0.0;
 };
 
+// Single-source diagnostic snapshot of the LocomotionSolver's internal state,
+// filled by LocomotionSolver::diag() from the exact members the solver computed
+// this frame (never recomputed in the logger).  Read by the -test [LOCO] dump,
+// the per-frame [pulse] line, and the [evt:*] transition detectors.
+struct LocoDiag {
+    int       pose          = 0;    // LocomotionSolver::PoseKind
+    int       poseTicks     = 0;
+    int       support       = 2;    // LocomotionSolver::Side (RIGHT/LEFT/BOTH)
+    double    confR         = 0.0,  confL = 0.0;
+    bool      committedR    = false, committedL = false;
+    double    rAngV         = 0.0,  lAngV = 0.0;       // foot |ω| LP, rad/s
+    double    pelvisAngV    = 0.0,  pelvisYawAngV = 0.0;
+    double    footPitchZR   = 0.0,  footPitchZL = 0.0; // sin(pitch): >0 heel-down, <0 toe-down
+    double    contactBlendR = 0.0,  contactBlendL = 0.0;
+    double    heelLiftConfR = 0.0,  heelLiftConfL = 0.0;
+    bool      heelLiftR     = false, heelLiftL = false;
+    double    pelvisZVel    = 0.0;  // m/s (LP), jump/squat/land detector
+    int       airborneTicks = 0,    landedTicks = 0, zuptTicks = 0;
+    double    tiltCos       = 1.0;  // pelvis tilt cosine (lie detector)
+    QVector3D offset        {0, 0, 0};
+    QVector3D anchorR       {0, 0, 0}, anchorL {0, 0, 0};
+};
+
+// Human-readable name of a LocomotionSolver::PoseKind value (for the log).
+inline const char* locoPoseName(int pose) {
+    switch (pose) {
+        case 1: return "Stand";
+        case 2: return "Sit";
+        case 3: return "Squat";
+        case 4: return "Lying";
+        case 5: return "Airborne";
+        default: return "Unknown";
+    }
+}
+
 class LocomotionSolver {
 public:
     void reset();
@@ -401,6 +436,8 @@ private:
         double    m_pelvisZPrev        = 0.0;
         bool      m_havePelvisZPrev    = false;
         int       m_airborneTicks      = 0;
+        // Last pelvis-tilt cosine from _classifyPose() (stored for -test [LOCO]).
+        double    m_lastTiltCos        = 1.0;
         int       m_landedTicks        = 0;
 
         // Rate-derived tick durations (set by setProcRate; defaults = @90 Hz).
@@ -465,6 +502,31 @@ private:
         // ActorConfig.footLengthCm.  Используется в Phase 3 commit-блоке
         // для расчёта world.z = bone_foot * sin(pitch) при heel-lifted squat.
         void setFootLength(double m) { m_footLengthM = std::max(0.10, m); }
+
+        // Single-source diagnostic readout — copies the exact internal state
+        // the solver computed this frame so the -test log never recomputes a
+        // locomotion formula.  Cheap (plain copies); safe to call once/frame.
+        LocoDiag diag() const {
+            LocoDiag d;
+            d.pose          = int(m_pose);
+            d.poseTicks     = m_poseTicks;
+            d.support       = int(m_support);
+            d.confR         = m_confR;          d.confL = m_confL;
+            d.committedR    = m_committedR;     d.committedL = m_committedL;
+            d.rAngV         = m_rAngV;          d.lAngV = m_lAngV;
+            d.pelvisAngV    = m_pelvisAngV;     d.pelvisYawAngV = m_pelvisYawAngV;
+            d.footPitchZR   = m_footPitchZR;    d.footPitchZL = m_footPitchZL;
+            d.contactBlendR = m_contactBlendR;  d.contactBlendL = m_contactBlendL;
+            d.heelLiftConfR = m_heelLiftConfR;  d.heelLiftConfL = m_heelLiftConfL;
+            d.heelLiftR     = m_heelLiftR;      d.heelLiftL = m_heelLiftL;
+            d.pelvisZVel    = m_pelvisZVel;
+            d.airborneTicks = m_airborneTicks;  d.landedTicks = m_landedTicks;
+            d.zuptTicks     = m_zuptTicks;
+            d.tiltCos       = m_lastTiltCos;
+            d.offset        = m_offsetLast;
+            d.anchorR       = m_anchorR;        d.anchorL = m_anchorL;
+            return d;
+        }
 
         // Bind the processing rate (Hz) so every @90 Hz-tuned tick count and
         // first-order blend coefficient is re-derived for the current suit
@@ -1127,6 +1189,15 @@ public:
     float sceneYaw() const { return m_sceneYaw; }
     QVector3D freezeAnchor() const { return m_freezeAnchor; }
 
+    // Single-source operator-view diagnostics for the -test [VIEW] dump: the
+    // exact keypoints the operator sees this frame (after loco offset + floor
+    // clamp + sceneYaw + sceneShift + freeze), the floor-clamp lift applied,
+    // and the live locomotion state.  Captured in drawSkeleton(); never
+    // recomputed in the logger.
+    const std::array<QVector3D, kXsensKeypointCount>& lastRenderedKeypoints() const { return m_lastRenderedKp; }
+    float    lastFloorClamp() const { return m_lastFloorClamp; }
+    LocoDiag locoDiag()       const { return m_loco.diag(); }
+
 protected:
     void initializeGL() override;
     void resizeGL(int w, int h) override;
@@ -1158,6 +1229,10 @@ private:
     QVector3D m_freezeAnchor{0, 0, 0};  // pelvis world XY at freeze moment
     QVector3D m_lastRenderedPelvis{0, 0, 0};  // cached for resetSceneOrigin()
     QVector3D m_lastLocoOffset{0, 0, 0};
+    // -test [VIEW]: the keypoints the operator literally sees this frame and the
+    // floor-clamp lift applied, captured in drawSkeleton() (single source).
+    std::array<QVector3D, kXsensKeypointCount> m_lastRenderedKp{};
+    float     m_lastFloorClamp = 0.0f;
 
     // Per-segment drift-lock: if a bone's angular velocity has been <0.8 deg/s
     // for >0.5 s, replace its quat with the locked value. Drift shows up as
