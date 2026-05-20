@@ -8620,61 +8620,27 @@ static void appendInt32BE(QByteArray& pkt, qint32 v)
 }
 
 // ============================================================================
-// Streaming coordinate conversion: NWU → MVN wire frame.
+// Streaming coordinate frame — single MVN-default Z-up stream for all targets.
 //
-// Наш C++ pipeline нативно работает в NWU (X=forward, Y=left, Z=up, RH).
-// Плагины ожидают MVN wire frame, и формат отличается по плагинам:
+// Our pipeline works natively in NWU (X=forward, Y=left, Z=up, right-handed).
+// The MVN real-time protocol's quaternion pose stream (MXTP02) uses, by
+// default, a **Z-Up, right-handed** coordinate system — the same axes as our
+// NWU.  Both bundled plugins consume exactly that default Z-up wire:
 //
-// 1. Blender MVN add-on (Plugins/MVNBlenderPlugin-main/pose.py:357-365):
-//    плагин делает (y, z, x) ремап считая что wire = **Y-up MVN**
-//    (X=right, Y=up, Z=forward, RH) — это формат MVN Animate.  Комментарий
-//    в pose.py:361 явно говорит «Fox sends Z-up NWU; that mismatch is one
-//    suspect for the 'wrong starting pose'».  То есть для Blender нужна
-//    реальная конверсия NWU → Y-up MVN.
+//   * UE LiveLink (Plugins/XsensLivc/.../LiveLinkMvnSource.h:49-50) converts
+//     wire→UE with FVector(x,-y,z) and FQuat(-qx,qy,-qz,qw) — a pure Y-axis
+//     handedness flip from Z-up RH into UE's Z-up LH.  ScaleDatagram.cpp:26,59
+//     spells it out: "Z-Up, right-handed coordinate system".
+//   * The Blender add-on builds its rest skeleton from the scale (MXTP13)
+//     message mapping wire.z → Blender.z (up), and remaps each bone group from
+//     that Z-up global frame in source_animator.calculate_rotation.
 //
-//    NWU → Y-up MVN:
-//        new_x = -old_y   (NWU left  → MVN -right = MVN right inverted)
-//        new_y = +old_z   (NWU up    → MVN up)
-//        new_z = +old_x   (NWU fwd   → MVN fwd)
-//    Это axis-cycling rotation about (1,1,1)/√3 на 120° (=2π/3).
-//    Кватернион:  q_rot = (cos 60°, sin 60° · axis) = (0.5, 0.5, 0.5, 0.5).
-//    q_mvn = q_rot * q_nwu * q_rot^(-1).
-//
-// 2. UE LiveLink plugin (Plugins/XsensLivc/.../LiveLinkMvnSource.h:46-55):
-//    плагин делает FVector(x, -y, z)·100 и FQuat(-qi, +qj, -qk, +qw).
-//    Это conversion из **Z-up RH** в UE Z-up LH.  То есть UE ожидает wire
-//    = Z-up RH, что совпадает с нашим NWU (axes идентичны, оба Z-up RH).
-//    Конверсия → identity.
-//
-// Селектируем по cfg.target.
+// MVN Animate emits ONE identical stream to every listener, so we do the same:
+// a single MVN-default Z-up stream, no per-target axis conversion — the wire
+// frame already equals our NWU.  (Earlier code pre-rotated the Blender stream
+// to a "Y-up" frame; that double-transformed both the live pose and the T-pose
+// skeleton origins and was the root cause of the wrong Blender starting pose.)
 // ============================================================================
-
-namespace {
-constexpr Quat kNwuToYupMvn{0.5, 0.5, 0.5, 0.5};  // axis (1,1,1)/√3, 120°
-
-inline QVector3D nwuToYupMvn(const QVector3D& p) {
-    // (x, y, z)_nwu  →  (-y, z, x)_mvn
-    return QVector3D(-p.y(), p.z(), p.x());
-}
-inline Quat nwuToYupMvnQ(const Quat& q) {
-    // similarity transform: q_mvn = q_rot · q_nwu · q_rot^(-1)
-    return quat_mult(quat_mult(kNwuToYupMvn, q),
-                     kNwuToYupMvn.inv()).normalized();
-}
-}  // namespace
-
-static QVector3D rotateNwuToMvn(const QVector3D& p, LiveTarget target)
-{
-    if (target == LiveTarget::BlenderMVN)
-        return nwuToYupMvn(p);
-    return p;  // UE LiveLink: NWU is already its expected Z-up RH wire.
-}
-static Quat conjugateNwuToMvn(const Quat& q, LiveTarget target)
-{
-    if (target == LiveTarget::BlenderMVN)
-        return nwuToYupMvnQ(q);
-    return q;  // UE LiveLink: identity.
-}
 
 // FIX (stream polish): hex-dump первого фрейма для verification против
 // MVN spec.  Печатается в stdout, читается совместно с логом и tcpdump.
@@ -8702,8 +8668,9 @@ struct LiveStreamSender::Impl {
     QByteArray   metaPkt;
     QByteArray   scalePkt;
     bool         firstFrameDumped = false;
-    quint64      framesSinceHandshake = 0;
+    qint64       lastHandshakeMs = -1;
     qint64       lastEmitMs = -1;
+    static constexpr qint64 kHandshakeIntervalMs = 1000;  // re-send MXTP12+13 ~1/s
 
     std::array<Quat, kXsensSegmentCount> baselineBodyQ{};
     std::array<Quat, kFingerSegmentsHand> baselineLeftGloveQ{};
@@ -8713,14 +8680,20 @@ struct LiveStreamSender::Impl {
     int          fingerBaselineSamples = 0;
     static constexpr int kFingerBaselineWindow = 30;
 
+    // Re-send the MXTP12 (metadata) + MXTP13 (scale/T-pose) handshake on a
+    // wall-clock interval so a Blender/UE instance opened long after the
+    // stream started still acquires the actor name and rebuilds the T-pose
+    // skeleton.  Time-based (not frame-based) so the delay is ~1 s regardless
+    // of stream fps.
     void maybeRetransmitHandshake() {
-        if (++framesSinceHandshake >= 270) {
-            framesSinceHandshake = 0;
-            if (!metaPkt.isEmpty())
-                sock.writeDatagram(metaPkt, host, port);
-            if (!scalePkt.isEmpty())
-                sock.writeDatagram(scalePkt, host, port);
-        }
+        const qint64 now = timer.elapsed();
+        if (lastHandshakeMs >= 0 && (now - lastHandshakeMs) < kHandshakeIntervalMs)
+            return;
+        lastHandshakeMs = now;
+        if (!metaPkt.isEmpty())
+            sock.writeDatagram(metaPkt, host, port);
+        if (!scalePkt.isEmpty())
+            sock.writeDatagram(scalePkt, host, port);
     }
 };
 
@@ -8804,8 +8777,9 @@ bool LiveStreamSender::start(const LiveSettings& cfg, QString* err)
             const qint32 L = qint32(std::strlen(n));
             appendInt32BE(payload, L);
             payload.append(n, L);
-            // T-pose origin position в МЕТРАХ (MVN coord: Y-forward, Z-up, RH).
-            // Плагин (LiveLinkMvnSource SegData::Set) использует это для scale-калибровки.
+            // T-pose origin position in METERS, MVN wire frame = Z-Up,
+            // right-handed = our NWU (X-fwd, Y-left, Z-up).  Plugins use these
+            // for rig scaling (UE ScaleDatagram / Blender create_target_skeleton).
             const QVector3D o = cfg.tposeOriginM[i];
             appendFloatBE(payload, o.x());
             appendFloatBE(payload, o.y());
@@ -8822,14 +8796,20 @@ bool LiveStreamSender::start(const LiveSettings& cfg, QString* err)
                 appendFloatBE(payload, 0.0f);
             }
         }
-        QByteArray hdr = buildMxtpHeader("13", 0, 0x80, quint8(segCount),
+        // MXTP13 datagram counter MUST be 0 (not 0x80).  Real MVN sends the
+        // scale message as a multi-packet sequence whose first (segments)
+        // packet carries counter 0; the Blender add-on rejects the scale
+        // packet unless datagram_counter == 0 (receiver.py:398), so 0x80 made
+        // it silently drop the T-pose and never build the skeleton.  UE has no
+        // counter gate on the scale datagram, so 0 works for both targets.
+        QByteArray hdr = buildMxtpHeader("13", 0, 0x00, quint8(segCount),
                                          0, 23, fingerHdr);
         m_impl->scalePkt = hdr + payload;
         m_impl->sock.writeDatagram(m_impl->scalePkt, m_impl->host, m_impl->port);
         QThread::msleep(50);
     }
 
-    m_impl->framesSinceHandshake = 0;
+    m_impl->lastHandshakeMs = m_impl->timer.elapsed();  // initial handshake just sent
     m_running = true;
     return true;
 }
@@ -8878,19 +8858,18 @@ void LiveStreamSender::pushFrame(quint32 sample,
 
     m_impl->maybeRetransmitHandshake();
     const quint32 ft = quint32(m_impl->timer.elapsed());
-    const LiveTarget target = m_cfg.target;
     QByteArray body;
     for (int i = 0; i < kXsensSegmentCount; ++i) {
         appendInt32BE(body, i + 1);
         const QVector3D pRaw = (i == SEG_Pelvis)
                 ? (pelvisPos - m_impl->baselinePelvisPos)
                 : QVector3D(0, 0, 0);
-        const QVector3D p = rotateNwuToMvn(pRaw, target);
+        const QVector3D p = pRaw;  // MVN wire = NWU (Z-up RH); no conversion.
         appendFloatBE(body, p.x());
         appendFloatBE(body, p.y());
         appendFloatBE(body, p.z());
         const Quat qDelta = quat_mult(segQuat[i], m_impl->baselineBodyQ[i].inv()).normalized();
-        const Quat q = conjugateNwuToMvn(qDelta, target);
+        const Quat q = qDelta;  // MVN wire = NWU (Z-up RH); no conversion.
         appendFloatBE(body, float(q.w));
         appendFloatBE(body, float(q.x));
         appendFloatBE(body, float(q.y));
@@ -8948,19 +8927,18 @@ void LiveStreamSender::pushFrameWithGloves(quint32 sample,
     const quint32 ft = quint32(m_impl->timer.elapsed());
     const quint8  bodyCount = quint8(kXsensSegmentCount);
     const quint8  fingerCount = quint8(2 * kFingerSegmentsHand);
-    const LiveTarget target = m_cfg.target;
     QByteArray body;
     for (int i = 0; i < kXsensSegmentCount; ++i) {
         appendInt32BE(body, i + 1);
         const QVector3D pRaw = (i == SEG_Pelvis)
                 ? (pelvisPos - m_impl->baselinePelvisPos)
                 : QVector3D(0, 0, 0);
-        const QVector3D p = rotateNwuToMvn(pRaw, target);
+        const QVector3D p = pRaw;  // MVN wire = NWU (Z-up RH); no conversion.
         appendFloatBE(body, p.x());
         appendFloatBE(body, p.y());
         appendFloatBE(body, p.z());
         const Quat qDelta = quat_mult(segQuat[i], m_impl->baselineBodyQ[i].inv()).normalized();
-        const Quat q = conjugateNwuToMvn(qDelta, target);
+        const Quat q = qDelta;  // MVN wire = NWU (Z-up RH); no conversion.
         appendFloatBE(body, float(q.w));
         appendFloatBE(body, float(q.x));
         appendFloatBE(body, float(q.y));
@@ -8982,16 +8960,16 @@ void LiveStreamSender::pushFrameWithGloves(quint32 sample,
         if (mIdx < 0) {
             appendFloatBE(body, 0.f); appendFloatBE(body, 0.f); appendFloatBE(body, 0.f);
             const Quat qDelta = quat_mult(segQuat[handSeg], m_impl->baselineBodyQ[handSeg].inv()).normalized();
-            const Quat q = conjugateNwuToMvn(qDelta, target);
+            const Quat q = qDelta;  // MVN wire = NWU (Z-up RH); no conversion.
             appendFloatBE(body, float(q.w));
             appendFloatBE(body, float(q.x));
             appendFloatBE(body, float(q.y));
             appendFloatBE(body, float(q.z));
         } else {
-            const QVector3D p = rotateNwuToMvn(pArr[mIdx], target);
+            const QVector3D p = pArr[mIdx];  // MVN wire = NWU (Z-up RH); no conversion.
             appendFloatBE(body, p.x()); appendFloatBE(body, p.y()); appendFloatBE(body, p.z());
             const Quat qDelta = quat_mult(qArr[mIdx], baseArr[mIdx].inv()).normalized();
-            const Quat q = conjugateNwuToMvn(qDelta, target);
+            const Quat q = qDelta;  // MVN wire = NWU (Z-up RH); no conversion.
             appendFloatBE(body, float(q.w));
             appendFloatBE(body, float(q.x));
             appendFloatBE(body, float(q.y));
@@ -10280,7 +10258,7 @@ MainWindow::MainWindow(MocapReceiver* rx,
             const float pelvisZ = float(m_setup.heightCm * 0.55 / 100.0);
             auto kp = m_skel->computeKeypoints(identity, QVector3D(0.0f, 0.0f, pelvisZ));
             for (int i = 0; i < kXsensSegmentCount; ++i) {
-                cfg.tposeOriginM[i] = rotateNwuToMvn(kp[i], cfg.target);
+                cfg.tposeOriginM[i] = kp[i];  // NWU == MVN Z-up RH; no conversion.
                 cfg.defAngT[i] = m_skel->defAngFor(i);
             }
         }
@@ -10783,8 +10761,10 @@ void MainWindow::onRenderTick()
 
     // --- Live streaming --------------------------------------------------
     // Forward the just-computed skeleton to the active UDP stream (if any).
-    // We intentionally send the post-calibration `q` (23 segments) so the
-    // receiving plugin sees the same pose as our viewport.
+    // We send the post-calibration world pose `qOut` (23 segments) in our
+    // native NWU (= MVN Z-up RH) frame; viewport-only framing (yaw/shift/
+    // freeze) is excluded so the plugin reproduces the performer's true
+    // world orientation and position.
     if (m_streamer && m_streamer->isRunning()) {
         QVector3D pelvisM(0.0f, 0.0f, 0.0f);
         std::array<Quat, kXsensSegmentCount> qStream = qOut;
@@ -10798,31 +10778,12 @@ void MainWindow::onRenderTick()
                 const QVector3D up(0.0f, 0.0f, -minZ);
                 for (auto& p : kp) p += up;
             }
-            const float yaw = m_viewport->sceneYaw();
-            if (yaw != 0.0f) {
-                const float cy = std::cos(yaw);
-                const float sy = std::sin(yaw);
-                for (auto& p : kp) {
-                    p = QVector3D(cy * p.x() - sy * p.y(),
-                                  sy * p.x() + cy * p.y(),
-                                  p.z());
-                }
-                const Quat sceneRot = axisAngleQuat(QVector3D(0, 0, 1), double(yaw));
-                for (auto& q : qStream) {
-                    q = quat_mult(sceneRot, q).normalized();
-                }
-            }
-            const QVector3D shift = m_viewport->sceneShift();
-            if (m_viewport->isFrozen()) {
-                const QVector3D anchor = m_viewport->freezeAnchor();
-                const QVector3D pelvisScene = kp[SEG_Pelvis] + shift;
-                const QVector3D freezeFix(anchor.x() - pelvisScene.x(),
-                                          anchor.y() - pelvisScene.y(),
-                                          0.0f);
-                for (auto& p : kp) p += shift + freezeFix;
-            } else {
-                for (auto& p : kp) p += shift;
-            }
+            // Viewport-only framing (sceneYaw / sceneShift / freeze anchor)
+            // is deliberately NOT applied to the stream — those rotate/shift
+            // the character purely for our OpenGL camera view.  Leaking them
+            // onto the wire would mis-orient/translate the character in the
+            // plugin.  We stream the raw calibrated mocap world pose (qStream =
+            // qOut, plus genuine locomotion offset + floor clamp above).
             pelvisM = kp[SEG_Pelvis];
         }
         const bool gloves = f.hasGloves && m_setup.useGloves;
@@ -11173,7 +11134,7 @@ void MainWindow::onOpenLiveWizard()
         const float pelvisZ = float(m_setup.heightCm * 0.55 / 100.0);
         auto kp = m_skel->computeKeypoints(identity, QVector3D(0.0f, 0.0f, pelvisZ));
         for (int i = 0; i < kXsensSegmentCount; ++i) {
-            cfg.tposeOriginM[i] = rotateNwuToMvn(kp[i], cfg.target);
+            cfg.tposeOriginM[i] = kp[i];  // NWU == MVN Z-up RH; no conversion.
             cfg.defAngT[i] = m_skel->defAngFor(i);
         }
     }
