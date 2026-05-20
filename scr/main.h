@@ -560,16 +560,32 @@ private:
                                double& outTiltCos) const;
 };
 
+// Single-source FK diagnostic capture (-test).  computeKeypoints() fills this
+// when a non-null pointer is passed, so the log shows the EXACT intermediate
+// values the real skeleton used — no parallel recomputation.  Stage order:
+//   oriented = quat_mult(raw, defAng) (+ shoulder-cone)  ->  global (with the 4
+//   dummy stubs)  ->  boneVec = vec_rotate([len,0,0], global)  ->  kp (chain).
+struct FkDiag {
+    std::array<Quat,      kXsensSegmentCount>           oriented{};  // raw*defAng (+cone)
+    std::array<Quat,      kXsensSegmentCountWithDummies> global{};   // after dummy stubs
+    std::array<QVector3D, kXsensSegmentCountWithDummies> boneVec{};  // local→world bone vector
+    std::array<float,     kXsensSegmentCountWithDummies> len{};      // bone lengths used (m)
+    std::array<QVector3D, kXsensKeypointCount>          kp{};        // final keypoints (world, m)
+    QVector3D rootPos{0, 0, 0};
+};
+
 class SkeletonXsens {
 public:
     // pose = "tpose" or "npose"
     SkeletonXsens(const ActorConfig& actor, const std::string& pose);
 
     // Forward kinematics.  segmentOrients has 23 entries (WXYZ quats), the
-    // result has kXsensKeypointCount (28) 3-D points in meters.
+    // result has kXsensKeypointCount (28) 3-D points in meters.  When diag is
+    // non-null it is filled with every intermediate (single-source -test log).
     std::array<QVector3D, kXsensKeypointCount>
     computeKeypoints(const std::array<Quat, kXsensSegmentCount>& segOrients,
-                     const QVector3D& rootPos) const;
+                     const QVector3D& rootPos,
+                     FkDiag* diag = nullptr) const;
 
     // Adds 4 dummy segments (right/left scapular, right/left pelvis) so the
     // kinematic chain has 27 entries total.
