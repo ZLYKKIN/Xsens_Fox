@@ -8813,6 +8813,34 @@ static void appendInt32BE(QByteArray& pkt, qint32 v)
 }
 
 // ============================================================================
+// COORDINATE CONTRACT — the complete frame chain, end to end (verified audit).
+//
+// All quaternions are WXYZ (scalar-first); quat_mult = Hamilton product;
+// vec_rotate(v,q) = q·[0,v]·q⁻¹. World frame is NWU: X=forward, Y=left, Z=up,
+// right-handed. Left-side mirroring uses mirror_y_quat(q) = j·q·j⁻¹ = (w,-x,y,-z),
+// a homomorphism (reflection of the rotation across the body XZ-plane).
+//
+//   1. sensor → body : receiver rotates raw acc/gyr/mag by inv(s2s[i]) (= s2b);
+//                      s2s (body→sensor) is solved per segment by TRIAD /
+//                      Davenport-Wahba / ecompass from the T/N/K calibration.
+//   2. fusion        : xio FusionAhrs (convention = NWU) → per-segment world
+//                      quaternion raw[i].
+//   3. calibration   : cand[i] = quat_mult(raw[i], calibReference[i].inv());
+//                      identity at the N-pose, world delta otherwise.
+//   4. FK            : oriented[i] = quat_mult(cand[i], defAng[i]) (defAng =
+//                      N-pose rest) + shoulder cone; addDummySegments inserts 4
+//                      stubs that co-rotate with T8/pelvis yaw and branch L/R by
+//                      ±π/2; boneVec = vec_rotate([len,0,0], global[i]); chain-walk.
+//   5. movement      : LocomotionSolver returns a world offset (≈ anchor − fk) in
+//                      metres so a planted foot stays put; floor-clamp lifts the
+//                      lowest keypoint to z=0. worldPelvisWithLoco() is the single
+//                      source shared by the live-stream and recording paths.
+//   6. wire (MXTP02) : the world pose is emitted unchanged in NWU = MVN-default
+//                      Z-up RH; each consumer plugin does its own conversion (see
+//                      "Streaming coordinate frame" just below).
+// ============================================================================
+
+// ============================================================================
 // Streaming coordinate frame — single MVN-default Z-up stream for all targets.
 //
 // Our pipeline works natively in NWU (X=forward, Y=left, Z=up, right-handed).
@@ -10768,6 +10796,27 @@ inline std::string fmtV3(const QVector3D& v) {
     std::snprintf(b, sizeof(b), "(% .4f,% .4f,% .4f)", v.x(), v.y(), v.z());
     return std::string(b);
 }
+
+// World pelvis position (NWU metres): forward-kinematics with the pelvis at the
+// origin, plus the locomotion travel offset, then floor-clamped so the lowest
+// keypoint rests on z=0. Single source shared by the live-stream and recording
+// paths so their root motion can never silently diverge. View-only framing
+// (sceneYaw / sceneShift / freeze) is intentionally NOT applied here — it must
+// not leak onto the wire / into the recording.
+QVector3D worldPelvisWithLoco(const SkeletonXsens& skel,
+                              const std::array<Quat, kXsensSegmentCount>& segWorld,
+                              const QVector3D& locoOffset)
+{
+    auto kp = skel.computeKeypoints(segWorld, QVector3D(0.0f, 0.0f, 0.0f));
+    for (auto& p : kp) p += locoOffset;
+    float minZ = kp[0].z();
+    for (const auto& p : kp) if (p.z() < minZ) minZ = p.z();
+    if (minZ < -0.02f) {              // lift so the lowest keypoint sits on the floor
+        const QVector3D up(0.0f, 0.0f, -minZ);
+        for (auto& p : kp) p += up;
+    }
+    return kp[SEG_Pelvis];
+}
 } // namespace
 
 void MainWindow::onRenderTick()
@@ -11150,24 +11199,13 @@ void MainWindow::onRenderTick()
     if (m_streamer && m_streamer->isRunning()) {
         QVector3D pelvisM(0.0f, 0.0f, 0.0f);
         std::array<Quat, kXsensSegmentCount> qStream = qOut;
-        if (m_skel) {
-            auto kp = m_skel->computeKeypoints(qOut, QVector3D(0.0f, 0.0f, 0.0f));
-            const QVector3D off = m_viewport->lastLocoOffset();
-            for (auto& p : kp) p += off;
-            float minZ = kp[0].z();
-            for (const auto& p : kp) if (p.z() < minZ) minZ = p.z();
-            if (minZ < -0.02f) {
-                const QVector3D up(0.0f, 0.0f, -minZ);
-                for (auto& p : kp) p += up;
-            }
-            // Viewport-only framing (sceneYaw / sceneShift / freeze anchor)
-            // is deliberately NOT applied to the stream — those rotate/shift
-            // the character purely for our OpenGL camera view.  Leaking them
-            // onto the wire would mis-orient/translate the character in the
-            // plugin.  We stream the raw calibrated mocap world pose (qStream =
-            // qOut, plus genuine locomotion offset + floor clamp above).
-            pelvisM = kp[SEG_Pelvis];
-        }
+        // Viewport-only framing (sceneYaw / sceneShift / freeze anchor) is
+        // deliberately NOT applied to the stream — those rotate/shift the
+        // character purely for our OpenGL camera view; leaking them onto the
+        // wire would mis-orient/translate the character in the plugin. We send
+        // the raw calibrated world pose plus genuine locomotion travel.
+        if (m_skel)
+            pelvisM = worldPelvisWithLoco(*m_skel, qOut, m_viewport->lastLocoOffset());
         const bool gloves = f.hasGloves && m_setup.useGloves;
         if (gloves) {
             // Компонуем пальцы с мировой ротацией запястья.
@@ -11254,15 +11292,8 @@ void MainWindow::onRenderTick()
         // on.  Without this the recording has no root motion (walks in place)
         // and the HD root low-pass / foot-lock passes are no-ops.
         QVector3D pelvisM(0.0f, 0.0f, 0.0f);
-        if (m_skel) {
-            auto kp = m_skel->computeKeypoints(qOut, QVector3D(0.0f, 0.0f, 0.0f));
-            const QVector3D off = m_viewport->lastLocoOffset();
-            for (auto& p : kp) p += off;
-            float minZ = kp[0].z();
-            for (const auto& p : kp) if (p.z() < minZ) minZ = p.z();
-            if (minZ < -0.02f) for (auto& p : kp) p.setZ(p.z() - minZ);
-            pelvisM = kp[SEG_Pelvis];
-        }
+        if (m_skel)
+            pelvisM = worldPelvisWithLoco(*m_skel, qOut, m_viewport->lastLocoOffset());
         rf.pelvisPos = pelvisM;
         rf.hasGloves = f.hasGloves && m_setup.useGloves;
         if (rf.hasGloves) {
