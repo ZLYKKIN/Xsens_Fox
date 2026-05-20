@@ -1405,7 +1405,10 @@ QVector3D LocomotionSolver::update(const Quat& qR,
                                        const QVector3D& fkLTip,
                                        double t)
     {
-        const double dt = m_haveLast ? std::max(1e-3, t - m_lastT) : 0.01;
+        // Upper-clamp dt so a long pause/resume gap can't inject a huge step
+        // that throws the foot-lock / velocity estimators (lower clamp avoids
+        // div-by-zero).
+        const double dt = m_haveLast ? std::clamp(t - m_lastT, 1e-3, 0.1) : 0.01;
 
         // FIX (heel/toe contact discrimination): pick active contact point
         // based on foot pitch.  При pitch≈0 (плоская стопа) = lowest3 как
@@ -3684,11 +3687,20 @@ void MocapReceiver::run()
         for (std::size_t t = 0; t < trackerHandles.size(); ++t) {
             void* dev     = trackerHandles[t];
             const int seg = trackerSegments[t];
-            if (api.deviceGetDataPacketCount(dev) <= 0) continue;
+            // SEH-wrap the XDA entry calls: if the suit/dongle drops mid-session
+            // these can raise a structured exception that would otherwise crash
+            // the whole app (the comment above promised this; the hot path was
+            // not actually wrapped).  On a fault we skip this tracker for the tick.
+            int pktCount = 0;
+            if (!sehCall([&]{ pktCount = api.deviceGetDataPacketCount(dev); })
+                || pktCount <= 0) continue;
 
-            api.dataPacketConstruct(reinterpret_cast<XsDataPacketBlob*>(packetStorage));
-            XsDataPacketBlob* pkt = api.deviceTakeFirstDataPacketInQueue(
-                dev, reinterpret_cast<XsDataPacketBlob*>(packetStorage));
+            XsDataPacketBlob* pkt = nullptr;
+            if (!sehCall([&]{
+                    api.dataPacketConstruct(reinterpret_cast<XsDataPacketBlob*>(packetStorage));
+                    pkt = api.deviceTakeFirstDataPacketInQueue(
+                        dev, reinterpret_cast<XsDataPacketBlob*>(packetStorage));
+                })) continue;
 
             // Resolve which segment this packet came from — prefer an
             // embedded stored-location-id over our static mapping.
@@ -4034,7 +4046,9 @@ void MocapReceiver::run()
                 ++dumpCount[targetSeg];
             }
 
-            api.dataPacketDestruct(reinterpret_cast<XsDataPacketBlob*>(packetStorage));
+            sehCall([&]{
+                api.dataPacketDestruct(reinterpret_cast<XsDataPacketBlob*>(packetStorage));
+            });
         }
 
         const double now = monotonicSec();
@@ -4288,6 +4302,7 @@ static const Tr kTr[] = {
     {"calib_n_capture",    "N-поза — не двигайтесь 12с",        "N-pose — hold still 12s"},
     {"calib_k_prepare",    "Теперь K-поза: сядьте на стул (бёдра горизонтально) + руки прямо вперёд — приготовьтесь…", "Now K-pose: sit on chair (thighs horizontal) + arms forward — prepare…"},
     {"calib_k_capture",    "K-поза — сидя, руки вперёд, не двигайтесь", "K-pose — sitting, arms forward, hold still"},
+    {"calib_pose_empty",   "Калибровка позы не получила стабильных данных (актёр двигался или сенсоры не передают). Качество будет низким — рекомендуется повторить калибровку.", "Pose calibration captured no stable data (actor moved or sensors not streaming). Quality will be poor — recommend recalibrating."},
     {"still",              "СТОИТЕ СПОКОЙНО",                   "STILL"},
     {"moving",             "ДВИЖЕНИЕ",                          "MOVING"},
     {"suit_connected",     "костюм подключён",                  "suit connected"},
@@ -4363,6 +4378,7 @@ static const Tr kTr[] = {
     {"rec_save_failed",    "Не удалось сохранить файл.",        "Failed to save file."},
     {"rec_save_ok",        "Запись сохранена",                  "Recording saved"},
     {"rec_hd_progress",    "Обработка HD post-processing…",     "Running HD post-processing…"},
+    {"rec_close_prompt",   "Идёт запись. Сохранить перед закрытием?", "Recording in progress. Save before closing?"},
 
     // --- Live-stream wizard ---
     {"live_wiz_title",     "Live-трансляция",                   "Live streaming"},
@@ -7083,6 +7099,11 @@ void NewSessionWizard::onCaptureTick()
             std::cout.flush();
         }
         if (snapshots->empty()) {
+            // Don't fail silently — tell the operator the pose produced no
+            // usable data so they can recalibrate instead of recording a
+            // session built on a degenerate single-frame reference.
+            QMessageBox::warning(this, Lang::t("calib_title"),
+                                 Lang::t("calib_pose_empty"));
             const SuitPose post = m_rx->snapshot();
             for (int i = 0; i < kXsensSegmentCount; ++i)
                 m_result.calibReference[i] = post.segValid[i] ?
@@ -11224,6 +11245,21 @@ void MainWindow::logTest(const std::string& msg) const
 
 void MainWindow::closeEvent(QCloseEvent* e)
 {
+    // Don't silently drop an in-progress take when the window is closed.
+    if (m_recording) {
+        const auto btn = QMessageBox::question(
+            this, Lang::t("rec_wiz_title"), Lang::t("rec_close_prompt"),
+            QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel,
+            QMessageBox::Save);
+        if (btn == QMessageBox::Cancel) { e->ignore(); return; }
+        if (btn == QMessageBox::Save) {
+            onRecordStop();              // m_recording=false, hide HUD, save dialog
+        } else {                         // Discard
+            m_recording = false;
+            if (m_hud) m_hud->hide();
+            m_recBuffer.clear();
+        }
+    }
     if (m_rx) { m_rx->stop(); m_rx->wait(1500); }
     QMainWindow::closeEvent(e);
 }
