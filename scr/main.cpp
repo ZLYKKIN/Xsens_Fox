@@ -560,19 +560,11 @@ SkeletonXsens::computeKeypoints(const std::array<Quat, kXsensSegmentCount>& raw,
 }
 
 // ============================================================================
-//  Madgwick MARG AHRS — 1:1 port of the algorithm used by hipose
-//  (ahrs.filters.Madgwick) with the same output-convention patch:
-//  the filter natively works in NED so we rotate the final quaternion by
-//  Qx(π) to land in NWU (which is what SkeletonXsens expects).
-//
-//  Reference: Madgwick S.O.H., "An efficient orientation filter for
-//  inertial and inertial/magnetic sensor arrays", 2010.
+//  Calibration AHRS-init helper — analytic ecompass orientation consumed by
+//  the double/triple-pose sensor-to-segment solver.  The live per-segment
+//  attitude filter is the xio Fusion library (see MocapReceiver::run); the
+//  hand-rolled Madgwick filter that used to live here was unused and removed.
 // ============================================================================
-
-struct MadgwickState {
-    Quat   q{1.0, 0.0, 0.0, 0.0};
-    bool   initialised = false;
-};
 
 // ecompass analytical init — from acc (gravity) + mag (horizontal north).
 // Returns an NED quaternion identical to ahrs.common.orientation.ecompass
@@ -615,151 +607,6 @@ static Quat ecompassNED(const QVector3D& a, const QVector3D& m)
         q.z = 0.25 * s;
     }
     return q.normalized();
-}
-
-// Initial orientation from accelerometer alone (no mag) — acc2q equivalent.
-static Quat acc2qNED(const QVector3D& a)
-{
-    QVector3D an = a.normalized();
-    const double ax = an.x(), ay = an.y(), az = an.z();
-    // Quaternion that rotates world Z (down) onto measured gravity.
-    if (az >= 0.0) {
-        const double s = std::sqrt(2.0 * (1.0 + az));
-        return Quat((1.0 + az) / s, -ay / s, ax / s, 0.0).normalized();
-    } else {
-        const double s = std::sqrt(2.0 * (1.0 - az));
-        return Quat(-ay / s, (1.0 - az) / s, 0.0, ax / s).normalized();
-    }
-}
-
-// Madgwick MARG update (Hamilton quaternion, scalar-first).  Beta is the
-// gradient descent gain;  ahrs.Madgwick default = 0.1 for 100 Hz operation.
-static void madgwickMARG(MadgwickState& st, const QVector3D& gyr,
-                         const QVector3D& acc, const QVector3D& mag,
-                         double dt, double beta)
-{
-    double qw = st.q.w, qx = st.q.x, qy = st.q.y, qz = st.q.z;
-    double gx = gyr.x(), gy = gyr.y(), gz = gyr.z();
-    double ax = acc.x(), ay = acc.y(), az = acc.z();
-    double mx = mag.x(), my = mag.y(), mz = mag.z();
-
-    // Rate of change from gyroscope.
-    double qDotw = 0.5 * (-qx*gx - qy*gy - qz*gz);
-    double qDotx = 0.5 * ( qw*gx + qy*gz - qz*gy);
-    double qDoty = 0.5 * ( qw*gy - qx*gz + qz*gx);
-    double qDotz = 0.5 * ( qw*gz + qx*gy - qy*gx);
-
-    const double anorm2 = ax*ax + ay*ay + az*az;
-    const double mnorm2 = mx*mx + my*my + mz*mz;
-    if (anorm2 > 1e-12 && mnorm2 > 1e-12) {
-        double n = 1.0 / std::sqrt(anorm2);
-        ax *= n; ay *= n; az *= n;
-        n = 1.0 / std::sqrt(mnorm2);
-        mx *= n; my *= n; mz *= n;
-
-        // Reference direction of earth magnetic field (rotate m by q).
-        const double _2qwmx = 2.0 * qw * mx;
-        const double _2qwmy = 2.0 * qw * my;
-        const double _2qwmz = 2.0 * qw * mz;
-        const double _2qxmx = 2.0 * qx * mx;
-
-        const double hx = mx*qw*qw - _2qwmy*qz + _2qwmz*qy + mx*qx*qx
-                        + 2.0*qx*qy*my + 2.0*qx*qz*mz - mx*qy*qy - mx*qz*qz;
-        const double hy = _2qwmx*qz + my*qw*qw - _2qwmz*qx + _2qxmx*qy
-                        - my*qx*qx + my*qy*qy + 2.0*qy*qz*mz - my*qz*qz;
-        const double _2bx = std::sqrt(hx*hx + hy*hy);
-        const double _2bz = -_2qwmx*qy + _2qwmy*qx + mz*qw*qw + _2qxmx*qz
-                          - mz*qx*qx + 2.0*qy*qz*my - mz*qy*qy + mz*qz*qz;
-        const double _4bx = 2.0 * _2bx;
-        const double _4bz = 2.0 * _2bz;
-
-        // Gradient descent step.
-        double s0 = -2.0*qy*(2.0*qx*qz - 2.0*qw*qy - ax)
-                  +  2.0*qx*(2.0*qw*qx + 2.0*qy*qz - ay)
-                  -  _2bz*qy*(_2bx*(0.5 - qy*qy - qz*qz) + _2bz*(qx*qz - qw*qy) - mx)
-                  + (-_2bx*qz + _2bz*qx)*(_2bx*(qx*qy - qw*qz) + _2bz*(qw*qx + qy*qz) - my)
-                  + _2bx*qy*(_2bx*(qw*qy + qx*qz) + _2bz*(0.5 - qx*qx - qy*qy) - mz);
-        double s1 =  2.0*qz*(2.0*qx*qz - 2.0*qw*qy - ax)
-                  +  2.0*qw*(2.0*qw*qx + 2.0*qy*qz - ay)
-                  - 4.0*qx*(1.0 - 2.0*qx*qx - 2.0*qy*qy - az)
-                  + _2bz*qz*(_2bx*(0.5 - qy*qy - qz*qz) + _2bz*(qx*qz - qw*qy) - mx)
-                  + (_2bx*qy + _2bz*qw)*(_2bx*(qx*qy - qw*qz) + _2bz*(qw*qx + qy*qz) - my)
-                  + (_2bx*qz - _4bz*qx)*(_2bx*(qw*qy + qx*qz) + _2bz*(0.5 - qx*qx - qy*qy) - mz);
-        double s2 = -2.0*qw*(2.0*qx*qz - 2.0*qw*qy - ax)
-                  +  2.0*qz*(2.0*qw*qx + 2.0*qy*qz - ay)
-                  - 4.0*qy*(1.0 - 2.0*qx*qx - 2.0*qy*qy - az)
-                  + (-_4bx*qy - _2bz*qw)*(_2bx*(0.5 - qy*qy - qz*qz) + _2bz*(qx*qz - qw*qy) - mx)
-                  + (_2bx*qx + _2bz*qz)*(_2bx*(qx*qy - qw*qz) + _2bz*(qw*qx + qy*qz) - my)
-                  + (_2bx*qw - _4bz*qy)*(_2bx*(qw*qy + qx*qz) + _2bz*(0.5 - qx*qx - qy*qy) - mz);
-        double s3 =  2.0*qx*(2.0*qx*qz - 2.0*qw*qy - ax)
-                  +  2.0*qy*(2.0*qw*qx + 2.0*qy*qz - ay)
-                  + (-_4bx*qz + _2bz*qx)*(_2bx*(0.5 - qy*qy - qz*qz) + _2bz*(qx*qz - qw*qy) - mx)
-                  + (-_2bx*qw + _2bz*qy)*(_2bx*(qx*qy - qw*qz) + _2bz*(qw*qx + qy*qz) - my)
-                  + _2bx*qx*(_2bx*(qw*qy + qx*qz) + _2bz*(0.5 - qx*qx - qy*qy) - mz);
-
-        double sNorm = s0*s0 + s1*s1 + s2*s2 + s3*s3;
-        if (sNorm > 1e-12) {
-            const double n = 1.0 / std::sqrt(sNorm);
-            s0 *= n; s1 *= n; s2 *= n; s3 *= n;
-            qDotw -= beta * s0;
-            qDotx -= beta * s1;
-            qDoty -= beta * s2;
-            qDotz -= beta * s3;
-        }
-    }
-
-    qw += qDotw * dt;
-    qx += qDotx * dt;
-    qy += qDoty * dt;
-    qz += qDotz * dt;
-    const double n = 1.0 / std::sqrt(qw*qw + qx*qx + qy*qy + qz*qz);
-    st.q = Quat(qw*n, qx*n, qy*n, qz*n);
-}
-
-// IMU-only update (gyro + acc, no mag) — used when mag is rejected.
-static void madgwickIMU(MadgwickState& st, const QVector3D& gyr,
-                        const QVector3D& acc, double dt, double beta)
-{
-    double qw = st.q.w, qx = st.q.x, qy = st.q.y, qz = st.q.z;
-    double gx = gyr.x(), gy = gyr.y(), gz = gyr.z();
-    double ax = acc.x(), ay = acc.y(), az = acc.z();
-
-    double qDotw = 0.5 * (-qx*gx - qy*gy - qz*gz);
-    double qDotx = 0.5 * ( qw*gx + qy*gz - qz*gy);
-    double qDoty = 0.5 * ( qw*gy - qx*gz + qz*gx);
-    double qDotz = 0.5 * ( qw*gz + qx*gy - qy*gx);
-
-    const double anorm2 = ax*ax + ay*ay + az*az;
-    if (anorm2 > 1e-12) {
-        double n = 1.0 / std::sqrt(anorm2);
-        ax *= n; ay *= n; az *= n;
-        double s0 = -2.0*qy*(2.0*qx*qz - 2.0*qw*qy - ax)
-                  +  2.0*qx*(2.0*qw*qx + 2.0*qy*qz - ay);
-        double s1 =  2.0*qz*(2.0*qx*qz - 2.0*qw*qy - ax)
-                  +  2.0*qw*(2.0*qw*qx + 2.0*qy*qz - ay)
-                  - 4.0*qx*(1.0 - 2.0*qx*qx - 2.0*qy*qy - az);
-        double s2 = -2.0*qw*(2.0*qx*qz - 2.0*qw*qy - ax)
-                  +  2.0*qz*(2.0*qw*qx + 2.0*qy*qz - ay)
-                  - 4.0*qy*(1.0 - 2.0*qx*qx - 2.0*qy*qy - az);
-        double s3 =  2.0*qx*(2.0*qx*qz - 2.0*qw*qy - ax)
-                  +  2.0*qy*(2.0*qw*qx + 2.0*qy*qz - ay);
-        double sNorm = s0*s0 + s1*s1 + s2*s2 + s3*s3;
-        if (sNorm > 1e-12) {
-            n = 1.0 / std::sqrt(sNorm);
-            s0 *= n; s1 *= n; s2 *= n; s3 *= n;
-            qDotw -= beta * s0;
-            qDotx -= beta * s1;
-            qDoty -= beta * s2;
-            qDotz -= beta * s3;
-        }
-    }
-
-    qw += qDotw * dt;
-    qx += qDotx * dt;
-    qy += qDoty * dt;
-    qz += qDotz * dt;
-    const double n = 1.0 / std::sqrt(qw*qw + qx*qx + qy*qy + qz*qz);
-    st.q = Quat(qw*n, qx*n, qy*n, qz*n);
 }
 
 // ============================================================================
@@ -1337,11 +1184,6 @@ static QVector3D gravityInBodyFrame(const Quat& defAng)
     return vec_rotate(QVector3D(0.0f, 0.0f, -1.0f), defAng.inv());
 }
 
-// Legacy reset hook — the solver no longer carries any file-scoped
-// state, so the function is kept as a no-op purely for ABI compat with
-// older call sites that might still invoke it.
-void foxLocoResetStatics() { /* no-op — state is now per-instance */ }
-
     void LocomotionSolver::reset()
     {
         m_haveLast     = false;
@@ -1386,8 +1228,6 @@ void foxLocoResetStatics() { /* no-op — state is now per-instance */ }
         m_havePelvisZPrev = false;
         m_airborneTicks = 0;
         m_landedTicks = 0;
-
-        foxLocoResetStatics();
     }
 
 // Angular velocity (rad/s) between two unit quaternions at given dt.
