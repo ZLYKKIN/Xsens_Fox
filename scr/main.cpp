@@ -39,6 +39,7 @@
 #include <QtNetwork/QNetworkInterface>
 #include <QtEndian>
 #include <QtCore/QDateTime>
+#include <QtCore/QLocale>
 #include <QtGui/QPixmap>
 #include <QtGui/QPainter>
 #include <QtGui/QPainterPath>
@@ -9274,29 +9275,103 @@ static void quatToEulerZXYdeg(const Quat& q, double& rz, double& rx, double& ry)
     rz = zrad * K;
 }
 
+// kBvh joint index → Xsens SEG index (shared by the BVH and FBX writers).
+static const int kBoneToSeg[] = {
+    SEG_Pelvis,      SEG_L5,          SEG_L3,
+    SEG_T12,         SEG_T8,          SEG_Neck,
+    SEG_Head,        SEG_RShoulder,   SEG_RUpperArm,
+    SEG_RForearm,    SEG_RHand,       SEG_LShoulder,
+    SEG_LUpperArm,   SEG_LForearm,    SEG_LHand,
+    SEG_RUpperLeg,   SEG_RLowerLeg,   SEG_RFoot,
+    SEG_RToe,        SEG_LUpperLeg,   SEG_LLowerLeg,
+    SEG_LFoot,       SEG_LToe,
+};
+static_assert(std::size(kBoneToSeg) == std::size(kBvh),
+              "kBoneToSeg must cover every kBvh joint");
+
+// The viewport poses segment i with WORLD orientation W[i] = raw[i]·defAng[i]
+// (see SkeletonXsens::computeKeypoints).  segQuat stores raw[i].
+static std::array<Quat, kXsensSegmentCount>
+exportWorldOrients(const RecordedFrame& fr, const SkeletonXsens& skel)
+{
+    std::array<Quat, kXsensSegmentCount> W;
+    for (int s = 0; s < kXsensSegmentCount; ++s)
+        W[s] = quat_mult(fr.segQuat[s], skel.defAngFor(s)).normalized();
+    return W;
+}
+
+// Keep successive Euler samples on the same 2π branch (no ±360° pops in long
+// clips).  Gimbal lock at ZXY X=±90° is inherent and not addressed here.
+static inline double unwrapDeg(double prev, double cur)
+{
+    double d = cur - prev;
+    while (d >  180.0) { cur -= 360.0; d = cur - prev; }
+    while (d < -180.0) { cur += 360.0; d = cur - prev; }
+    return cur;
+}
+
+// Rest OFFSET (cm) per kBvh joint, expressed in its parent's rest frame,
+// baked from the FK rest pose (raw = identity → W_rest = defAng) so the
+// exported bind pose and joint positions reproduce the viewport exactly.
+static std::array<QVector3D, std::size(kBvh)>
+exportBakedOffsetsCm(const SkeletonXsens& skel)
+{
+    std::array<Quat, kXsensSegmentCount> ident;
+    ident.fill(Quat(1, 0, 0, 0));
+    const auto kpRest = skel.computeKeypoints(ident, QVector3D(0, 0, 0));
+    std::array<QVector3D, std::size(kBvh)> off{};
+    for (size_t j = 0; j < std::size(kBvh); ++j) {
+        if (kBvh[j].parent < 0) { off[j] = QVector3D(0, 0, 0); continue; }
+        const int ownSeg    = kBoneToSeg[j];
+        const int parentSeg = kBoneToSeg[kBvh[j].parent];
+        const QVector3D d = kpRest[ownSeg] - kpRest[parentSeg];
+        off[j] = vec_rotate(d, skel.defAngFor(parentSeg).inv()) * 100.0f;
+    }
+    return off;
+}
+
+// Parent-local rotation of kBvh joint j for one frame's world orientations.
+static inline Quat exportLocalRot(int j,
+                                  const std::array<Quat, kXsensSegmentCount>& W)
+{
+    const int ownSeg = kBoneToSeg[j];
+    if (kBvh[j].parent < 0) return W[ownSeg];
+    const int parentSeg = kBoneToSeg[kBvh[j].parent];
+    return quat_mult(W[parentSeg].inv(), W[ownSeg]).normalized();
+}
+
 static bool writeBvh(const QString& path,
                      const std::vector<RecordedFrame>& frames,
                      int fps,
-                     double heightMeters)
+                     double heightMeters,
+                     const SkeletonXsens& skel)
 {
     QFile f(path);
     if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text))
         return false;
     QTextStream os(&f);
+    os.setLocale(QLocale::c());        // never emit decimal commas
     os.setRealNumberPrecision(6);
     os.setRealNumberNotation(QTextStream::FixedNotation);
 
-    const double hcm = heightMeters * 100.0;
+    (void)heightMeters;                // offsets now come from the FK rest pose
+    const auto offCm = exportBakedOffsetsCm(skel);
 
     // --- Skeleton (HIERARCHY) ---
     std::vector<int> childCount(std::size(kBvh), 0);
     for (size_t i = 1; i < std::size(kBvh); ++i) childCount[kBvh[i].parent]++;
+
+    // DFS order is captured during emission so the MOTION columns below can
+    // never desync from the hierarchy.
+    std::vector<int> dfsOrder;
+    dfsOrder.reserve(std::size(kBvh));
 
     // "emit" is a Qt macro — using it as an identifier expands into empty
     // and trips C2513.  Rename the recursive lambda to emitBone.
     std::function<void(int, int)> emitBone = [&](int idx, int indent) {
         auto pad = [&](int n){ return QString(n, QChar('\t')); };
         const auto& b = kBvh[idx];
+        dfsOrder.push_back(idx);
         if (idx == 0) {
             os << "ROOT " << b.name << "\n";
         } else {
@@ -9304,7 +9379,7 @@ static bool writeBvh(const QString& path,
         }
         os << pad(indent) << "{\n";
         os << pad(indent+1) << "OFFSET "
-           << (b.dx * hcm) << " " << (b.dy * hcm) << " " << (b.dz * hcm) << "\n";
+           << offCm[idx].x() << " " << offCm[idx].y() << " " << offCm[idx].z() << "\n";
         if (idx == 0) {
             os << pad(indent+1)
                << "CHANNELS 6 Xposition Yposition Zposition Zrotation Xrotation Yrotation\n";
@@ -9317,7 +9392,7 @@ static bool writeBvh(const QString& path,
         if (childCount[idx] == 0) {
             os << pad(indent+1) << "End Site\n";
             os << pad(indent+1) << "{\n";
-            os << pad(indent+2) << "OFFSET 0.0 0.05 0.0\n";
+            os << pad(indent+2) << "OFFSET 0.0 5.0 0.0\n";
             os << pad(indent+1) << "}\n";
         }
         os << pad(indent) << "}\n";
@@ -9331,28 +9406,30 @@ static bool writeBvh(const QString& path,
     os << "Frames: " << frames.size() << "\n";
     os << "Frame Time: " << (1.0 / double(fps)) << "\n";
 
-    // Map BVH bone → SEG_ index.  -1 = no sensor → identity rotation.
-    static const int kBoneToSeg[] = {
-        SEG_Pelvis,      SEG_L5,          SEG_L3,
-        SEG_T12,         SEG_T8,          SEG_Neck,
-        SEG_Head,        SEG_RShoulder,   SEG_RUpperArm,
-        SEG_RForearm,    SEG_RHand,       SEG_LShoulder,
-        SEG_LUpperArm,   SEG_LForearm,    SEG_LHand,
-        SEG_RUpperLeg,   SEG_RLowerLeg,   SEG_RFoot,
-        SEG_RToe,        SEG_LUpperLeg,   SEG_LLowerLeg,
-        SEG_LFoot,       SEG_LToe,
-    };
+    // Per-joint Euler-unwrap state, indexed by kBvh joint index.
+    std::array<double, std::size(kBvh)> prZ{}, prX{}, prY{};
+    bool havePrev = false;
 
     for (const RecordedFrame& fr : frames) {
+        const auto W = exportWorldOrients(fr, skel);
+
         // Root translation in cm.
         os << (fr.pelvisPos.x() * 100.0) << " "
            << (fr.pelvisPos.y() * 100.0) << " "
            << (fr.pelvisPos.z() * 100.0);
-        for (size_t b = 0; b < std::size(kBoneToSeg); ++b) {
+
+        for (int idx : dfsOrder) {
             double rz, rx, ry;
-            quatToEulerZXYdeg(fr.segQuat[kBoneToSeg[b]], rz, rx, ry);
+            quatToEulerZXYdeg(exportLocalRot(idx, W), rz, rx, ry);
+            if (havePrev) {
+                rz = unwrapDeg(prZ[idx], rz);
+                rx = unwrapDeg(prX[idx], rx);
+                ry = unwrapDeg(prY[idx], ry);
+            }
+            prZ[idx] = rz; prX[idx] = rx; prY[idx] = ry;
             os << " " << rz << " " << rx << " " << ry;
         }
+        havePrev = true;
         os << "\n";
     }
     return true;
@@ -9366,16 +9443,19 @@ static bool writeBvh(const QString& path,
 static bool writeFbxAscii(const QString& path,
                           const std::vector<RecordedFrame>& frames,
                           int fps,
-                          double heightMeters)
+                          double heightMeters,
+                          const SkeletonXsens& skel)
 {
     QFile f(path);
     if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text))
         return false;
     QTextStream os(&f);
+    os.setLocale(QLocale::c());        // never emit decimal commas
     os.setRealNumberPrecision(6);
     os.setRealNumberNotation(QTextStream::FixedNotation);
 
-    const double hcm = heightMeters * 100.0;
+    (void)heightMeters;                // offsets now come from the FK rest pose
+    const auto offCm = exportBakedOffsetsCm(skel);
 
     // Header boilerplate.
     os << "; FBX 7.4.0 project file\n";
@@ -9386,115 +9466,157 @@ static bool writeFbxAscii(const QString& path,
     os << "    CreationTimeStamp:  { Version: 1000 }\n";
     os << "    Creator: \"Fox Mocap ASCII FBX Writer\"\n";
     os << "}\n";
+    // Skeleton frame is NWU (Z-up); declare it honestly so the translation
+    // and orientation land the right way up in Maya / Blender / UE.
     os << "GlobalSettings:  {\n";
     os << "    Version: 1000\n";
     os << "    Properties70:  {\n";
-    os << "        P: \"UpAxis\", \"int\", \"Integer\", \"\",1\n";
-    os << "        P: \"FrontAxis\", \"int\", \"Integer\", \"\",2\n";
+    os << "        P: \"UpAxis\", \"int\", \"Integer\", \"\",2\n";
+    os << "        P: \"UpAxisSign\", \"int\", \"Integer\", \"\",1\n";
+    os << "        P: \"FrontAxis\", \"int\", \"Integer\", \"\",1\n";
+    os << "        P: \"FrontAxisSign\", \"int\", \"Integer\", \"\",-1\n";
     os << "        P: \"CoordAxis\", \"int\", \"Integer\", \"\",0\n";
+    os << "        P: \"CoordAxisSign\", \"int\", \"Integer\", \"\",1\n";
+    os << "        P: \"UnitScaleFactor\", \"double\", \"Number\", \"\",1\n";
     os << "        P: \"TimeMode\", \"enum\", \"\", \"\"," << (fps == 24 ? 11 : (fps == 30 ? 6 : 3)) << "\n";
     os << "    }\n";
     os << "}\n";
 
-    // Definitions.
+    const size_t boneN = std::size(kBvh);
+
+    // Definitions.  Count = number of ObjectType blocks (5).  Curve-node /
+    // curve counts include the extra Hips translation node + its 3 curves.
     os << "Definitions:  {\n";
     os << "    Version: 100\n";
-    os << "    Count: 3\n";
+    os << "    Count: 5\n";
     os << "    ObjectType: \"Model\" {\n";
-    os << "        Count: " << std::size(kBvh) << "\n";
+    os << "        Count: " << boneN << "\n";
     os << "    }\n";
     os << "    ObjectType: \"AnimationStack\" { Count: 1 }\n";
     os << "    ObjectType: \"AnimationLayer\" { Count: 1 }\n";
-    os << "    ObjectType: \"AnimationCurveNode\" { Count: " << (std::size(kBvh) * 2) << " }\n";
-    os << "    ObjectType: \"AnimationCurve\" { Count: " << (std::size(kBvh) * 6) << " }\n";
+    os << "    ObjectType: \"AnimationCurveNode\" { Count: " << (boneN + 1) << " }\n";
+    os << "    ObjectType: \"AnimationCurve\" { Count: " << (boneN * 3 + 3) << " }\n";
     os << "}\n";
 
-    // Objects — bone models.
+    // Animation id ranges + time base.
+    const qint64 stackId = 20000, layerId = 20001;
+    const qint64 curveIdBase = 30000;
+    const qint64 curveNodeIdBase = 25000;
+    const qint64 transNodeId = curveNodeIdBase + 1000;
+    const qint64 transCurveId0 = curveIdBase + 100000;
+    const qint64 kTimePerSecond = 46186158000LL;   // FBX KTime ticks per second
+    const qint64 stepTicks = kTimePerSecond / fps;
+    const size_t N = frames.size();
+    const qint64 stopTicks = qint64(N > 0 ? N - 1 : 0) * stepTicks;
+    auto emitKeyTimes = [&]() {
+        os << "        KeyTime: *" << N << " {\n            a: ";
+        for (size_t k = 0; k < N; ++k) { if (k) os << ","; os << (qint64(k) * stepTicks); }
+        os << "\n        }\n";
+    };
+
+    // Objects — bone models (rest Lcl Translation = baked offset, cm).
     os << "Objects:  {\n";
     auto boneId = [](size_t i) { return 10000LL + qint64(i) * 16; };
-    for (size_t i = 0; i < std::size(kBvh); ++i) {
+    for (size_t i = 0; i < boneN; ++i) {
         const auto& b = kBvh[i];
         os << "    Model: " << boneId(i) << ", \"Model::" << b.name << "\", \"LimbNode\" {\n";
         os << "        Version: 232\n";
         os << "        Properties70:  {\n";
         os << "            P: \"Lcl Translation\", \"Lcl Translation\", \"\", \"A+\","
-           << (b.dx * hcm) << "," << (b.dy * hcm) << "," << (b.dz * hcm) << "\n";
+           << offCm[i].x() << "," << offCm[i].y() << "," << offCm[i].z() << "\n";
         os << "            P: \"RotationOrder\", \"enum\", \"\", \"\", 2\n";   // ZXY
         os << "        }\n";
         os << "    }\n";
     }
     // AnimationStack + Layer.
-    const qint64 stackId = 20000, layerId = 20001;
     os << "    AnimationStack: " << stackId << ", \"AnimStack::Take 001\", \"\" {\n";
     os << "        Properties70:  {\n";
     os << "            P: \"LocalStart\", \"KTime\", \"Time\", \"\",0\n";
-    os << "            P: \"LocalStop\", \"KTime\", \"Time\", \"\","
-       << qint64(frames.size()) << "\n";
+    os << "            P: \"LocalStop\", \"KTime\", \"Time\", \"\"," << stopTicks << "\n";
     os << "        }\n";
     os << "    }\n";
     os << "    AnimationLayer: " << layerId << ", \"AnimLayer::BaseLayer\", \"\" {}\n";
 
-    // Curves: one AnimationCurveNode per bone (rotation), three curves (X,Y,Z).
-    const qint64 curveIdBase = 30000;
-    const qint64 curveNodeIdBase = 25000;
-
-    // KTime ticks per second in FBX = 46186158000.
-    const qint64 kTimePerSecond = 46186158000LL;
-    const qint64 stepTicks = kTimePerSecond / fps;
-
-    // Emit curve nodes and curves.
-    for (size_t i = 0; i < std::size(kBvh); ++i) {
-        static const int kBoneToSegMap[] = {
-            SEG_Pelvis,SEG_L5,SEG_L3,SEG_T12,SEG_T8,SEG_Neck,SEG_Head,
-            SEG_RShoulder,SEG_RUpperArm,SEG_RForearm,SEG_RHand,
-            SEG_LShoulder,SEG_LUpperArm,SEG_LForearm,SEG_LHand,
-            SEG_RUpperLeg,SEG_RLowerLeg,SEG_RFoot,SEG_RToe,
-            SEG_LUpperLeg,SEG_LLowerLeg,SEG_LFoot,SEG_LToe,
-        };
-        const int segIdx = kBoneToSegMap[i];
-        // CurveNode for rotation.
+    // Per-bone rotation curve nodes + three curves, in PARENT-LOCAL Euler
+    // (ZXY) with continuity unwrap.
+    for (size_t i = 0; i < boneN; ++i) {
         const qint64 nodeId = curveNodeIdBase + qint64(i);
         os << "    AnimationCurveNode: " << nodeId
            << ", \"AnimCurveNode::R\", \"\" {}\n";
-        // Three curves.
+
+        // Local rotation = inv(W[parent])·W[own], W[seg] = raw[seg]·defAng[seg].
+        // Compute only the two segments this joint needs (cheap per frame).
+        const int ownSeg    = kBoneToSeg[i];
+        const int parentSeg = (kBvh[i].parent < 0) ? -1 : kBoneToSeg[kBvh[i].parent];
+        const Quat dOwn = skel.defAngFor(ownSeg);
+        const Quat dPar = (parentSeg < 0) ? Quat(1,0,0,0) : skel.defAngFor(parentSeg);
+
+        std::vector<double> vx(N), vy(N), vz(N);
+        double pz = 0, px = 0, py = 0;
+        for (size_t k = 0; k < N; ++k) {
+            const Quat Wown = quat_mult(frames[k].segQuat[ownSeg], dOwn).normalized();
+            Quat L;
+            if (parentSeg < 0) {
+                L = Wown;
+            } else {
+                const Quat Wpar = quat_mult(frames[k].segQuat[parentSeg], dPar).normalized();
+                L = quat_mult(Wpar.inv(), Wown).normalized();
+            }
+            double rz, rx, ry;
+            quatToEulerZXYdeg(L, rz, rx, ry);
+            if (k) { rz = unwrapDeg(pz, rz); rx = unwrapDeg(px, rx); ry = unwrapDeg(py, ry); }
+            pz = rz; px = rx; py = ry;
+            vx[k] = rx; vy[k] = ry; vz[k] = rz;
+        }
         for (int ax = 0; ax < 3; ++ax) {
             const qint64 cid = curveIdBase + qint64(i) * 3 + ax;
-            os << "    AnimationCurve: " << cid
-               << ", \"AnimCurve::\", \"\" {\n";
+            const std::vector<double>& vals = (ax == 0) ? vx : (ax == 1 ? vy : vz);
+            os << "    AnimationCurve: " << cid << ", \"AnimCurve::\", \"\" {\n";
             os << "        Default: 0\n";
             os << "        KeyVer: 4008\n";
-            os << "        KeyTime: *" << frames.size() << " {\n            a: ";
-            for (size_t k = 0; k < frames.size(); ++k) {
-                if (k) os << ",";
-                os << (qint64(k) * stepTicks);
-            }
-            os << "\n        }\n";
-            os << "        KeyValueFloat: *" << frames.size() << " {\n            a: ";
-            for (size_t k = 0; k < frames.size(); ++k) {
-                double rz, rx, ry;
-                quatToEulerZXYdeg(frames[k].segQuat[segIdx], rz, rx, ry);
-                const double v = (ax == 0) ? rx : (ax == 1 ? ry : rz);
-                if (k) os << ",";
-                os << v;
-            }
+            emitKeyTimes();
+            os << "        KeyValueFloat: *" << N << " {\n            a: ";
+            for (size_t k = 0; k < N; ++k) { if (k) os << ","; os << vals[k]; }
             os << "\n        }\n";
             os << "        KeyAttrFlags: *1 { a: 24840 }\n";
             os << "        KeyAttrDataFloat: *4 { a: 0,0,218434821,0 }\n";
-            os << "        KeyAttrRefCount: *1 { a: " << frames.size() << " }\n";
+            os << "        KeyAttrRefCount: *1 { a: " << N << " }\n";
             os << "    }\n";
         }
     }
+
+    // Root (Hips) translation curve node + three curves (cm) — the locomotion.
+    os << "    AnimationCurveNode: " << transNodeId
+       << ", \"AnimCurveNode::T\", \"\" {}\n";
+    for (int ax = 0; ax < 3; ++ax) {
+        const qint64 cid = transCurveId0 + ax;
+        os << "    AnimationCurve: " << cid << ", \"AnimCurve::\", \"\" {\n";
+        os << "        Default: 0\n";
+        os << "        KeyVer: 4008\n";
+        emitKeyTimes();
+        os << "        KeyValueFloat: *" << N << " {\n            a: ";
+        for (size_t k = 0; k < N; ++k) {
+            if (k) os << ",";
+            const QVector3D& p = frames[k].pelvisPos;
+            os << ((ax == 0) ? p.x() : (ax == 1 ? p.y() : p.z())) * 100.0;
+        }
+        os << "\n        }\n";
+        os << "        KeyAttrFlags: *1 { a: 24840 }\n";
+        os << "        KeyAttrDataFloat: *4 { a: 0,0,218434821,0 }\n";
+        os << "        KeyAttrRefCount: *1 { a: " << N << " }\n";
+        os << "    }\n";
+    }
     os << "}\n";
 
-    // Connections — minimal parent/child graph + curve node → bone.
+    // Connections — parent/child graph + curve nodes → bones.
     os << "Connections:  {\n";
-    for (size_t i = 0; i < std::size(kBvh); ++i) {
+    for (size_t i = 0; i < boneN; ++i) {
         if (kBvh[i].parent >= 0)
             os << "    C: \"OO\"," << boneId(i)
                << "," << boneId(kBvh[i].parent) << "\n";
     }
     os << "    C: \"OO\"," << layerId << "," << stackId << "\n";
-    for (size_t i = 0; i < std::size(kBvh); ++i) {
+    for (size_t i = 0; i < boneN; ++i) {
         const qint64 nodeId = curveNodeIdBase + qint64(i);
         os << "    C: \"OO\"," << nodeId << "," << layerId << "\n";
         os << "    C: \"OP\"," << nodeId << "," << boneId(i)
@@ -9506,6 +9628,16 @@ static bool writeFbxAscii(const QString& path,
                << ",\"" << prop << "\"\n";
         }
     }
+    // Hips translation node → Hips model.
+    os << "    C: \"OO\"," << transNodeId << "," << layerId << "\n";
+    os << "    C: \"OP\"," << transNodeId << "," << boneId(0)
+       << ",\"Lcl Translation\"\n";
+    for (int ax = 0; ax < 3; ++ax) {
+        const qint64 cid = transCurveId0 + ax;
+        const char* prop = (ax == 0) ? "d|X" : (ax == 1 ? "d|Y" : "d|Z");
+        os << "    C: \"OP\"," << cid << "," << transNodeId
+           << ",\"" << prop << "\"\n";
+    }
     os << "}\n";
     return true;
 }
@@ -9513,18 +9645,20 @@ static bool writeFbxAscii(const QString& path,
 // ---------------------------------------------------------------------------
 //  HD post-processing — offline cleanup pass for a finished recording.
 //
-//  Approximation of Xsens MVN HD reprocessing as inferred from the XESNSE
-//  Ghidra decomp: a batched pipeline of
-//      1) per-segment outlier rejection (z-score on Δquat angular distance),
-//      2) per-segment Gaussian SLERP smoothing (window ≈ 21 frames),
-//      3) root-position Butterworth low-pass (cutoff ≈ 5 Hz),
-//      4) foot-contact ZUPT (zero-velocity update at still frames).
+//  Balanced cleanup that removes jitter / spikes / foot-skate while keeping
+//  motion crisp.  Pipeline (each pass deterministic and O(N)):
+//      1) per-segment outlier rejection (3σ on Δquat angular distance),
+//      2) per-segment Gaussian SLERP smoothing — ONE zero-phase pass
+//         (window ≈ ±5 frames); a second low-pass over-smoothed the take,
+//      3) finger-chain Gaussian smoothing (only if gloves present),
+//      4) root-position Butterworth low-pass (cutoff ≈ 5 Hz, filtfilt),
+//      5) foot-contact ZUPT (zero-velocity update at still frames).
 //
 //  Real MVN also does biomechanical joint-limit projection + Kalman/RTS,
 //  but those require the proprietary XME body model we don't have here.
-//  The drop-in equivalents listed above remove the bulk of visible jitter
-//  without touching the coordinate system — which the user explicitly
-//  forbade changing.  Everything operates on RecordedFrame in-place.
+//  The drop-in equivalents above remove the bulk of visible jitter without
+//  touching the coordinate system.  Everything operates on RecordedFrame
+//  in-place; passes 4–5 act on the now-real pelvis trajectory.
 // ---------------------------------------------------------------------------
 
 static double angBetween(const Quat& a, const Quat& b)
@@ -9538,20 +9672,23 @@ static double angBetween(const Quat& a, const Quat& b)
 // frame-to-frame angular delta; any frame whose delta exceeds μ + 3σ is
 // replaced by SLERP(prev, next) so the smoother downstream doesn't get
 // hit by one-sample spikes.
-static void hdOutlierReject(std::vector<RecordedFrame>& fr)
+static void hdOutlierReject(std::vector<RecordedFrame>& fr,
+                            const std::function<void(double)>& cb = {})
 {
     if (fr.size() < 3) return;
+    const size_t M = fr.size() - 1;          // count of frame-to-frame deltas
     for (int s = 0; s < kXsensSegmentCount; ++s) {
+        if (cb) cb(double(s) / double(kXsensSegmentCount));
         std::vector<double> d(fr.size(), 0.0);
         for (size_t i = 1; i < fr.size(); ++i)
             d[i] = angBetween(fr[i-1].segQuat[s], fr[i].segQuat[s]);
         double mean = 0.0;
-        for (double x : d) mean += x;
-        mean /= double(d.size() - 1);
+        for (size_t i = 1; i < fr.size(); ++i) mean += d[i];
+        mean /= double(M);
         double var = 0.0;
-        for (size_t i = 1; i < d.size(); ++i) var += (d[i]-mean)*(d[i]-mean);
-        var = std::sqrt(var / double(d.size() - 1));
-        const double thr = mean + 3.0 * var;
+        for (size_t i = 1; i < fr.size(); ++i) { const double e = d[i]-mean; var += e*e; }
+        const double sd  = std::sqrt(var / double(M));
+        const double thr = mean + 3.0 * sd;
         for (size_t i = 1; i + 1 < fr.size(); ++i) {
             if (d[i] > thr && d[i+1] > thr * 0.6) {
                 fr[i].segQuat[s] = slerp_quat(fr[i-1].segQuat[s],
@@ -9561,12 +9698,16 @@ static void hdOutlierReject(std::vector<RecordedFrame>& fr)
     }
 }
 
-// Pass 2 — Gaussian SLERP smoother.  Half-width 10 frames, σ = 4 (≈ the
-// XESNSE 21-sample decomp window).
-static void hdQuatSmooth(std::vector<RecordedFrame>& fr)
+// Pass 2 — Gaussian SLERP smoother (zero-phase, symmetric kernel, truncated &
+// renormalised at clip ends).  Half-width 6, σ = 2.5 (≈ ±5-frame support):
+// removes jitter while preserving the crispness of fast motion.  This is the
+// SINGLE body-rotation smoother — stacking a second low-pass (the old RTS
+// pass) over-smoothed the take and doubled peak memory, so it was removed.
+static void hdQuatSmooth(std::vector<RecordedFrame>& fr,
+                         const std::function<void(double)>& cb = {})
 {
-    const int half = 10;
-    const double sigma = 4.0;
+    const int half = 6;
+    const double sigma = 2.5;
     std::vector<double> k(2*half + 1);
     double sumK = 0.0;
     for (int i = -half; i <= half; ++i) {
@@ -9579,6 +9720,7 @@ static void hdQuatSmooth(std::vector<RecordedFrame>& fr)
     if (N < 3) return;
     std::vector<std::array<Quat, kXsensSegmentCount>> out(N);
     for (int i = 0; i < N; ++i) {
+        if (cb && (i & 0x0FFF) == 0) cb(double(i) / double(N));
         for (int s = 0; s < kXsensSegmentCount; ++s) {
             // Weighted quaternion average via eigen-of-4x4 accumulator.
             // With a Gaussian window the iterative SLERP blend is stable
@@ -9660,31 +9802,8 @@ static void hdZupt(std::vector<RecordedFrame>& fr)
     }
 }
 
-static void hdRtsSmooth(std::vector<RecordedFrame>& fr)
-{
-    const int N = int(fr.size());
-    if (N < 4) return;
-    std::vector<std::array<Quat, kXsensSegmentCount>> fwd(N);
-    std::vector<std::array<Quat, kXsensSegmentCount>> bwd(N);
-    const double alpha = 0.20;
-
-    fwd[0] = fr[0].segQuat;
-    for (int i = 1; i < N; ++i) {
-        for (int s = 0; s < kXsensSegmentCount; ++s)
-            fwd[i][s] = slerp_quat(fwd[i-1][s], fr[i].segQuat[s], alpha);
-    }
-    bwd[N-1] = fr[N-1].segQuat;
-    for (int i = N-2; i >= 0; --i) {
-        for (int s = 0; s < kXsensSegmentCount; ++s)
-            bwd[i][s] = slerp_quat(bwd[i+1][s], fr[i].segQuat[s], alpha);
-    }
-    for (int i = 0; i < N; ++i) {
-        for (int s = 0; s < kXsensSegmentCount; ++s)
-            fr[i].segQuat[s] = slerp_quat(fwd[i][s], bwd[i][s], 0.5);
-    }
-}
-
-static void hdFingerSmooth(std::vector<RecordedFrame>& fr)
+static void hdFingerSmooth(std::vector<RecordedFrame>& fr,
+                           const std::function<void(double)>& cb = {})
 {
     const int N = int(fr.size());
     if (N < 3) return;
@@ -9702,9 +9821,11 @@ static void hdFingerSmooth(std::vector<RecordedFrame>& fr)
     }
     for (auto& v : k) v /= sumK;
 
-    auto smoothChain = [&](std::array<Quat, kFingerSegmentsHand> RecordedFrame::*member) {
+    auto smoothChain = [&](std::array<Quat, kFingerSegmentsHand> RecordedFrame::*member,
+                           double base) {
         std::vector<std::array<Quat, kFingerSegmentsHand>> out(N);
         for (int i = 0; i < N; ++i) {
+            if (cb && (i & 0x0FFF) == 0) cb(base + 0.5 * double(i) / double(N));
             for (int j = 0; j < kFingerSegmentsHand; ++j) {
                 Quat acc = (fr[i].*member)[j];
                 double wAcc = k[half];
@@ -9727,21 +9848,27 @@ static void hdFingerSmooth(std::vector<RecordedFrame>& fr)
         }
         for (int i = 0; i < N; ++i) (fr[i].*member) = out[i];
     };
-    smoothChain(&RecordedFrame::rightGloveQ);
-    smoothChain(&RecordedFrame::leftGloveQ);
+    smoothChain(&RecordedFrame::rightGloveQ, 0.0);
+    smoothChain(&RecordedFrame::leftGloveQ,  0.5);
 }
 
 static void runHdPostProcessing(std::vector<RecordedFrame>& fr,
                                 int fps,
                                 std::function<void(int /*percent*/)> progress)
 {
+    // Map a pass-local 0..1 fraction into a global percentage band so the
+    // progress bar advances smoothly *within* long passes, not only between.
+    auto band = [&](int lo, int hi) {
+        return [progress, lo, hi](double f) {
+            if (progress) progress(lo + int(double(hi - lo) * std::clamp(f, 0.0, 1.0)));
+        };
+    };
     if (progress) progress(0);
-    hdOutlierReject(fr); if (progress) progress(15);
-    hdQuatSmooth(fr);    if (progress) progress(40);
-    hdRtsSmooth(fr);     if (progress) progress(65);
-    hdFingerSmooth(fr);  if (progress) progress(78);
-    hdRootLowpass(fr, fps); if (progress) progress(90);
-    hdZupt(fr);          if (progress) progress(100);
+    hdOutlierReject(fr, band(0, 15));   if (progress) progress(15);
+    hdQuatSmooth(fr,   band(15, 45));   if (progress) progress(45);
+    hdFingerSmooth(fr, band(45, 70));   if (progress) progress(70);
+    hdRootLowpass(fr, fps);             if (progress) progress(90);
+    hdZupt(fr);                         if (progress) progress(100);
 }
 
 } // anonymous namespace
@@ -10508,7 +10635,22 @@ void MainWindow::onRenderTick()
         rf.t         = double(QDateTime::currentMSecsSinceEpoch() - m_recStartMs)
                        / 1000.0;
         rf.segQuat   = qOut;
-        rf.pelvisPos = QVector3D(0.0f, 0.0f, 0.0f);
+        // Real world-space pelvis: locomotion-aware travel + floor clamp,
+        // mirroring the live streamer but WITHOUT the view-only yaw/shift/
+        // freeze, which would inject discontinuities the HD root filter rings
+        // on.  Without this the recording has no root motion (walks in place)
+        // and the HD root low-pass / foot-lock passes are no-ops.
+        QVector3D pelvisM(0.0f, 0.0f, 0.0f);
+        if (m_skel) {
+            auto kp = m_skel->computeKeypoints(qOut, QVector3D(0.0f, 0.0f, 0.0f));
+            const QVector3D off = m_viewport->lastLocoOffset();
+            for (auto& p : kp) p += off;
+            float minZ = kp[0].z();
+            for (const auto& p : kp) if (p.z() < minZ) minZ = p.z();
+            if (minZ < -0.02f) for (auto& p : kp) p.setZ(p.z() - minZ);
+            pelvisM = kp[SEG_Pelvis];
+        }
+        rf.pelvisPos = pelvisM;
         rf.hasGloves = f.hasGloves && m_setup.useGloves;
         if (rf.hasGloves) {
             rf.rightGloveQ = f.rightGloveQ;
@@ -10797,7 +10939,7 @@ void MainWindow::startRecording(const RecordSettings& cfg)
 {
     m_recCfg = cfg;
     m_recBuffer.clear();
-    m_recBuffer.reserve(cfg.fps * 60 * 10);     // ~10 min at target fps
+    m_recBuffer.reserve(size_t(240.0 * 60 * 10)); // ~10 min at max suit rate (one frame per unique sample)
     m_recLastSample = -1;
     m_recStartMs = QDateTime::currentMSecsSinceEpoch();
     m_recording = true;
@@ -10948,8 +11090,13 @@ void MainWindow::finishRecording()
         path += defSuffix;
 
     const double h = m_setup.heightCm / 100.0;
-    const bool ok = bvh ? writeBvh(path, out, m_recCfg.fps, h)
-                        : writeFbxAscii(path, out, m_recCfg.fps, h);
+    if (!m_skel) {
+        QMessageBox::warning(this, Lang::t("rec_save_title"),
+                             Lang::t("rec_save_failed"));
+        return;
+    }
+    const bool ok = bvh ? writeBvh(path, out, m_recCfg.fps, h, *m_skel)
+                        : writeFbxAscii(path, out, m_recCfg.fps, h, *m_skel);
     if (!ok) {
         QMessageBox::warning(this, Lang::t("rec_save_title"),
                              Lang::t("rec_save_failed"));
