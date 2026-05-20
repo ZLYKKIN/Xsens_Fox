@@ -2836,11 +2836,19 @@ struct ManusErgoData {        // sizeof == 0xA8
     std::uint32_t isUserID = 0;
     float data[40]{};
 };
+// FFI ABI guard: foxManusErgonomicsCb reinterpret_casts the Manus SDK buffer
+// to these layouts. If the SDK/compiler ever changes the size/padding, fail at
+// compile time instead of reading garbage / overrunning at runtime.
+static_assert(sizeof(ManusErgoData) == 0xA8,
+              "ManusErgoData must match the Manus ergonomics ABI (4+4+40*4 bytes)");
 struct ManusErgoStream {      // sizeof == 0x1510
     std::uint64_t publishTime = 0;
     ManusErgoData data[32]{};
     std::uint32_t dataCount   = 0;
 };
+static_assert(sizeof(ManusErgoStream) == 0x1510,
+              "ManusErgoStream must match the Manus ergonomics ABI "
+              "(8 + 32*0xA8 + 4, padded to 8-byte alignment)");
 
 static void __cdecl foxManusErgonomicsCb(const void* raw)
 {
@@ -2927,12 +2935,15 @@ static void __cdecl foxManusErgonomicsCb(const void* raw)
             {
                 QMutexLocker lk(&g_ergo.lock);
                 if (!g_ergo.emaLeftInit) {
-                    for (int j = 0; j < 20; ++j) g_ergo.emaLeft[j] = e.data[j];
+                    for (int j = 0; j < 20; ++j)
+                        g_ergo.emaLeft[j] = std::isfinite(e.data[j]) ? e.data[j] : 0.0f;
                     g_ergo.emaLeftInit = true;
                 } else {
                     for (int j = 0; j < 20; ++j) {
                         const float prev = g_ergo.emaLeft[j];
-                        const float cur  = e.data[j];
+                        // Reject a non-finite SDK sample — otherwise the EMA is
+                        // poisoned to NaN permanently (NaN propagates every tick).
+                        const float cur  = std::isfinite(e.data[j]) ? e.data[j] : prev;
                         const float delta = std::abs(cur - prev);
                         const float a = alphaForJoint(j, delta, "L");
                         g_ergo.emaLeft[j] = prev + a * (cur - prev);
@@ -2948,12 +2959,14 @@ static void __cdecl foxManusErgonomicsCb(const void* raw)
             {
                 QMutexLocker lk(&g_ergo.lock);
                 if (!g_ergo.emaRightInit) {
-                    for (int j = 0; j < 20; ++j) g_ergo.emaRight[j] = e.data[20 + j];
+                    for (int j = 0; j < 20; ++j)
+                        g_ergo.emaRight[j] = std::isfinite(e.data[20 + j]) ? e.data[20 + j] : 0.0f;
                     g_ergo.emaRightInit = true;
                 } else {
                     for (int j = 0; j < 20; ++j) {
                         const float prev = g_ergo.emaRight[j];
-                        const float cur  = e.data[20 + j];
+                        // Reject a non-finite SDK sample (see left-hand note above).
+                        const float cur  = std::isfinite(e.data[20 + j]) ? e.data[20 + j] : prev;
                         const float delta = std::abs(cur - prev);
                         const float a = alphaForJoint(j, delta, "R");
                         g_ergo.emaRight[j] = prev + a * (cur - prev);
@@ -8454,7 +8467,8 @@ void MocapViewport::paintGL()
 
     // Fixed-function setup (legacy profile).  Viewport coordinate system
     // matches hipose's default (use_isb_ref=False): Z-up, identity axis_rot.
-    QMatrix4x4 proj;  proj.perspective(45.0f, float(width())/float(height()), 0.05f, 100.0f);
+    // std::max guards a zero-height surface (degenerate aspect / div-by-zero).
+    QMatrix4x4 proj;  proj.perspective(45.0f, float(width())/float(std::max(1, height())), 0.05f, 100.0f);
 
     const float yawR   = qDegreesToRadians(m_yaw);
     const float pitchR = qDegreesToRadians(m_pitch);
@@ -9768,6 +9782,7 @@ static bool writeBvh(const QString& path,
                      double heightMeters,
                      const SkeletonXsens& skel)
 {
+    if (fps <= 0) fps = 30;            // guard the 1.0/fps Frame-Time division
     QFile f(path);
     if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text))
         return false;
@@ -9868,6 +9883,7 @@ static bool writeFbxAscii(const QString& path,
                           double heightMeters,
                           const SkeletonXsens& skel)
 {
+    if (fps <= 0) fps = 30;            // guard the kTimePerSecond/fps division
     QFile f(path);
     if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text))
         return false;
