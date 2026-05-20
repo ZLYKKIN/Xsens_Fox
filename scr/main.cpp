@@ -10558,6 +10558,21 @@ void MainWindow::onRenderTick()
     s_haveOut[SEG_L5] = s_haveOut[SEG_L3] = s_haveOut[SEG_T12] =
     s_haveOut[SEG_Neck] = s_haveOut[SEG_RToe] = s_haveOut[SEG_LToe] = true;
 
+    // Anatomical joint-limit safety net — always on, no flag.  Caps gross
+    // knee/elbow fold-through and unphysical long-axis spin so a mag/jump
+    // glitch can't push the live pose somewhere impossible.  Thresholds are
+    // deliberately loose: normal motion (deep flexion, forearm pronation) is
+    // never touched — only broken poses get pulled back.  Same convention-safe
+    // clamp the HD pass uses, so live and recorded output stay consistent.
+    if (m_skel) {
+        const double kneeSwing  = 178.0 * M_PI / 180.0;
+        const double kneeTwist  =  45.0 * M_PI / 180.0;
+        const double elbowSwing = 178.0 * M_PI / 180.0;
+        projectHingeLimit(q, SEG_RUpperLeg, SEG_RLowerLeg, *m_skel, kneeSwing,  kneeTwist);
+        projectHingeLimit(q, SEG_LUpperLeg, SEG_LLowerLeg, *m_skel, kneeSwing,  kneeTwist);
+        projectHingeLimit(q, SEG_RUpperArm, SEG_RForearm,  *m_skel, elbowSwing, M_PI);
+        projectHingeLimit(q, SEG_LUpperArm, SEG_LForearm,  *m_skel, elbowSwing, M_PI);
+    }
     m_viewport->updatePose(q, QVector3D(0.0f, 0.0f, 0.0f));
     const auto& qOut = m_viewport->filteredOrient();
 
