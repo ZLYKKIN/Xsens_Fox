@@ -55,10 +55,34 @@ constexpr int     kXsensSegmentCountWithDummies = 27;
 constexpr int     kFingerSegmentsHand = 20;
 constexpr double  kRenderFps          = 90.0;
 constexpr double  kStaleSeconds       = 2.0;
-constexpr int     kCalibrationSamples = 500;    // ~5 s @ 100 Hz
+constexpr int     kCalibrationSamples = 500;    // fixed-count average; valid at any suit rate
 constexpr int     kCountdownSeconds   = 6;    // 6 s prep / Madgwick warm-up
                                               // (5 s convergence at 240 Hz × β=0.35
                                               //  comfortably flattens all 17 filters)
+
+// Suit family — drives the whole-system update rate ("hertz").  Picked at
+// startup (wizard, or forced to Link by -test).  Xsens Link streams at
+// 240 Hz; a full 17-tracker Awinda suit tops out at 60 Hz.
+enum class SuitType { Awinda, Link };
+constexpr double nativeRateHz(SuitType s) { return s == SuitType::Link ? 240.0 : 60.0; }
+
+// Rate-compensation helpers.  The locomotion solver and various timers were
+// hand-tuned for a fixed 90 Hz tick; these convert those magic numbers so the
+// behaviour is preserved at any processing rate (60 / 90 / 240).  Both are
+// exact no-ops at 90 Hz.
+//   ticksFor       — a duration expressed as a tick count at rateHz.
+//   rateAdjustAlpha — a first-order LP/blend coefficient a0 (tuned at dt0=1/90)
+//                     re-expressed for a step of dt via its time constant tau.
+inline int ticksFor(double seconds, double rateHz) {
+    const long n = std::lround(seconds * rateHz);
+    return n < 1 ? 1 : static_cast<int>(n);
+}
+inline double rateAdjustAlpha(double a0, double dt, double dt0 = 1.0 / 90.0) {
+    if (a0 <= 0.0) return 0.0;
+    if (a0 >= 1.0) return 1.0;
+    const double tau = -dt0 / std::log(1.0 - a0);
+    return 1.0 - std::exp(-dt / tau);
+}
 
 // Xsens segment indices (matches MXTP segId - 1, same as hipose xsens_segment_names)
 enum Seg : int {
@@ -302,10 +326,13 @@ private:
         bool      m_yawFrozenPrev     = false;
 
         // FK-XY history ring buffers (planted-despite-rotating criterion).
-        // 10 samples ≈ 111 ms at 90 Hz.
-        static constexpr int kFKXYWindow = 10;
-        std::array<QVector2D, kFKXYWindow> m_rFKXY {};
-        std::array<QVector2D, kFKXYWindow> m_lFKXY {};
+        // The window spans ~111 ms; its length in samples scales with the
+        // processing rate (10 @ 90 Hz, 7 @ 60 Hz, 27 @ 240 Hz).  The arrays are
+        // sized for the highest rate; m_fkxyWindow is the active length.
+        static constexpr int kFKXYWindowMax = 32;
+        int       m_fkxyWindow        = 10;     // set by setProcRate (≤ Max)
+        std::array<QVector2D, kFKXYWindowMax> m_rFKXY {};
+        std::array<QVector2D, kFKXYWindowMax> m_lFKXY {};
         int       m_fkxyHead          = 0;
         int       m_fkxyCount         = 0;
 
@@ -383,6 +410,12 @@ private:
         int       m_airborneTicks      = 0;
         int       m_landedTicks        = 0;
 
+        // Rate-derived tick durations (set by setProcRate; defaults = @90 Hz).
+        double    m_procRateHz          = 90.0;
+        int       m_airborneStableTicks = 5;    // ~0.055 s airborne stabilisation
+        int       m_landedRampTicks     = 12;   // ~0.133 s landing re-anchor ramp
+        int       m_commitFadeTicks     = 12;   // ~0.133 s post-commit step-cap fade
+
         // --- tunables ---------------------------------------------------------
         // FIX «walks in place / 5-10 cm jumps»: тюнинг параметров локомоции.
         //
@@ -444,6 +477,31 @@ private:
         // ActorConfig.footLengthCm.  Используется в Phase 3 commit-блоке
         // для расчёта world.z = bone_foot * sin(pitch) при heel-lifted squat.
         void setFootLength(double m) { m_footLengthM = std::max(0.10, m); }
+
+        // Bind the processing rate (Hz) so every @90 Hz-tuned tick count and
+        // first-order blend coefficient is re-derived for the current suit
+        // cadence (Link 240 / Awinda 60).  Exact no-op at 90 Hz.  Must be
+        // called before the first update(); survives reset().
+        void setProcRate(double hz) {
+            m_procRateHz = (hz > 1.0) ? hz : 90.0;
+            const double dt = 1.0 / m_procRateHz;
+            m_poseStableTicks     = ticksFor(0.500, m_procRateHz);
+            m_zuptTicksThresh     = ticksFor(0.667, m_procRateHz);
+            m_lowZTicksRequired   = ticksFor(0.067, m_procRateHz);
+            m_zSnapBlendFrames    = ticksFor(0.111, m_procRateHz);
+            m_landedRampTicks     = ticksFor(0.133, m_procRateHz);
+            m_commitFadeTicks     = ticksFor(0.133, m_procRateHz);
+            m_airborneStableTicks = ticksFor(0.055, m_procRateHz);
+            const int w           = ticksFor(0.111, m_procRateHz);
+            m_fkxyWindow          = (w > kFKXYWindowMax) ? kFKXYWindowMax : w;
+            m_confRiseRate        = rateAdjustAlpha(0.50, dt);
+            m_confFallRate        = rateAdjustAlpha(0.25, dt);
+            m_offsetRatePrimary   = rateAdjustAlpha(0.40, dt);
+            m_offsetRateDouble    = rateAdjustAlpha(0.25, dt);
+            m_zRatePelvisMoving   = rateAdjustAlpha(0.40, dt);
+            m_zRatePelvisStill    = rateAdjustAlpha(0.06, dt);
+            m_zDriveRate          = rateAdjustAlpha(0.02, dt);
+        }
 
       private:
         PoseKind _classifyPose(const Quat& qPelvis,
@@ -605,6 +663,12 @@ public:
     // so future WiFi-auto-connect can reuse them without re-asking.
     void setWifiCredentials(const QString& ssid, const QString& password);
 
+    // Expected native update rate (Hz) implied by the chosen suit (Link 240 /
+    // Awinda 60).  Seeds freqHz before the device is queried so the IMU/AHRS
+    // math is correct from the first packet; the live XsDevice_updateRate()
+    // result is reconciled against it (a warning is logged on mismatch).
+    void setExpectedRate(double hz);
+
     // Install sensor-to-segment alignment quaternions (one per tracker).
     // The receiver rotates each sensor's acc / gyr / mag by inv(s2s[i])
     // before handing them to the fusion filter, exactly like hipose's
@@ -692,7 +756,8 @@ class NewSessionWizard : public QDialog {
     Q_OBJECT
 public:
     struct Result {
-        bool   useGloves = false;
+        bool     useGloves = false;
+        SuitType suit      = SuitType::Awinda;   // drives system update rate
         double heightCm = 175.0;
         double footLengthCm = 26.0;
         double armSpanCm = 0.0;
@@ -725,6 +790,10 @@ public:
     // when the operator launches with --gloves so the wizard opens in the
     // right mode without an extra click.
     void preselectGloves(bool on);
+
+    // Pre-select the suit family (Link / Awinda).  Wired from main() so a CLI
+    // override (-test ⇒ Link) opens the wizard on the right suit and rate.
+    void preselectSuit(SuitType suit);
 
 private slots:
     void goNext();
@@ -764,6 +833,7 @@ private:
     class QLabel*        m_gloveDot   = nullptr;
     class QLabel*        m_gloveText  = nullptr;
     class QLabel*        m_modeHint   = nullptr;
+    class QComboBox*     m_cbxSuit      = nullptr;   // Xsens Link 240 / Awinda 60
     class QComboBox*     m_cbxTransport = nullptr;   // COM / WiFi
     class QLineEdit*     m_edSsid     = nullptr;
     class QLineEdit*     m_edPassword = nullptr;
@@ -988,6 +1058,14 @@ public:
     void setActor(const ActorConfig& actor);
     ActorConfig actor() const { return m_actor; }
     void setLocoVerbose(bool v) { m_loco.setVerbose(v); }
+    // Bind the processing rate so the locomotion solver re-derives its
+    // @90 Hz-tuned timings for the active suit cadence (Link 240 / Awinda 60),
+    // and cap the GL repaint at the display rate (never above ~90 Hz).
+    void setProcRate(double hz) {
+        m_loco.setProcRate(hz);
+        const double cap = (hz > 90.0) ? 90.0 : (hz > 1.0 ? hz : 90.0);
+        m_paintMinIntervalSec = 1.0 / cap;
+    }
 
     // Reset: capture current pelvis world XY, apply offset so pelvis goes to
     // scene origin (0,0), feet rest on floor (Z from FK, no forcing).
@@ -1131,6 +1209,11 @@ private:
     bool                                    m_havePrevQ = false;
     double                                  m_lastRenderT = 0.0;
 
+    // GL repaint throttle.  The solver/record/stream tick runs at the full suit
+    // rate in MainWindow::onRenderTick; we only redraw at the display rate.
+    double                                  m_lastPaintSec = 0.0;
+    double                                  m_paintMinIntervalSec = 1.0 / 90.0;
+
     WristAnatomicalCfg m_wristCfgR{};
     WristAnatomicalCfg m_wristCfgL{};
 
@@ -1195,7 +1278,7 @@ private:
 class RecordWizard : public QDialog {
     Q_OBJECT
 public:
-    explicit RecordWizard(QWidget* parent = nullptr);
+    explicit RecordWizard(SuitType suit = SuitType::Awinda, QWidget* parent = nullptr);
     RecordSettings result() const { return m_result; }
 
 private slots:
@@ -1203,6 +1286,7 @@ private slots:
     void goBack();
 
 private:
+    SuitType m_suit = SuitType::Awinda;   // gates the high-rate (120/240) fps options
     class QStackedWidget* m_pages = nullptr;
     int   m_pageIdx = 0;
 
@@ -1263,14 +1347,15 @@ struct LiveSettings {
 class LiveStreamWizard : public QDialog {
     Q_OBJECT
 public:
-    explicit LiveStreamWizard(QWidget* parent = nullptr);
+    explicit LiveStreamWizard(SuitType suit = SuitType::Awinda, QWidget* parent = nullptr);
     LiveSettings result() const { return m_result; }
 
 private:
+    SuitType             m_suit   = SuitType::Awinda;  // gates 120/240 fps options
     class QComboBox*     m_target = nullptr;
     class QComboBox*     m_host   = nullptr;
     class QSpinBox*      m_port   = nullptr;
-    class QComboBox*     m_fps    = nullptr;        // new: 24/30/60
+    class QComboBox*     m_fps    = nullptr;        // 24/30/60 (+120/240 for Link)
     class QPushButton*   m_btnStart = nullptr;
     class QPushButton*   m_btnCancel = nullptr;
     LiveSettings         m_result{};
@@ -1359,6 +1444,11 @@ private:
 
     bool            m_sessionRunning = true;
 
+    // Suit-driven processing rate (Hz): the whole solve / record / stream loop
+    // ticks at this rate (Link → 240, Awinda → 60).  GL repaint is throttled
+    // separately inside the viewport so we never draw faster than the display.
+    double          m_procRateHz   = 90.0;
+
     // v4: local skeleton instance — used by onRenderTick to compose the
     // full world orientation of each wrist via defAngFor() before FK-ing
     // the Manus-local finger positions.  Kept separate from the viewport's
@@ -1404,6 +1494,7 @@ struct CliArgs {
     bool test   = false;
     bool gloves = false;                     // --gloves : enable hand skeleton in -test
     bool wristConstraint = false;
+    SuitType suit = SuitType::Awinda;        // -test forces Link; --awinda/--link override
 };
 CliArgs parseCli(int argc, char** argv);
 
