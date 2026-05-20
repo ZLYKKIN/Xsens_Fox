@@ -2480,6 +2480,15 @@ struct MocapReceiver::Impl {
     std::array<QVector3D, kXsensSegmentCount> gyrBias{};
     bool                                      gyrBiasActive = false;
 
+    // -test diagnostics: the IMU channels AFTER the full calibration chain
+    // (acc-norm, gyr-bias, mag soft-iron) and the sensor->body s2s rotation,
+    // plus the gyro after FusionBias removal.  Captured by the fusion loop so
+    // the [FUSED SNAPSHOT] can show raw -> body-frame -> filter-input per axis.
+    std::array<QVector3D, kXsensSegmentCount> dbgAccBody{};   // g, body frame
+    std::array<QVector3D, kXsensSegmentCount> dbgGyrBody{};   // deg/s, body frame
+    std::array<QVector3D, kXsensSegmentCount> dbgMagBody{};   // norm, body frame
+    std::array<QVector3D, kXsensSegmentCount> dbgGyrFused{};  // deg/s, post-bias
+
     std::array<std::array<double, 9>, kXsensSegmentCount> magSoftMat{};
     std::array<QVector3D, kXsensSegmentCount>             magSoftOff{};
     bool                                                  magSoftActive = false;
@@ -2712,6 +2721,29 @@ static Quat axisAngleQuat(const QVector3D& axis, double rad)
                 axis.x() * s, axis.y() * s, axis.z() * s).normalized();
 }
 
+// Per-hand finger diagnostic capture for the -test FINGER SNAPSHOT.  Holds
+// the REAL angles parseErgoHand worked with — incoming ergo degrees, the
+// baseline-subtracted "effective" values, the per-joint spread/flex before
+// and after the anatomical kFingerLimits clamp, and which joints were
+// actually clamped.  Single source: written by parseErgoHand itself.
+struct FingerDiagHand {
+    bool   valid           = false;
+    bool   baselineApplied = false;
+    float  raw[20]         = {};   // incoming ergo degrees (pre-baseline)
+    float  effective[20]   = {};   // after baseline subtraction (degrees)
+    double spreadEffDeg[5] = {};   // spread*sign, degrees, pre-clamp
+    double flexDeg[5][3]   = {};   // MCP/PIP/DIP flex, degrees, pre-clamp
+    double spreadClDeg[5]  = {};   // spread after clamp, degrees
+    double flexClDeg[5][3] = {};   // flex after clamp, degrees
+    bool   spreadClamped[5]  = {};
+    bool   flexClamped[5][3] = {};
+};
+struct FingerDiag {
+    QMutex lock;
+    FingerDiagHand left, right;
+};
+static FingerDiag g_fingerDiag;
+
 // Parse one hand's 20 ergonomics floats (spread/MCP/PIP/DIP × 5 fingers,
 // in degrees) into (local per-joint quats, hand-local joint positions).
 // Frame convention (same for BOTH hands):
@@ -2722,6 +2754,8 @@ static void parseErgoHand(const float* degs20, bool isLeft,
                           std::array<Quat,      kFingerSegmentsHand>& outQ,
                           std::array<QVector3D, kFingerSegmentsHand>& outP)
 {
+    FingerDiagHand dg;
+    dg.valid = true;
     const QVector3D flexAxis (0, 1, 0);
     const QVector3D spreadAx (0, 0, 1);
     const double sideSign = isLeft ? -1.0 : +1.0;
@@ -2741,6 +2775,8 @@ static void parseErgoHand(const float* degs20, bool isLeft,
         for (int i = 0; i < 20; ++i) effective[i] = degs20[i] - baseline[i];
         effectivePtr = effective;
     }
+    dg.baselineApplied = (effectivePtr == effective);
+    for (int i = 0; i < 20; ++i) { dg.raw[i] = degs20[i]; dg.effective[i] = effectivePtr[i]; }
 
     // ============================================================
     // FIX: thumb-specific pre-rotation для CMC (Carpometacarpal).
@@ -2820,6 +2856,23 @@ static void parseErgoHand(const float* degs20, bool isLeft,
         const double a2c     = std::clamp(a2, Lm[1].flexMin, Lm[1].flexMax);
         const double a3c     = std::clamp(a3, Lm[2].flexMin, Lm[2].flexMax);
 
+        // Capture the real per-joint angles + clamp outcomes for the -test log.
+        {
+            const double Kdeg = 180.0 / M_PI;
+            dg.spreadEffDeg[f]   = spreadEff * Kdeg;
+            dg.flexDeg[f][0]     = a1 * Kdeg;
+            dg.flexDeg[f][1]     = a2 * Kdeg;
+            dg.flexDeg[f][2]     = a3 * Kdeg;
+            dg.spreadClDeg[f]    = spreadC * Kdeg;
+            dg.flexClDeg[f][0]   = a1c * Kdeg;
+            dg.flexClDeg[f][1]   = a2c * Kdeg;
+            dg.flexClDeg[f][2]   = a3c * Kdeg;
+            dg.spreadClamped[f]  = (spreadC != spreadEff);
+            dg.flexClamped[f][0] = (a1c != a1);
+            dg.flexClamped[f][1] = (a2c != a2);
+            dg.flexClamped[f][2] = (a3c != a3);
+        }
+
         Quat q0 = quat_mult(axisAngleQuat(spreadAx, spreadC),
                             axisAngleQuat(flexAxis, a1c));
         Quat q1 = axisAngleQuat(flexAxis, a2c);
@@ -2848,6 +2901,10 @@ static void parseErgoHand(const float* degs20, bool isLeft,
         worldQ = quat_mult(worldQ, q2);
         outQ[baseIdx + 3] = worldQ;
         outP[baseIdx + 3] = p;
+    }
+    {
+        QMutexLocker lk(&g_fingerDiag.lock);
+        (isLeft ? g_fingerDiag.left : g_fingerDiag.right) = dg;
     }
 }
 
@@ -3937,6 +3994,14 @@ void MocapReceiver::run()
                 if (haveMag) mag = vec_rotate(mag, inv);
             }
 
+            // -test: snapshot the fully-calibrated, body-frame IMU sample
+            // (post acc-norm / gyr-bias / mag soft-iron / s2s) for [FUSED SNAPSHOT].
+            if (I.test && targetSeg >= 0 && targetSeg < kXsensSegmentCount) {
+                I.dbgAccBody[targetSeg] = accForFilter;
+                I.dbgGyrBody[targetSeg] = gyrForFilter;
+                I.dbgMagBody[targetSeg] = mag;
+            }
+
             // A corrupt / partial packet (or a degenerate s2s) can yield a
             // non-finite IMU sample.  Feeding NaN/Inf to FusionAhrsUpdate
             // permanently poisons that sensor's filter state (and Quat::
@@ -4004,6 +4069,9 @@ void MocapReceiver::run()
                                     float(gyrForFilter.y()),
                                     float(gyrForFilter.z()) }};
                 g = FusionBiasUpdate(&biasRef, g);
+                if (I.test)
+                    I.dbgGyrFused[targetSeg] =
+                        QVector3D(g.axis.x, g.axis.y, g.axis.z);  // post-bias gyro
 
                 const FusionVector a = {{ float(accForFilter.x()),
                                           float(accForFilter.y()),
@@ -4237,6 +4305,30 @@ void MocapReceiver::run()
                                       << std::setw(7) << rz << ")°"
                        << "  |ang|=" << std::setw(6) << quat_angle_deg(q) << "°\n";
                 }
+                // Post-calibration, body-frame IMU sample per sensor — the
+                // exact values fed to the AHRS after acc-norm / gyr-bias / mag
+                // soft-iron and the sensor->body s2s rotation, so every axis
+                // transform from raw (above) to filter input is visible.
+                ss << std::setprecision(4);
+                ss << "--- per-sensor calibrated body-frame IMU (post acc-norm/gyr-bias/"
+                      "mag-soft-iron/s2s; gyrFused = post-FusionBias) ---\n";
+                for (int i = 0; i < kXsensSegmentCount; ++i) {
+                    const QVector3D& ab = I.dbgAccBody[i];
+                    const QVector3D& gb = I.dbgGyrBody[i];
+                    const QVector3D& mb = I.dbgMagBody[i];
+                    const QVector3D& gf = I.dbgGyrFused[i];
+                    ss << "  cal[" << std::setw(2) << i << "] "
+                       << std::left << std::setw(14) << kSegmentNames[i] << std::right
+                       << " accB=("  << std::setw(8) << ab.x() << "," << std::setw(8) << ab.y()
+                                     << "," << std::setw(8) << ab.z() << ")g"
+                       << " gyrB=("  << std::setw(9) << gb.x() << "," << std::setw(9) << gb.y()
+                                     << "," << std::setw(9) << gb.z() << ")°/s"
+                       << " gyrFused=(" << std::setw(9) << gf.x() << "," << std::setw(9) << gf.y()
+                                     << "," << std::setw(9) << gf.z() << ")"
+                       << " magB=("  << std::setw(8) << mb.x() << "," << std::setw(8) << mb.y()
+                                     << "," << std::setw(8) << mb.z() << ")\n";
+                }
+                ss << std::setprecision(3);
                 // Calibration state — printed once so misreads at the
                 // raw→normalised boundary are immediately diagnosable.
                 ss << "--- calibration flags: s2s=" << (I.s2sActive ? "on" : "off")
@@ -8669,6 +8761,8 @@ struct LiveStreamSender::Impl {
     QByteArray   scalePkt;
     bool         firstFrameDumped = false;
     qint64       lastHandshakeMs = -1;
+    qint64       lastWireDumpMs  = -1;   // [STREAM SNAPSHOT] cadence (verboseLog)
+    static constexpr qint64 kWireDumpIntervalMs = 2000;
     qint64       lastEmitMs = -1;
     static constexpr qint64 kHandshakeIntervalMs = 1000;  // re-send MXTP12+13 ~1/s
 
@@ -8858,6 +8952,19 @@ void LiveStreamSender::pushFrame(quint32 sample,
 
     m_impl->maybeRetransmitHandshake();
     const quint32 ft = quint32(m_impl->timer.elapsed());
+    const bool wireDue = m_cfg.verboseLog &&
+        (m_impl->lastWireDumpMs < 0 ||
+         (m_impl->timer.elapsed() - m_impl->lastWireDumpMs) >= Impl::kWireDumpIntervalMs);
+    std::ostringstream wireSS;
+    if (wireDue) {
+        m_impl->lastWireDumpMs = m_impl->timer.elapsed();
+        wireSS << std::fixed << std::setprecision(4)
+               << "\n========== [STREAM SNAPSHOT] body-only  sample=" << sample
+               << "  -> " << m_cfg.host.toStdString() << ":" << m_cfg.port
+               << "  ==========\n"
+               << "  wire=MVN MXTP02 (Z-up RH); q = segWorld * Tpose_baseline^-1 "
+                  "(identity at T-pose); pos in metres\n";
+    }
     QByteArray body;
     for (int i = 0; i < kXsensSegmentCount; ++i) {
         appendInt32BE(body, i + 1);
@@ -8874,6 +8981,15 @@ void LiveStreamSender::pushFrame(quint32 sample,
         appendFloatBE(body, float(q.x));
         appendFloatBE(body, float(q.y));
         appendFloatBE(body, float(q.z));
+        if (wireDue) {
+            wireSS << "  wire[" << std::setw(2) << (i + 1) << "] "
+                   << std::left << std::setw(14) << kSegmentNames[i] << std::right
+                   << " pos=(" << std::setw(8) << p.x() << "," << std::setw(8) << p.y()
+                   << "," << std::setw(8) << p.z() << ")"
+                   << " q=(" << std::setw(8) << q.w << "," << std::setw(8) << q.x
+                   << "," << std::setw(8) << q.y << "," << std::setw(8) << q.z << ")"
+                   << " |delta|=" << std::setw(7) << quat_angle_deg(q) << "deg\n";
+        }
     }
     QByteArray hdr = buildMxtpHeader("02", sample, 0x80,
                                      quint8(kXsensSegmentCount), ft, 23, 0);
@@ -8883,6 +8999,13 @@ void LiveStreamSender::pushFrame(quint32 sample,
         m_impl->firstFrameDumped = true;
     }
     m_impl->sock.writeDatagram(pkt, m_impl->host, m_impl->port);
+    if (wireDue) {
+        wireSS << "  pelvis(world,m)=(" << pelvisPos.x() << "," << pelvisPos.y()
+               << "," << pelvisPos.z() << ")  packetBytes=" << pkt.size() << "\n"
+               << "============================================================\n";
+        std::cout << wireSS.str();
+        std::cout.flush();
+    }
 }
 
 void LiveStreamSender::pushFrameWithGloves(quint32 sample,
@@ -8927,6 +9050,18 @@ void LiveStreamSender::pushFrameWithGloves(quint32 sample,
     const quint32 ft = quint32(m_impl->timer.elapsed());
     const quint8  bodyCount = quint8(kXsensSegmentCount);
     const quint8  fingerCount = quint8(2 * kFingerSegmentsHand);
+    const bool wireDue = m_cfg.verboseLog &&
+        (m_impl->lastWireDumpMs < 0 ||
+         (m_impl->timer.elapsed() - m_impl->lastWireDumpMs) >= Impl::kWireDumpIntervalMs);
+    std::ostringstream wireSS;
+    if (wireDue) {
+        m_impl->lastWireDumpMs = m_impl->timer.elapsed();
+        wireSS << std::fixed << std::setprecision(4)
+               << "\n========== [STREAM SNAPSHOT] body+gloves  sample=" << sample
+               << "  -> " << m_cfg.host.toStdString() << ":" << m_cfg.port
+               << "  (body=" << int(bodyCount) << " fingers=" << int(fingerCount) << ") ==========\n"
+               << "  wire=MVN MXTP02 (Z-up RH); q = world * baseline^-1 (identity at T-pose); pos in metres\n";
+    }
     QByteArray body;
     for (int i = 0; i < kXsensSegmentCount; ++i) {
         appendInt32BE(body, i + 1);
@@ -8943,6 +9078,15 @@ void LiveStreamSender::pushFrameWithGloves(quint32 sample,
         appendFloatBE(body, float(q.x));
         appendFloatBE(body, float(q.y));
         appendFloatBE(body, float(q.z));
+        if (wireDue) {
+            wireSS << "  wire[" << std::setw(2) << (i + 1) << "] "
+                   << std::left << std::setw(14) << kSegmentNames[i] << std::right
+                   << " pos=(" << std::setw(8) << p.x() << "," << std::setw(8) << p.y()
+                   << "," << std::setw(8) << p.z() << ")"
+                   << " q=(" << std::setw(8) << q.w << "," << std::setw(8) << q.x
+                   << "," << std::setw(8) << q.y << "," << std::setw(8) << q.z << ")"
+                   << " |delta|=" << std::setw(7) << quat_angle_deg(q) << "deg\n";
+        }
     }
     static constexpr int kXsensSlotToManus[kFingerSegmentsHand] = {
         -1,  1,  2,  3,
@@ -8965,6 +9109,11 @@ void LiveStreamSender::pushFrameWithGloves(quint32 sample,
             appendFloatBE(body, float(q.x));
             appendFloatBE(body, float(q.y));
             appendFloatBE(body, float(q.z));
+            if (wireDue)
+                wireSS << "  wireF[" << std::setw(2) << (segmentIdBase + slot) << "] "
+                       << (segmentIdBase >= 44 ? "R" : "L") << "carpus(slot " << slot
+                       << ") pos=(0,0,0) q=(" << q.w << "," << q.x << ","
+                       << q.y << "," << q.z << ")  [follows hand]\n";
         } else {
             const QVector3D p = pArr[mIdx];  // MVN wire = NWU (Z-up RH); no conversion.
             appendFloatBE(body, p.x()); appendFloatBE(body, p.y()); appendFloatBE(body, p.z());
@@ -8974,6 +9123,12 @@ void LiveStreamSender::pushFrameWithGloves(quint32 sample,
             appendFloatBE(body, float(q.x));
             appendFloatBE(body, float(q.y));
             appendFloatBE(body, float(q.z));
+            if (wireDue)
+                wireSS << "  wireF[" << std::setw(2) << (segmentIdBase + slot) << "] "
+                       << (segmentIdBase >= 44 ? "R" : "L") << "fing(slot " << std::setw(2) << slot
+                       << " mIdx " << std::setw(2) << mIdx << ") pos=(" << p.x() << ","
+                       << p.y() << "," << p.z() << ") q=(" << q.w << "," << q.x << ","
+                       << q.y << "," << q.z << ")\n";
         }
     };
     // emitFinger lambda append'ит сегменты к `body`.  Запомним размер
@@ -9019,6 +9174,15 @@ void LiveStreamSender::pushFrameWithGloves(quint32 sample,
             m_impl->firstFrameDumped = true;
         }
         m_impl->sock.writeDatagram(pkt, m_impl->host, m_impl->port);
+    }
+    if (wireDue) {
+        wireSS << "  pelvis(world,m)=(" << pelvisPos.x() << "," << pelvisPos.y()
+               << "," << pelvisPos.z() << ")  mode="
+               << (m_cfg.splitGloveDatagrams ? "split" : "combined")
+               << "  bodyBytes=" << bodyOnlyBytes << "\n"
+               << "============================================================\n";
+        std::cout << wireSS.str();
+        std::cout.flush();
     }
 }
 
@@ -10014,6 +10178,21 @@ static void hdFingerSmooth(std::vector<RecordedFrame>& fr,
 // World orientation of segment s is raw[s]*defAng[s]; we modify only the
 // child's raw quat, leaving the parent untouched.  No-op unless a limit is hit
 // (so normal motion is never altered).
+// Diagnostic record of the most recent hinge-limit evaluation per child
+// segment, captured by projectHingeLimit() so the -test RENDER SNAPSHOT can
+// report the REAL joint swing/twist the limiter measured and whether the
+// anatomical cap actually fired.  These are the exact values the limiter used
+// (single source — not a parallel recompute in the logger).
+struct HingeLimitDiag {
+    bool   valid       = false;
+    double swingDeg    = 0.0;
+    double twistDeg    = 0.0;
+    double maxSwingDeg = 0.0;
+    double maxTwistDeg = 0.0;
+    bool   clamped     = false;
+};
+static std::array<HingeLimitDiag, kXsensSegmentCount> g_hingeDiag{};
+
 static void projectHingeLimit(std::array<Quat, kXsensSegmentCount>& q,
                               int upSeg, int lowSeg, const SkeletonXsens& skel,
                               double maxSwingRad, double maxTwistRad)
@@ -10039,6 +10218,18 @@ static void projectHingeLimit(std::array<Quat, kXsensSegmentCount>& q,
     if (twAng > maxTwistRad && twAng > 1e-6) {
         twist = slerp_quat(Quat(1, 0, 0, 0), twist, maxTwistRad / twAng);
         changed = true;
+    }
+    // Record the real measured joint angles + caps for the -test snapshot,
+    // every call (so the log shows the live joint angle even when no clamp).
+    {
+        const double K = 180.0 / M_PI;
+        HingeLimitDiag& dg = g_hingeDiag[lowSeg];
+        dg.valid       = true;
+        dg.swingDeg    = swingAng * K;
+        dg.twistDeg    = twAng * K;
+        dg.maxSwingDeg = maxSwingRad * K;
+        dg.maxTwistDeg = maxTwistRad * K;
+        dg.clamped     = changed;
     }
     if (!changed) return;
 
@@ -10252,6 +10443,7 @@ MainWindow::MainWindow(MocapReceiver* rx,
         // verification.
         cfg.target              = LiveTarget::BlenderMVN;
         cfg.debugDumpFirstFrame = true;
+        cfg.verboseLog          = true;   // -test: emit periodic [STREAM SNAPSHOT]
         if (m_skel) {
             std::array<Quat, kXsensSegmentCount> identity{};
             for (auto& qq : identity) qq = Quat(1, 0, 0, 0);
@@ -10920,31 +11112,47 @@ void MainWindow::onRenderTick()
 
             // --- All 23 segments: raw vs. post-calibration-output,
             //     Δ between frames, Euler XYZ, still-ticks, ω ---
+            // Xsens 23-segment parent map (for local joint-angle readout).
+            static const int kSegParent[kXsensSegmentCount] = {
+                -1, 0, 1, 2, 3, 4, 5,   // Pelvis L5 L3 T12 T8 Neck Head
+                 4, 7, 8, 9,            // R: shoulder upperarm forearm hand (root T8)
+                 4,11,12,13,            // L: shoulder upperarm forearm hand (root T8)
+                 0,15,16,17,            // R: upperleg lowerleg foot toe (root pelvis)
+                 0,19,20,21,            // L: upperleg lowerleg foot toe (root pelvis)
+            };
             ss << std::setprecision(3);
-            ss << "--- 23 segments: raw quat → post-calib out → Δ → Euler ---\n";
+            ss << "--- 23 segments: raw -> post-calib q -> drift-locked qOut; "
+                  "world quat, local joint angle, drift, lock ---\n";
             for (int i = 0; i < kXsensSegmentCount; ++i) {
-                const Quat& in  = raw[i];
-                const Quat& out = q[i];
+                const Quat& in  = raw[i];   // fused sensor world quat
+                const Quat& out = q[i];     // after calib offset + coupling + limits
+                const Quat& flt = qOut[i];  // after viewport drift-lock (streamed)
                 double rx, ry, rz;
                 quatEulerDeg(out, rx, ry, rz);
+                const int par = kSegParent[i];
+                const double localAng = (par >= 0)
+                    ? quat_angle_deg(quat_mult(q[par].inv(), out)) : 0.0;
+                const double driftAng = diffDeg(flt, out);
                 ss << "  seg[" << std::setw(2) << i << "] "
                    << std::left << std::setw(14) << kSegmentNames[i]
                    << std::right << (kTracked[i] ? " *" : "  ")
-                   << " raw=(" << std::setw(6) << in.w  << ","
-                               << std::setw(6) << in.x  << ","
-                               << std::setw(6) << in.y  << ","
-                               << std::setw(6) << in.z  << ")"
-                   << " out=(" << std::setw(6) << out.w << ","
-                               << std::setw(6) << out.x << ","
-                               << std::setw(6) << out.y << ","
-                               << std::setw(6) << out.z << ")"
-                   << " |out|=" << std::setw(6) << quat_angle_deg(out) << "°"
+                   << " raw=(" << std::setw(6) << in.w  << "," << std::setw(6) << in.x  << ","
+                               << std::setw(6) << in.y  << "," << std::setw(6) << in.z  << ")"
+                   << " q=("   << std::setw(6) << out.w << "," << std::setw(6) << out.x << ","
+                               << std::setw(6) << out.y << "," << std::setw(6) << out.z << ")"
+                   << " |q|="  << std::setw(6) << quat_angle_deg(out) << "°"
                    << " Δcal=" << std::setw(6) << diffDeg(out, in) << "°"
-                   << " eul=(" << std::setw(7) << rx << ","
-                               << std::setw(7) << ry << ","
-                               << std::setw(7) << rz << ")°"
+                   << " eul=(" << std::setw(7) << rx << "," << std::setw(7) << ry << ","
+                               << std::setw(7) << rz << ")°\n";
+                ss << "             qOut=(" << std::setw(6) << flt.w << "," << std::setw(6) << flt.x << ","
+                               << std::setw(6) << flt.y << "," << std::setw(6) << flt.z << ")"
+                   << " Δdriftlock=" << std::setw(6) << driftAng << "°"
+                   << " localVsParent=" << std::setw(7) << localAng << "°"
+                   << " lock=" << (m_viewport && m_viewport->segLocked(i) ? "LOCK" : "live")
+                   << " ω=" << std::setprecision(2) << std::setw(6)
+                   << (m_viewport ? m_viewport->segAngVelLP(i) : 0.0) << "°/s"
                    << " stC=" << std::setw(4) << s_stillCount[i]
-                   << " wω=" << std::setprecision(2) << s_worldOmegaLP[i]
+                   << " wω=" << std::setw(6) << s_worldOmegaLP[i]
                    << std::setprecision(3) << "\n";
             }
 
@@ -11055,6 +11263,75 @@ void MainWindow::onRenderTick()
                                 << std::setw(6) << d.z() << ")"
                    << "  ∠vert=" << std::setw(6) << angVert << "°\n";
             }
+
+            // --- Anatomical hinge limits: measured joint swing/twist vs cap ---
+            ss << "--- hinge joint limits (measured swing/twist vs anatomical cap) ---\n";
+            {
+                struct HJ { const char* lbl; int seg; };
+                const HJ hinges[] = {
+                    { "R_knee",  SEG_RLowerLeg }, { "L_knee",  SEG_LLowerLeg },
+                    { "R_elbow", SEG_RForearm  }, { "L_elbow", SEG_LForearm  },
+                };
+                for (const auto& h : hinges) {
+                    const HingeLimitDiag& d = g_hingeDiag[h.seg];
+                    ss << "  " << std::left << std::setw(8) << h.lbl << std::right;
+                    if (!d.valid) { ss << "  (not evaluated)\n"; continue; }
+                    ss << "  swing=" << std::setw(7) << d.swingDeg << "°/" << std::setw(6) << d.maxSwingDeg << "°"
+                       << "  twist=" << std::setw(7) << d.twistDeg << "°/" << std::setw(6) << d.maxTwistDeg << "°"
+                       << (d.clamped ? "  *** CLAMPED ***" : "  ok") << "\n";
+                }
+            }
+
+            // --- Fingers (gloves only): ergo joint angle raw→effective→clamped
+            //     vs anatomical limit, plus hand-local FK quats/tip and the
+            //     wrist world quaternion the finger chain hangs off. ---
+            if (m_setup.useGloves && f.hasGloves && m_skel) {
+                static const char* kFN[5] = { "thumb", "index", "middle", "ring", "pinky" };
+                static const char* kJN[3] = { "MCP", "PIP", "DIP" };
+                const double K = 180.0 / M_PI;
+                FingerDiagHand dgL, dgR;
+                { QMutexLocker lk(&g_fingerDiag.lock); dgL = g_fingerDiag.left; dgR = g_fingerDiag.right; }
+                const Quat wristR = quat_mult(qOut[SEG_RHand], m_skel->defAngFor(SEG_RHand)).normalized();
+                const Quat wristL = quat_mult(qOut[SEG_LHand], m_skel->defAngFor(SEG_LHand)).normalized();
+                ss << "--- fingers: ergo angle [raw -> baseline-eff -> clamped] vs limit ---\n";
+                auto dumpHand = [&](const char* hand, const FingerDiagHand& dh, const Quat& wrist,
+                                    const std::array<Quat, kFingerSegmentsHand>& lq,
+                                    const std::array<QVector3D, kFingerSegmentsHand>& lp) {
+                    ss << "  [" << hand << "] baselineApplied="
+                       << (dh.valid && dh.baselineApplied ? "yes" : "no")
+                       << "  wristWorld=(" << std::setprecision(4)
+                       << wrist.w << "," << wrist.x << "," << wrist.y << "," << wrist.z << ")"
+                       << std::setprecision(3) << "\n";
+                    if (!dh.valid) { ss << "    (no ergo data this frame)\n"; return; }
+                    for (int fg = 0; fg < 5; ++fg) {
+                        const auto& Lm = kFingerLimits[fg];
+                        ss << "    " << std::left << std::setw(7) << kFN[fg] << std::right
+                           << " spread[" << std::setw(7) << dh.raw[fg*4+0] << " ->"
+                           << std::setw(8) << dh.spreadEffDeg[fg] << " ->"
+                           << std::setw(8) << dh.spreadClDeg[fg] << "] lim["
+                           << std::setw(6) << Lm[0].spreadMin*K << "," << std::setw(6) << Lm[0].spreadMax*K << "]°"
+                           << (dh.spreadClamped[fg] ? " *CLAMP*" : "") << "\n";
+                        for (int j = 0; j < 3; ++j) {
+                            ss << "            " << std::left << std::setw(4) << kJN[j] << std::right
+                               << " flex[" << std::setw(7) << dh.raw[fg*4+1+j] << " ->"
+                               << std::setw(8) << dh.flexDeg[fg][j] << " ->"
+                               << std::setw(8) << dh.flexClDeg[fg][j] << "] lim["
+                               << std::setw(6) << Lm[j].flexMin*K << "," << std::setw(6) << Lm[j].flexMax*K << "]°"
+                               << (dh.flexClamped[fg][j] ? " *CLAMP*" : "") << "\n";
+                        }
+                        const int b = fg*4;
+                        ss << "            FK-local tipPos=(" << std::setprecision(4)
+                           << lp[b+3].x() << "," << lp[b+3].y() << "," << lp[b+3].z() << ")"
+                           << " jointAng(MC/PP/MP/DP)=" << std::setprecision(1)
+                           << quat_angle_deg(lq[b+0]) << "/" << quat_angle_deg(lq[b+1]) << "/"
+                           << quat_angle_deg(lq[b+2]) << "/" << quat_angle_deg(lq[b+3]) << "°"
+                           << std::setprecision(3) << "\n";
+                    }
+                };
+                dumpHand("LEFT",  dgL, wristL, f.leftGloveQ,  f.leftGloveP);
+                dumpHand("RIGHT", dgR, wristR, f.rightGloveQ, f.rightGloveP);
+            }
+
             ss << "============================================================\n";
             std::cout << ss.str();
             std::cout.flush();
@@ -11122,6 +11399,7 @@ void MainWindow::onOpenLiveWizard()
     QString err;
     LiveSettings cfg = w.result();
     cfg.useGloves = m_setup.useGloves;
+    cfg.verboseLog = m_test;   // periodic [STREAM SNAPSHOT] when running -test
 
     // T-pose origin positions per Xsens segment (meters). The MVN plugin
     // (LiveLinkMvnSource) uses these as the scale field in FTransform; the
