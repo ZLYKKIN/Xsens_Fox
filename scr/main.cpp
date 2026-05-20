@@ -1410,6 +1410,13 @@ QVector3D LocomotionSolver::update(const Quat& qR,
         // div-by-zero).
         const double dt = m_haveLast ? std::clamp(t - m_lastT, 1e-3, 0.1) : 0.01;
 
+        // Rate-adjusted first-order blend coefficients.  The inline EMAs below
+        // were tuned at 90 Hz; rateAdjustAlpha re-expresses them for the actual
+        // step dt so smoothing time-constants are preserved at 60 / 240 Hz.
+        const double a030 = rateAdjustAlpha(0.30, dt);   // ang-vel / pitch / z-vel EMAs
+        const double a020 = rateAdjustAlpha(0.20, dt);   // contact-blend EMA
+        const double a010 = rateAdjustAlpha(0.10, dt);   // heel-lift confidence EMA
+
         // FIX (heel/toe contact discrimination): pick active contact point
         // based on foot pitch.  При pitch≈0 (плоская стопа) = lowest3 как
         // раньше.  pitch > +15° (heel-down toe-up) → fkHeel.  pitch < -15°
@@ -1465,7 +1472,7 @@ QVector3D LocomotionSolver::update(const Quat& qR,
             }
         }
 
-        constexpr double kAlpha = 0.30;
+        const double kAlpha = a030;
         m_rAngV         = (1.0 - kAlpha) * m_rAngV         + kAlpha * rawR;
         m_lAngV         = (1.0 - kAlpha) * m_lAngV         + kAlpha * rawL;
         m_pelvisAngV    = (1.0 - kAlpha) * m_pelvisAngV    + kAlpha * rawP;
@@ -1478,9 +1485,9 @@ QVector3D LocomotionSolver::update(const Quat& qR,
         // 3. FK-XY ring buffers + stability check.
         m_rFKXY[m_fkxyHead] = QVector2D(fkR.x(), fkR.y());
         m_lFKXY[m_fkxyHead] = QVector2D(fkL.x(), fkL.y());
-        m_fkxyHead  = (m_fkxyHead + 1) % kFKXYWindow;
-        m_fkxyCount = std::min(m_fkxyCount + 1, kFKXYWindow);
-        auto xyRange = [&](const std::array<QVector2D, kFKXYWindow>& buf) -> float {
+        m_fkxyHead  = (m_fkxyHead + 1) % m_fkxyWindow;
+        m_fkxyCount = std::min(m_fkxyCount + 1, m_fkxyWindow);
+        auto xyRange = [&](const std::array<QVector2D, kFKXYWindowMax>& buf) -> float {
             if (m_fkxyCount < 3) return 0.0f;
             float xmin = std::numeric_limits<float>::infinity();
             float xmax = -xmin, ymin = xmin, ymax = xmax;
@@ -1568,8 +1575,8 @@ QVector3D LocomotionSolver::update(const Quat& qR,
         //   z < 0  → ball ниже heel (пятка поднята, опора на мыске)
         const double pzR = 2.0 * (qR.x * qR.z - qR.w * qR.y);
         const double pzL = 2.0 * (qL.x * qL.z - qL.w * qL.y);
-        m_footPitchZR = 0.70 * m_footPitchZR + 0.30 * pzR;
-        m_footPitchZL = 0.70 * m_footPitchZL + 0.30 * pzL;
+        m_footPitchZR = (1.0 - a030) * m_footPitchZR + a030 * pzR;
+        m_footPitchZL = (1.0 - a030) * m_footPitchZL + a030 * pzL;
 
         // FIX (squat heel-lift): smoothstep confidence в полосе 21°..33°
         // (sin: 0.36..0.55).  Активируется только в Squat/Sit — в Stand
@@ -1583,8 +1590,8 @@ QVector3D LocomotionSolver::update(const Quat& qR,
                 ? sstep((-m_footPitchZR - 0.36) / 0.19) : 0.0;
         const double hlL_raw = poseAllowsHeelLift
                 ? sstep((-m_footPitchZL - 0.36) / 0.19) : 0.0;
-        m_heelLiftConfR = 0.90 * m_heelLiftConfR + 0.10 * hlR_raw;
-        m_heelLiftConfL = 0.90 * m_heelLiftConfL + 0.10 * hlL_raw;
+        m_heelLiftConfR = (1.0 - a010) * m_heelLiftConfR + a010 * hlR_raw;
+        m_heelLiftConfL = (1.0 - a010) * m_heelLiftConfL + a010 * hlL_raw;
         m_heelLiftR = (m_heelLiftConfR > 0.5);
         m_heelLiftL = (m_heelLiftConfL > 0.5);
 
@@ -1702,7 +1709,7 @@ QVector3D LocomotionSolver::update(const Quat& qR,
             else zNow = m_offsetLast.z();
             if (m_havePelvisZPrev) {
                 const double rawVZ = (zNow - m_pelvisZPrev) / dt;
-                m_pelvisZVel = 0.70 * m_pelvisZVel + 0.30 * rawVZ;
+                m_pelvisZVel = (1.0 - a030) * m_pelvisZVel + a030 * rawVZ;
             }
             m_pelvisZPrev = zNow;
             m_havePelvisZPrev = true;
@@ -1714,7 +1721,7 @@ QVector3D LocomotionSolver::update(const Quat& qR,
 
             if (ballistic || driftAir) {
                 m_airborneTicks = std::min(m_airborneTicks + 1, 4096);
-                if (m_airborneTicks >= 5 && m_pose != PoseLying) {
+                if (m_airborneTicks >= m_airborneStableTicks && m_pose != PoseLying) {
                     // Override: PoseAirborne для последующих блоков.
                     // _classifyPose уже отработал, m_pose установлен; меняем.
                     if (m_pose != PoseAirborne) {
@@ -1727,7 +1734,7 @@ QVector3D LocomotionSolver::update(const Quat& qR,
             } else {
                 if (m_airborneTicks > 0) {
                     // Только что приземлились — взводим re-anchor ramp.
-                    m_landedTicks = 12;
+                    m_landedTicks = m_landedRampTicks;
                 }
                 m_airborneTicks = 0;
             }
@@ -1780,9 +1787,9 @@ QVector3D LocomotionSolver::update(const Quat& qR,
                                        m_anchorL.z());
             m_anchorL = (1.0 - float(alpha)) * m_anchorL + float(alpha) * newAnchorL;
         }
-        // LP-фильтр m_contactBlend (α=0.20, ~55ms response).
-        m_contactBlendR = 0.80 * m_contactBlendR + 0.20 * cbR_new;
-        m_contactBlendL = 0.80 * m_contactBlendL + 0.20 * cbL_new;
+        // LP-фильтр m_contactBlend (α=0.20 @90Hz, ~55ms response; rate-adjusted).
+        m_contactBlendR = (1.0 - a020) * m_contactBlendR + a020 * cbR_new;
+        m_contactBlendL = (1.0 - a020) * m_contactBlendL + a020 * cbL_new;
 
         // 7. Commit / release anchors with hysteresis.
         //    - rising edge (conf >= COMMIT && !committed): snap anchor
@@ -1844,7 +1851,7 @@ QVector3D LocomotionSolver::update(const Quat& qR,
                 // Без этого XY-anchor мгновенно прыгает на новое место →
                 // skeleton "телепортируется" на pol 5-10cm после прыжка.
                 if (m_landedTicks > 0) {
-                    const double t = 1.0 - double(m_landedTicks) / 12.0;
+                    const double t = 1.0 - double(m_landedTicks) / double(m_landedRampTicks);
                     const QVector3D currentEst(fk.x() + m_offsetLast.x(),
                                                fk.y() + m_offsetLast.y(),
                                                fk.z() + m_offsetLast.z());
@@ -1860,7 +1867,7 @@ QVector3D LocomotionSolver::update(const Quat& qR,
         };
         maybeCommitRelease(m_confR, m_committedR, m_anchorR, fkR, true,  rollingR);
         maybeCommitRelease(m_confL, m_committedL, m_anchorL, fkL, false, rollingL);
-        if (didCommitThisFrame) m_recentCommitTicks = 12;
+        if (didCommitThisFrame) m_recentCommitTicks = m_commitFadeTicks;
         else if (m_recentCommitTicks > 0) --m_recentCommitTicks;
 
         if (m_verbose) {
@@ -1962,10 +1969,13 @@ QVector3D LocomotionSolver::update(const Quat& qR,
             // 0.20/0.35 даёт 18-32 m/s при 90 Hz — заведомо хватит на
             // быструю ходьбу + бег, при этом предохранитель остаётся
             // (защищает от выбросов при глюке датчика).
-            float maxStepXY = (imbalance > 0.7) ? 0.35f : 0.20f;
+            // The caps are per-frame displacements; scaling by dt/dt0 (dt0=1/90)
+            // keeps the underlying velocity limit constant across 60/90/240 Hz.
+            const float stepScale = float(dt * 90.0);
+            float maxStepXY = ((imbalance > 0.7) ? 0.35f : 0.20f) * stepScale;
             if (m_recentCommitTicks > 0) {
-                const float fade = float(m_recentCommitTicks) / 12.0f;
-                const float minCap = 0.04f;
+                const float fade = float(m_recentCommitTicks) / float(m_commitFadeTicks);
+                const float minCap = 0.04f * stepScale;
                 maxStepXY = minCap + (maxStepXY - minCap) * (1.0f - fade);
             }
             const float dx = newOff.x() - m_offsetLast.x();
@@ -2485,6 +2495,7 @@ struct MocapReceiver::Impl {
     // Connection transport preference: COM = scanPorts first, Network =
     // enumerateNetworkDevices first (skip serial scan for faster WiFi boot).
     std::atomic<int> transport{0};              // 0 = ComPort, 1 = Network
+    std::atomic<double> expectedRateHz{240.0};  // suit-implied rate (Link 240 / Awinda 60)
     QString          wifiSsid;
     QString          wifiPassword;
 
@@ -2529,6 +2540,11 @@ void MocapReceiver::setWifiCredentials(const QString& ssid, const QString& passw
     QMutexLocker lk(&m_impl->lock);
     m_impl->wifiSsid = ssid;
     m_impl->wifiPassword = password;
+}
+
+void MocapReceiver::setExpectedRate(double hz)
+{
+    if (hz > 1.0) m_impl->expectedRateHz.store(hz);
 }
 
 void MocapReceiver::restart()
@@ -3661,14 +3677,24 @@ void MocapReceiver::run()
     }
     QThread::msleep(1000);     // let the stream spin up
 
-    // Query native update rate — Body Pack V2 is typically 240 Hz but we
-    // honour whatever the firmware reports so the SDI → acc/gyr conversion
-    // stays correct.
+    // Seed the working rate from the suit selection (Link 240 / Awinda 60) so
+    // the SDI → acc/gyr conversion is correct before the device is queried.
+    const double expectedHz = I.expectedRateHz.load();
+    I.freqHz = expectedHz;
+
+    // Query native update rate and reconcile with the suit's expected rate.  We
+    // honour whatever the firmware reports (it drives the IMU math) but warn the
+    // operator if it disagrees with the suit they picked.
     if (api.deviceUpdateRate && !trackerHandles.empty()) {
         const int rate = api.deviceUpdateRate(trackerHandles.front());
         if (rate > 0) I.freqHz = double(rate);
-        testLog("[xda] native update rate = " + std::to_string(I.freqHz) + " Hz",
-                I.test);
+        testLog("[xda] native update rate = " + std::to_string(I.freqHz) + " Hz"
+                " (expected " + std::to_string(int(expectedHz)) + ")", I.test);
+        if (rate > 0 && std::abs(double(rate) - expectedHz) > 1.0) {
+            testLog("[xda] WARNING: device reports " + std::to_string(rate)
+                    + " Hz but the selected suit implies "
+                    + std::to_string(int(expectedHz)) + " Hz", I.test);
+        }
     }
 
     // ---- Poll loop -----------------------------------------------------
@@ -4678,6 +4704,26 @@ void NewSessionWizard::buildPages()
             "QComboBox QAbstractItemView { background:#1b1b1b; color:#eee;"
             " selection-background-color:#FF7A1A; selection-color:#000; }");
 
+        // Suit family selector — drives the whole-system update rate.  Item
+        // order matches SuitType (0 = Awinda, 1 = Link).
+        m_cbxSuit = new QComboBox(p);
+        m_cbxSuit->addItem(QString::fromUtf8("\xF0\x9F\x9F\xA0  Xsens Awinda — 60 Гц"),
+                           int(SuitType::Awinda));
+        m_cbxSuit->addItem(QString::fromUtf8("\xF0\x9F\x9F\xA3  Xsens Link — 240 Гц"),
+                           int(SuitType::Link));
+        m_cbxSuit->setCurrentIndex(m_result.suit == SuitType::Link ? 1 : 0);
+        m_cbxSuit->setMinimumHeight(36);
+        m_cbxSuit->setMinimumWidth(360);
+        m_cbxSuit->setStyleSheet(m_cbxTransport->styleSheet());
+        connect(m_cbxSuit, QOverload<int>::of(&QComboBox::currentIndexChanged),
+                this, [this](int idx) {
+            const SuitType s = (idx == 1) ? SuitType::Link : SuitType::Awinda;
+            m_result.suit = s;
+            if (m_rx) m_rx->setExpectedRate(nativeRateHz(s));
+            // Convenience default: Link ships over WiFi, Awinda over the dongle.
+            if (m_cbxTransport) m_cbxTransport->setCurrentIndex(s == SuitType::Link ? 1 : 0);
+        });
+
         // WiFi credentials row (hidden unless WiFi mode is chosen).
         m_wifiRow = new QWidget(p);
         {
@@ -4782,6 +4828,8 @@ void NewSessionWizard::buildPages()
         lay->addSpacing(8);
         lay->addWidget(m_rbSuitG, 0, Qt::AlignHCenter);
         lay->addSpacing(24);
+        lay->addWidget(m_cbxSuit, 0, Qt::AlignHCenter);
+        lay->addSpacing(8);
         lay->addWidget(m_cbxTransport, 0, Qt::AlignHCenter);
         lay->addSpacing(8);
         lay->addWidget(m_wifiRow, 0, Qt::AlignHCenter);
@@ -5323,6 +5371,11 @@ void NewSessionWizard::onConnectSuit()
         if (m_btnConnectSuit) m_btnConnectSuit->setEnabled(true);
     });
     testLog("[wizard] Connect suit clicked", m_test);
+    // Bind the chosen suit's native rate before the scan so the receiver seeds
+    // freqHz correctly and validates the device query against it.
+    if (m_cbxSuit)
+        m_result.suit = (m_cbxSuit->currentIndex() == 1) ? SuitType::Link : SuitType::Awinda;
+    m_rx->setExpectedRate(nativeRateHz(m_result.suit));
     m_rx->restart();
     m_btnConnectSuit->setText(Lang::t("disconnect_suit"));
     onStatusTick();
@@ -5357,6 +5410,13 @@ void NewSessionWizard::preselectGloves(bool on)
     onModeChanged();
 }
 
+void NewSessionWizard::preselectSuit(SuitType suit)
+{
+    m_result.suit = suit;
+    if (m_cbxSuit) m_cbxSuit->setCurrentIndex(suit == SuitType::Link ? 1 : 0);
+    if (m_rx)      m_rx->setExpectedRate(nativeRateHz(suit));
+}
+
 void NewSessionWizard::onModeChanged()
 {
     const bool gloves = m_rbSuitG && m_rbSuitG->isChecked();
@@ -5370,6 +5430,8 @@ void NewSessionWizard::goNext()
 {
     if (m_pageIdx == 1) {
         m_result.useGloves = m_rbSuitG->isChecked();
+        if (m_cbxSuit)
+            m_result.suit = (m_cbxSuit->currentIndex() == 1) ? SuitType::Link : SuitType::Awinda;
     } else if (m_pageIdx == 2) {
         m_result.heightCm     = m_height->value();
         m_result.footLengthCm = m_foot->value();
@@ -7786,7 +7848,7 @@ void MocapViewport::updatePose(const std::array<Quat, kXsensSegmentCount>& orien
             const double angRad = 2.0 * std::acos(w);
             const double angVel = angRad * 180.0 / M_PI / dt;    // deg/s
             // LP smooth so single-frame noise doesn't release lock.
-            const double alpha = 0.30;
+            const double alpha = rateAdjustAlpha(0.30, dt);
             m_angVelLP[i] = (1.0 - alpha) * m_angVelLP[i] + alpha * angVel;
             // Angular acceleration magnitude (change of speed).
             const double angAcc = std::abs(angVel - m_angVelPrev[i]) / dt;
@@ -7831,14 +7893,14 @@ void MocapViewport::updatePose(const std::array<Quat, kXsensSegmentCount>& orien
                 // lock как раньше; <1 → linear-ish blend.
                 if (m_lockBlend[i] < 1.0) {
                     filtered[i] = nlerpQ(orient[i], m_lockQuat[i], m_lockBlend[i]);
-                    m_lockBlend[i] = std::min(1.0, m_lockBlend[i] + 0.15);
+                    m_lockBlend[i] = std::min(1.0, m_lockBlend[i] + 0.15 * (dt * 90.0));
                 } else {
                     filtered[i] = m_lockQuat[i];
                 }
                 m_unlockBlend[i] = 0.30;
             } else if (m_unlockBlend[i] < 1.0) {
                 filtered[i] = nlerpQ(m_outPrevQ[i], orient[i], m_unlockBlend[i]);
-                m_unlockBlend[i] = std::min(1.0, m_unlockBlend[i] + 0.15);
+                m_unlockBlend[i] = std::min(1.0, m_unlockBlend[i] + 0.15 * (dt * 90.0));
             } else {
                 filtered[i] = orient[i];
             }
@@ -8061,7 +8123,13 @@ void MocapViewport::updatePose(const std::array<Quat, kXsensSegmentCount>& orien
 
     m_orient = filtered;
     m_root   = root;
-    update();
+    // Throttle the actual redraw to the display rate.  The solve / record /
+    // stream work already ran this tick in MainWindow::onRenderTick at the full
+    // suit rate; drawing faster than the monitor refreshes wastes the GPU.
+    if (now - m_lastPaintSec >= m_paintMinIntervalSec) {
+        m_lastPaintSec = now;
+        update();
+    }
 }
 
 void MocapViewport::resetSceneOrigin()
@@ -8960,7 +9028,7 @@ void RecordHud::setFormatLabel(const QString& text) { m_lblFormat->setText(text)
 //  RecordWizard — Format → Quality → FPS → Start.
 // ============================================================================
 
-RecordWizard::RecordWizard(QWidget* parent) : QDialog(parent)
+RecordWizard::RecordWizard(SuitType suit, QWidget* parent) : QDialog(parent), m_suit(suit)
 {
     setModal(true);
     setWindowTitle(Lang::t("rec_wiz_title"));
@@ -9017,6 +9085,10 @@ void RecordWizard::buildPages()
         m_fps->addItem("24 fps", 24);
         m_fps->addItem("30 fps", 30);
         m_fps->addItem("60 fps", 60);
+        if (m_suit == SuitType::Link) {          // Link runs at 240 Hz
+            m_fps->addItem("120 fps", 120);
+            m_fps->addItem("240 fps", 240);
+        }
         m_fps->setCurrentIndex(1);
         m_fps->setMinimumHeight(40);
 
@@ -9114,7 +9186,7 @@ void RecordWizard::updateNav()
 //  LiveStreamWizard — target, host, port, Start.
 // ============================================================================
 
-LiveStreamWizard::LiveStreamWizard(QWidget* parent) : QDialog(parent)
+LiveStreamWizard::LiveStreamWizard(SuitType suit, QWidget* parent) : QDialog(parent), m_suit(suit)
 {
     setModal(true);
     setWindowTitle(Lang::t("live_wiz_title"));
@@ -9171,6 +9243,10 @@ LiveStreamWizard::LiveStreamWizard(QWidget* parent) : QDialog(parent)
     m_fps->addItem("24 fps", 24);
     m_fps->addItem("30 fps", 30);
     m_fps->addItem("60 fps", 60);
+    if (m_suit == SuitType::Link) {             // Link runs at 240 Hz
+        m_fps->addItem("120 fps", 120);
+        m_fps->addItem("240 fps", 240);
+    }
     m_fps->setCurrentIndex(2);                  // дефолт 60
     m_fps->setMinimumHeight(34);
 
@@ -9499,7 +9575,15 @@ static bool writeFbxAscii(const QString& path,
     os << "        P: \"CoordAxis\", \"int\", \"Integer\", \"\",0\n";
     os << "        P: \"CoordAxisSign\", \"int\", \"Integer\", \"\",1\n";
     os << "        P: \"UnitScaleFactor\", \"double\", \"Number\", \"\",1\n";
-    os << "        P: \"TimeMode\", \"enum\", \"\", \"\"," << (fps == 24 ? 11 : (fps == 30 ? 6 : 3)) << "\n";
+    // FBX FbxTime::EMode: 24→11, 30→6, 60→3, 120→1 (eFrames120); 240 has no
+    // native mode → eCustom(14).  Keyframe KTime below is exact for any fps, so
+    // playback speed stays correct even when the mode is only a timeline hint.
+    const int timeMode = (fps == 24)  ? 11
+                       : (fps == 30)  ? 6
+                       : (fps == 60)  ? 3
+                       : (fps == 120) ? 1
+                       : 14;
+    os << "        P: \"TimeMode\", \"enum\", \"\", \"\"," << timeMode << "\n";
     os << "    }\n";
     os << "}\n";
 
@@ -9985,9 +10069,17 @@ MainWindow::MainWindow(MocapReceiver* rx,
     actor.trunkLengthCm   = m_setup.trunkLengthCm;
     actor.useGloves       = m_setup.useGloves;
 
+    // Whole-system update rate is driven by the chosen suit (Link 240 /
+    // Awinda 60).  Bind it to the locomotion solver so its @90 Hz-tuned timings
+    // are re-derived for this cadence.
+    m_procRateHz = nativeRateHz(m_setup.suit);
+
     m_viewport = new MocapViewport(actor, m_setup.poseKind, this);
+    m_viewport->setProcRate(m_procRateHz);
     m_skel     = std::make_unique<SkeletonXsens>(actor, m_setup.poseKind);
     if (m_test) m_viewport->setLocoVerbose(true);
+    logTest("[rate] processing rate = " + std::to_string(int(m_procRateHz)) + " Hz ("
+            + (m_setup.suit == SuitType::Link ? "Xsens Link" : "Xsens Awinda") + ")");
 
     // Left-hand indicators panel.  Its bottom button is now "Build
     // coordinates" — we reroute the existing pauseClicked signal to the
@@ -10230,7 +10322,11 @@ MainWindow::MainWindow(MocapReceiver* rx,
     connect(m_rx, &MocapReceiver::gloveStatusChanged, this, &MainWindow::onGloveStatus);
     connect(m_rx, &MocapReceiver::fpsUpdated,         this, &MainWindow::onFps);
 
-    m_renderTimer.setInterval(int(1000.0 / kRenderFps));
+    // Tick the solve / record / stream loop at the suit's native rate.  A
+    // precise timer is requested so 240 Hz (Link) is honoured as closely as the
+    // platform allows; GL repaint is throttled inside onRenderTick.
+    m_renderTimer.setTimerType(Qt::PreciseTimer);
+    m_renderTimer.setInterval(int(1000.0 / m_procRateHz));
     connect(&m_renderTimer, &QTimer::timeout, this, &MainWindow::onRenderTick);
     m_renderTimer.start();
 
@@ -10329,7 +10425,7 @@ void MainWindow::onRenderTick()
         std::chrono::steady_clock::now().time_since_epoch()).count();
     const double dt = (s_lastT > 0.0)
         ? std::max(1e-3, std::min(0.1, now - s_lastT))
-        : (1.0 / kRenderFps);
+        : (1.0 / m_procRateHz);
     s_lastT = now;
 
     // --- Собираем raw + считаем угловую скорость и stillness. ---
@@ -10345,7 +10441,8 @@ void MainWindow::onRenderTick()
             raw[i] = s_refWorld[i];
         }
         const double rawOmega = quatAngVel(raw[i], s_prevRaw[i], dt);
-        s_worldOmegaLP[i] = 0.80 * s_worldOmegaLP[i] + 0.20 * rawOmega;
+        const double aOmega = rateAdjustAlpha(0.20, dt);
+        s_worldOmegaLP[i] = (1.0 - aOmega) * s_worldOmegaLP[i] + aOmega * rawOmega;
         s_stillCount[i]   = (s_worldOmegaLP[i] < 0.10)
                             ? std::min(s_stillCount[i] + 1, 8192)
                             : 0;
@@ -10988,7 +11085,7 @@ void MainWindow::onOpenLiveWizard()
                            "Остановите запись сначала."));
         return;
     }
-    LiveStreamWizard w(this);
+    LiveStreamWizard w(m_setup.suit, this);
     (void)w.winId();
     applyDarkTitleBar(&w);
     if (w.exec() != QDialog::Accepted) return;
@@ -11032,7 +11129,7 @@ void MainWindow::onOpenRecordWizard()
                            "Остановите стрим сначала."));
         return;
     }
-    RecordWizard w(this);
+    RecordWizard w(m_setup.suit, this);
     (void)w.winId();
     applyDarkTitleBar(&w);
     if (w.exec() != QDialog::Accepted) return;
@@ -11043,7 +11140,7 @@ void MainWindow::startRecording(const RecordSettings& cfg)
 {
     m_recCfg = cfg;
     m_recBuffer.clear();
-    m_recBuffer.reserve(size_t(240.0 * 60 * 10)); // ~10 min at max suit rate (one frame per unique sample)
+    m_recBuffer.reserve(size_t(m_procRateHz * 60 * 10)); // ~10 min at the suit rate (one frame per unique sample)
     m_recLastSample = -1;
     m_recStartMs = QDateTime::currentMSecsSinceEpoch();
     m_recording = true;
@@ -11116,7 +11213,7 @@ void MainWindow::finishRecording()
         dlg.setValue(0);
         dlg.show();
         QCoreApplication::processEvents();
-        int recFps = int(kRenderFps);
+        int recFps = int(m_procRateHz);
         if (m_recBuffer.size() >= 2) {
             const double totalSec = m_recBuffer.back().t - m_recBuffer.front().t;
             if (totalSec > 1e-3) {
@@ -11569,22 +11666,26 @@ CliArgs parseCli(int argc, char** argv)
     CliArgs out;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
-        if (a == "-test" || a == "--test")          out.test   = true;
+        if (a == "-test" || a == "--test")        { out.test = true; out.suit = SuitType::Link; }
         else if (a == "--gloves" || a == "-gloves") out.gloves = true;
         else if (a == "--wrist-constraint")         out.wristConstraint = true;
+        else if (a == "--link"   || a == "-link")   out.suit = SuitType::Link;
+        else if (a == "--awinda" || a == "-awinda") out.suit = SuitType::Awinda;
         else if (a == "-h" || a == "--help") {
             std::cout <<
-                "Fox Mocap — MVN-style Xsens Link client\n"
+                "Fox Mocap — MVN-style Xsens client (Link 240 Hz / Awinda 60 Hz)\n"
                 "Usage:\n"
-                "  fox_mocap [-test] [--gloves]\n"
+                "  fox_mocap [-test] [--gloves] [--link|--awinda]\n"
                 "\n"
-                "  -test      Auto-run mode: skips the session wizard, waits for the\n"
-                "             XDA driver to report the suit is streaming, then auto-\n"
-                "             runs calibration and starts the session.  All state\n"
-                "             changes and sample-level dumps are logged to the\n"
+                "  -test      Auto-run mode (implies --link): skips the session wizard,\n"
+                "             waits for the XDA driver to report the suit is streaming,\n"
+                "             then auto-runs calibration and starts the session.  All\n"
+                "             state changes and sample-level dumps are logged to the\n"
                 "             parent console (cmd/PowerShell) or to fox_mocap.log\n"
                 "             when launched from Explorer.\n"
-                "  --gloves   Reserve space in the session for Manus finger data.\n";
+                "  --gloves   Reserve space in the session for Manus finger data.\n"
+                "  --link     Xsens Link suit — 240 Hz update rate (default for -test).\n"
+                "  --awinda   Xsens Awinda suit — 60 Hz update rate (default).\n";
             std::exit(0);
         }
     }
@@ -11673,6 +11774,12 @@ int main(int argc, char** argv)
 
     // ---- New-session wizard -----------------------------------------------
     NewSessionWizard wiz(rx, cli.test);
+    // Pre-select the suit (and its update rate): -test ⇒ Link, else the
+    // --link/--awinda flag or the Awinda default.
+    testLog(std::string("[boot] suit = ")
+            + (cli.suit == SuitType::Link ? "Xsens Link (240 Hz)" : "Xsens Awinda (60 Hz)"),
+            cli.test);
+    wiz.preselectSuit(cli.suit);
     if (cli.gloves) {
         testLog("[boot] --gloves flag set — pre-selecting suit+gloves mode", cli.test);
         wiz.preselectGloves(true);
