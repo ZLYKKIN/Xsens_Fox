@@ -498,7 +498,8 @@ static Quat constrain_wrist_twist(const Quat& q_hand_world,
 
 std::array<QVector3D, kXsensKeypointCount>
 SkeletonXsens::computeKeypoints(const std::array<Quat, kXsensSegmentCount>& raw,
-                                const QVector3D& rootPos) const
+                                const QVector3D& rootPos,
+                                FkDiag* diag) const
 {
     // Step 1: apply default segment angles  (quat_mult(raw, m_defAng)).
     // Guard against denormalised or NaN input quaternions produced by
@@ -545,6 +546,15 @@ SkeletonXsens::computeKeypoints(const std::array<Quat, kXsensSegmentCount>& raw,
         if (!seen[a]) continue;                     // start not yet positioned
         kp[b]  = kp[a] + boneVec[s];
         seen[b] = true;
+    }
+    // -test single-source capture: every FK intermediate exactly as used here.
+    if (diag) {
+        diag->oriented = oriented;
+        diag->global   = global;
+        diag->boneVec  = boneVec;
+        diag->len      = m_len;
+        diag->kp       = kp;
+        diag->rootPos  = rootPos;
     }
     return kp;
 }
@@ -11258,12 +11268,28 @@ void MainWindow::onRenderTick()
     if (m_test) {
         static double t0 = 0.0;
         if (now - t0 > 2.0) {
+            const double snapDt = now - t0;          // wall time since last snapshot
             t0 = now;
+            static quint64 s_lastSnapSample = f.sampleCounter;
+            const double measHz = (snapDt > 1e-3)
+                ? double(f.sampleCounter - s_lastSnapSample) / snapDt : 0.0;
+            s_lastSnapSample = f.sampleCounter;
             std::ostringstream ss;
             ss << std::fixed << std::setprecision(3);
             ss << "\n========== [RENDER SNAPSHOT] t=" << std::setprecision(2)
                << now << "s  dt=" << std::setprecision(4)
                << dt << "s ==========\n";
+            // Active suit + update rate drive every rate-tuned formula (filter
+            // time-constants, loco thresholds, dt).  measuredSuit = real sample
+            // throughput (sampleCounter delta / wall time): far below procRate
+            // means dropped frames.
+            ss << std::setprecision(3)
+               << "  suit=" << (m_setup.suit == SuitType::Link ? "Link" : "Awinda")
+               << " procRate=" << int(m_procRateHz) << "Hz"
+               << " measuredSuit=" << std::setprecision(1) << measHz << "Hz over "
+               << std::setprecision(2) << snapDt << "s"
+               << " gloves=" << (m_setup.useGloves ? "on" : "off")
+               << std::setprecision(3) << "\n";
 
             auto quatEulerDeg = [](const Quat& q, double& rx,
                                    double& ry, double& rz) {
@@ -11329,28 +11355,45 @@ void MainWindow::onRenderTick()
             }
 
             // --- FK keypoints (all 28) in world-frame meters ---
-            const auto kp = m_viewport
-                ? (m_viewport->isVisible(),
-                   std::array<QVector3D, kXsensKeypointCount>{})  // unused path
-                : std::array<QVector3D, kXsensKeypointCount>{};
-            (void)kp;
-            // Recompute FK on our side so the dump is self-contained (the
-            // viewport applies additional camera / locomotion offsets we
-            // don't want contaminating the log).
-            ActorConfig actor;
-            actor.heightCm     = m_setup.heightCm;
-            actor.footLengthCm = m_setup.footLengthCm;
-            actor.armSpanCm    = m_setup.armSpanCm;
-            actor.legLengthCm  = m_setup.legLengthCm;
-            actor.useGloves    = m_setup.useGloves;
-            static SkeletonXsens s_skel(actor, m_setup.poseKind);
-            const auto pts = s_skel.computeKeypoints(q, QVector3D(0, 0, 0));
-            ss << "--- 28 FK keypoints (world, m) ---\n";
+            // SINGLE-SOURCE: FK is computed on the REAL skeleton (m_skel) the
+            // renderer / locomotion / stream use, capturing every intermediate
+            // into `fk`.  No parallel skeleton object — the logged values ARE
+            // what the pipeline produced for this q.  Root at origin and no
+            // loco/camera offset, so this is the raw body shape; the world
+            // position (FK + loco offset) is reported in the next section.
+            FkDiag fk;
+            if (m_skel) m_skel->computeKeypoints(q, QVector3D(0, 0, 0), &fk);
+            const auto& pts = fk.kp;
+            ss << "--- 28 FK keypoints (world, m) [single-source m_skel] ---\n";
             for (int i = 0; i < kXsensKeypointCount; ++i) {
                 ss << "  kp[" << std::setw(2) << i << "] = ("
                    << std::setw(7) << pts[i].x() << ","
                    << std::setw(7) << pts[i].y() << ","
                    << std::setw(7) << pts[i].z() << ")\n";
+            }
+
+            // [fidelity] guard — proves the logged FK == the real formula on the
+            // REAL skeleton: oriented = quat_mult(q, defAng) for every non-cone
+            // segment (the two upper arms add the shoulder cone, so they are
+            // reported elsewhere but excluded from this strict check).  A WARN
+            // here means the log would be lying about the formula ("parallel").
+            if (m_skel) {
+                double maxDev = 0.0; int worst = -1;
+                for (int i = 0; i < kXsensSegmentCount; ++i) {
+                    if (i == SEG_RUpperArm || i == SEG_LUpperArm) continue;
+                    const Quat expect =
+                        quat_mult(q[i].normalized(), m_skel->defAngFor(i)).normalized();
+                    const double dev =
+                        quat_angle_deg(quat_mult(fk.oriented[i], expect.inv()));
+                    if (dev > maxDev) { maxDev = dev; worst = i; }
+                }
+                ss << "--- [fidelity] FK single-source check (log == reality) ---\n";
+                ss << "  maxDev(oriented vs quat_mult(q,defAng))="
+                   << std::setprecision(4) << maxDev << "° @ "
+                   << (worst >= 0 ? kSegmentNames[worst] : "-")
+                   << (maxDev > 0.01 ? "  *** FK FORMULA MISMATCH ***"
+                                     : "  ok")
+                   << std::setprecision(3) << "\n";
             }
 
             {
@@ -11413,9 +11456,12 @@ void MainWindow::onRenderTick()
             }
 
             // --- All 27 bones-with-dummies: length, parent angle ---
-            const auto& sIdx = s_skel.startPts();
-            const auto& eIdx = s_skel.endPts();
-            const auto& lens = s_skel.lengths();
+            // SINGLE-SOURCE: topology from the real m_skel; `lens` is fk.len —
+            // the exact bone-length array this frame's FK used (actor-size driven).
+            if (m_skel) {
+            const auto& sIdx = m_skel->startPts();
+            const auto& eIdx = m_skel->endPts();
+            const auto& lens = fk.len;
             ss << "--- 27 bones (with dummy scap/pelvis stubs): length · direction · angle-to-vertical ---\n";
             for (int b = 0; b < kXsensSegmentCountWithDummies; ++b) {
                 const QVector3D A = pts[sIdx[b]];
@@ -11433,8 +11479,13 @@ void MainWindow::onRenderTick()
                    << "  dir=(" << std::setw(6) << d.x() << ","
                                 << std::setw(6) << d.y() << ","
                                 << std::setw(6) << d.z() << ")"
-                   << "  ∠vert=" << std::setw(6) << angVert << "°\n";
+                   << "  ∠vert=" << std::setw(6) << angVert << "°"
+                   << "  qWorld=" << fmtQ4(fk.global[b])
+                   << "  localVec=(" << std::setw(6) << lens[b] << ",0,0)\n";
             }
+            // boneVec[s] = vec_rotate(localVec, qWorld); kp[end]=kp[start]+boneVec.
+            // So the two lines above fully document the local→world position step.
+            }  // if (m_skel)
 
             // --- Anatomical hinge limits: measured joint swing/twist vs cap ---
             ss << "--- hinge joint limits (measured swing/twist vs anatomical cap) ---\n";
@@ -11580,6 +11631,20 @@ void MainWindow::onRenderTick()
                    << " anchor=" << fmtV3(L.anchorL) << "\n";
                 ss << "  pelvisAngV=" << L.pelvisAngV << " yawAngV=" << L.pelvisYawAngV
                    << " locoOffset=" << fmtV3(L.offset) << "\n";
+                // Foot roll (single-source fk.kp, body frame, root@origin):
+                // heel=SEG_*Foot, ball=SEG_*Toe, tip=26/27.  Lowest Z = ground
+                // contact; footPitchZ sign says heel-down(+) vs toe-down(-).  Lets
+                // the log show toe-stand / heel-stand / mid-roll per foot.
+                auto footRoll = [&](const char* s, int heel, int ball, int tip, double pz){
+                    const QVector3D H = fk.kp[heel], B = fk.kp[ball], T = fk.kp[tip];
+                    const char* contact = (H.z() <= B.z() && H.z() <= T.z()) ? "heel"
+                                        : (T.z() <= H.z() && T.z() <= B.z()) ? "tip" : "ball";
+                    ss << "  " << s << " heel=" << fmtV3(H) << " ball=" << fmtV3(B)
+                       << " tip=" << fmtV3(T) << " lowest=" << contact
+                       << " pitchSin=" << std::setprecision(3) << pz << "\n";
+                };
+                footRoll("Rfoot", SEG_RFoot, SEG_RToe, 26, L.footPitchZR);
+                footRoll("Lfoot", SEG_LFoot, SEG_LToe, 27, L.footPitchZL);
             }
 
             // === §5  Viewport / operator view (what the operator literally sees) ===
@@ -11709,6 +11774,82 @@ void MainWindow::onRenderTick()
                           << "deg rejectW=" << std::setprecision(3) << g_renderDiag.rejectW[i] << "\n";
             }
         }
+
+        // === §9  Fast-motion BURST capture =================================
+        // A ring buffer of rich per-frame records is always filled (cheap POD
+        // copy, no formatting).  When a fast-motion trigger fires (pelvis-Z
+        // spike, big |ω|, pose change, foot-stance flip) we flush the PRE-trigger
+        // window in full per-frame detail and keep emitting detailed [burst]
+        // lines for a POST window — so the run-up to and recovery from a jerk
+        // (squat→jump, heel↔toe roll) is captured frame-by-frame, while rest
+        // stays silent.  All values come from the same single-source diag/q used
+        // above — nothing is recomputed differently.
+        struct BurstRec {
+            quint64 f; double t; float dtms; int pose;
+            float pelX, pelY, pelZ, pelvisZVel, footPzR, footPzL, maxWdeg; int maxWseg;
+            float rKnee, lKnee, rElb, lElb, rHip, lHip, spine, neck;
+        };
+        static constexpr int kBurstCap = 128;        // ~0.5 s pre-context at 240 Hz
+        static std::array<BurstRec, kBurstCap> s_burst{};
+        static int s_burstHead = 0, s_burstCount = 0, s_burstPost = 0;
+        BurstRec rec{};
+        rec.f = f.sampleCounter; rec.t = now; rec.dtms = float(dt * 1000.0);
+        rec.pose = int(L.pose);
+        rec.pelX = pel.x(); rec.pelY = pel.y(); rec.pelZ = pel.z();
+        rec.pelvisZVel = float(L.pelvisZVel);
+        rec.footPzR = float(L.footPitchZR); rec.footPzL = float(L.footPitchZL);
+        rec.maxWdeg = float(maxWdeg); rec.maxWseg = maxSeg;
+        rec.rKnee = float(jAng(SEG_RUpperLeg, SEG_RLowerLeg));
+        rec.lKnee = float(jAng(SEG_LUpperLeg, SEG_LLowerLeg));
+        rec.rElb  = float(jAng(SEG_RUpperArm, SEG_RForearm));
+        rec.lElb  = float(jAng(SEG_LUpperArm, SEG_LForearm));
+        rec.rHip  = float(jAng(SEG_Pelvis, SEG_RUpperLeg));
+        rec.lHip  = float(jAng(SEG_Pelvis, SEG_LUpperLeg));
+        rec.spine = float(jAng(SEG_Pelvis, SEG_T8));
+        rec.neck  = float(jAng(SEG_T8, SEG_Head));
+        s_burst[s_burstHead] = rec;
+        s_burstHead = (s_burstHead + 1) % kBurstCap;
+        if (s_burstCount < kBurstCap) ++s_burstCount;
+
+        auto fmtBurst = [](const BurstRec& r) {
+            std::ostringstream b; b << std::fixed << std::setprecision(3)
+              << "[burst] f=" << r.f << " t=" << std::setprecision(2) << r.t
+              << " dt=" << std::setprecision(1) << r.dtms << "ms pose=" << locoPoseName(r.pose)
+              << " pelvis=(" << std::setprecision(3) << r.pelX << "," << r.pelY << "," << r.pelZ << ")"
+              << " pelvisZVel=" << r.pelvisZVel
+              << " foot{R=" << r.footPzR << " L=" << r.footPzL << "}"
+              << std::setprecision(1)
+              << " ang{Rkn=" << r.rKnee << " Lkn=" << r.lKnee << " Rel=" << r.rElb << " Lel=" << r.lElb
+              << " Rhip=" << r.rHip << " Lhip=" << r.lHip << " spine=" << r.spine << " neck=" << r.neck << "}"
+              << " maxW=" << kSegmentNames[r.maxWseg] << ":" << r.maxWdeg << "deg/s";
+            return b.str();
+        };
+
+        // Trigger edge detection (separate statics so [evt:*] above is untouched).
+        static int s_burstPrevPose = -1, s_burstStanceR = 0, s_burstStanceL = 0;
+        const int  bsR = stanceOf(L.footPitchZR), bsL = stanceOf(L.footPitchZL);
+        const bool trgZ    = std::abs(L.pelvisZVel) > 0.40;
+        const bool trgW    = maxWdeg > 250.0;
+        const bool trgPose = (s_burstPrevPose >= 0 && int(L.pose) != s_burstPrevPose);
+        const bool trgFoot = (bsR != s_burstStanceR) || (bsL != s_burstStanceL);
+        s_burstPrevPose = int(L.pose); s_burstStanceR = bsR; s_burstStanceL = bsL;
+
+        if ((trgZ || trgW || trgPose || trgFoot) && s_burstPost == 0) {
+            std::ostringstream hb;
+            hb << "\n----- [burst] TRIGGER f=" << f.sampleCounter << " reason=";
+            if (trgZ)    hb << "pelvisZVel(" << std::setprecision(2) << L.pelvisZVel << "m/s) ";
+            if (trgW)    hb << "omega(" << kSegmentNames[maxSeg] << ":" << std::setprecision(0) << maxWdeg << "deg/s) ";
+            if (trgPose) hb << "pose->" << locoPoseName(L.pose) << " ";
+            if (trgFoot) hb << "footStance ";
+            hb << "— flushing " << s_burstCount << " pre-frames -----\n";
+            std::cout << hb.str();
+            const int start = (s_burstHead - s_burstCount + kBurstCap) % kBurstCap;
+            for (int n = 0; n < s_burstCount; ++n)        // oldest -> newest
+                std::cout << fmtBurst(s_burst[(start + n) % kBurstCap]) << " [pre]\n";
+            s_burstPost = 120;                            // ~0.5 s post-context
+        }
+        if (s_burstPost > 0) { std::cout << fmtBurst(rec) << " [post]\n"; --s_burstPost; }
+
         std::cout.flush();
     }
 
@@ -12346,20 +12487,24 @@ const char* kStyleSheet = R"(
 CliArgs parseCli(int argc, char** argv)
 {
     CliArgs out;
+    // Track whether the suit was chosen explicitly so --link/--awinda override
+    // -test's Link default regardless of flag ORDER (e.g. `-test -gloves -awinda`
+    // and `-awinda -test` both select Awinda).
+    bool suitExplicit = false;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
-        if (a == "-test" || a == "--test")        { out.test = true; out.suit = SuitType::Link; }
+        if (a == "-test" || a == "--test")          out.test = true;
         else if (a == "--gloves" || a == "-gloves") out.gloves = true;
         else if (a == "--wrist-constraint")         out.wristConstraint = true;
-        else if (a == "--link"   || a == "-link")   out.suit = SuitType::Link;
-        else if (a == "--awinda" || a == "-awinda") out.suit = SuitType::Awinda;
+        else if (a == "--link"   || a == "-link")   { out.suit = SuitType::Link;   suitExplicit = true; }
+        else if (a == "--awinda" || a == "-awinda") { out.suit = SuitType::Awinda; suitExplicit = true; }
         else if (a == "-h" || a == "--help") {
             std::cout <<
                 "Fox Mocap — MVN-style Xsens client (Link 240 Hz / Awinda 60 Hz)\n"
                 "Usage:\n"
                 "  fox_mocap [-test] [--gloves] [--link|--awinda]\n"
                 "\n"
-                "  -test      Auto-run mode (implies --link): skips the session wizard,\n"
+                "  -test      Auto-run mode (defaults to --link): skips the session wizard,\n"
                 "             waits for the XDA driver to report the suit is streaming,\n"
                 "             then auto-runs calibration and starts the session.  All\n"
                 "             state changes and sample-level dumps are logged to the\n"
@@ -12367,10 +12512,15 @@ CliArgs parseCli(int argc, char** argv)
                 "             when launched from Explorer.\n"
                 "  --gloves   Reserve space in the session for Manus finger data.\n"
                 "  --link     Xsens Link suit — 240 Hz update rate (default for -test).\n"
-                "  --awinda   Xsens Awinda suit — 60 Hz update rate (default).\n";
+                "  --awinda   Xsens Awinda suit — 60 Hz update rate (default).\n"
+                "             --link/--awinda override -test's default in ANY order,\n"
+                "             so `-test -gloves -awinda` runs the 60 Hz Awinda suit.\n";
             std::exit(0);
         }
     }
+    // -test defaults to the Link suit (240 Hz) UNLESS the user explicitly chose a
+    // suit with --link/--awinda — order-independent (see suitExplicit above).
+    if (out.test && !suitExplicit) out.suit = SuitType::Link;
     return out;
 }
 
@@ -12424,7 +12574,17 @@ int main(int argc, char** argv)
     using namespace fox;
 
     const CliArgs cli = parseCli(argc, argv);
-    if (cli.test) attachTestOutput();
+    if (cli.test) {
+        attachTestOutput();
+        // Make the active suit + native update rate the first thing in the log:
+        // every downstream formula (filter time-constants, rate-adjusted loco
+        // thresholds, dt) depends on it.  240 Hz Link vs 60 Hz Awinda.
+        std::cout << "[boot] suit=" << (cli.suit == SuitType::Link ? "Link" : "Awinda")
+                  << " nativeRate=" << nativeRateHz(cli.suit) << "Hz"
+                  << " gloves=" << (cli.gloves ? "on" : "off")
+                  << " wristConstraint=" << (cli.wristConstraint ? "on" : "off") << "\n";
+        std::cout.flush();
+    }
 
     // Request a compatibility-profile OpenGL context so legacy immediate-mode
     // GL (used by the viewport line/point renderer) works.  Must be set BEFORE
