@@ -9873,10 +9873,76 @@ static void hdFingerSmooth(std::vector<RecordedFrame>& fr,
     smoothChain(&RecordedFrame::leftGloveQ,  0.5);
 }
 
+// Anatomical joint-limit projection for a hinge (knee / elbow).  Clamps the
+// child segment's rotation relative to its parent so a mag/jump glitch can't
+// fold the joint through itself or spin it about its own long axis.  This is
+// the "biomechanical projection" MVN does, done convention-safely:
+//   * cap the SWING magnitude (gross over-bend), preserving bend DIRECTION;
+//   * cap the long-axis TWIST (unphysical spin) — disabled for the elbow so
+//     forearm pronation is preserved (pass maxTwist >= pi).
+// World orientation of segment s is raw[s]*defAng[s]; we modify only the
+// child's raw quat, leaving the parent untouched.  No-op unless a limit is hit
+// (so normal motion is never altered).
+static void projectHingeLimit(std::array<Quat, kXsensSegmentCount>& q,
+                              int upSeg, int lowSeg, const SkeletonXsens& skel,
+                              double maxSwingRad, double maxTwistRad)
+{
+    const Quat dUp  = skel.defAngFor(upSeg);
+    const Quat dLow = skel.defAngFor(lowSeg);
+    const Quat Wup  = quat_mult(q[upSeg],  dUp).normalized();
+    const Quat Wlow = quat_mult(q[lowSeg], dLow).normalized();
+    Quat L = quat_mult(Wup.inv(), Wlow).normalized();   // child-in-parent
+
+    Quat swing, twist;
+    swingTwistDecompose(L, QVector3D(1.0f, 0.0f, 0.0f), swing, twist);
+
+    bool changed = false;
+    const double sw = std::clamp(std::abs(swing.w), 0.0, 1.0);
+    const double swingAng = 2.0 * std::acos(sw);
+    if (swingAng > maxSwingRad && swingAng > 1e-6) {
+        swing = slerp_quat(Quat(1, 0, 0, 0), swing, maxSwingRad / swingAng);
+        changed = true;
+    }
+    const double twAng = 2.0 * std::atan2(std::abs(double(twist.x)),
+                                          std::abs(double(twist.w)));
+    if (twAng > maxTwistRad && twAng > 1e-6) {
+        twist = slerp_quat(Quat(1, 0, 0, 0), twist, maxTwistRad / twAng);
+        changed = true;
+    }
+    if (!changed) return;
+
+    L = quat_mult(swing, twist).normalized();           // q = swing * twist
+    const Quat WlowNew = quat_mult(Wup, L).normalized();
+    q[lowSeg] = quat_mult(WlowNew, dLow.inv()).normalized();
+}
+
+// HD pass — clamp both knees and elbows to anatomical ranges.  Caps are
+// intentionally loose (only catch fold-through / spin glitches, never valid
+// deep flexion), so this strictly removes impossible poses.
+static void hdJointLimits(std::vector<RecordedFrame>& fr, const SkeletonXsens& skel,
+                          const std::function<void(double)>& cb = {})
+{
+    const int N = int(fr.size());
+    const double kneeSwing  = 175.0 * M_PI / 180.0;
+    const double kneeTwist  =  40.0 * M_PI / 180.0;
+    const double elbowSwing = 175.0 * M_PI / 180.0;
+    const double elbowTwist = M_PI;            // >= pi → no twist clamp (pronation)
+    for (int i = 0; i < N; ++i) {
+        if (cb && (i & 0x0FFF) == 0) cb(double(i) / double(N));
+        projectHingeLimit(fr[i].segQuat, SEG_RUpperLeg, SEG_RLowerLeg, skel, kneeSwing,  kneeTwist);
+        projectHingeLimit(fr[i].segQuat, SEG_LUpperLeg, SEG_LLowerLeg, skel, kneeSwing,  kneeTwist);
+        projectHingeLimit(fr[i].segQuat, SEG_RUpperArm, SEG_RForearm,  skel, elbowSwing, elbowTwist);
+        projectHingeLimit(fr[i].segQuat, SEG_LUpperArm, SEG_LForearm,  skel, elbowSwing, elbowTwist);
+    }
+}
+
 static void runHdPostProcessing(std::vector<RecordedFrame>& fr,
                                 int fps,
-                                std::function<void(int /*percent*/)> progress)
+                                const SkeletonXsens* skel,
+                                std::function<void(int /*percent*/)> progress,
+                                const std::function<bool()>& cancelled = {})
 {
+    auto stop = [&]{ return cancelled && cancelled(); };
     // Map a pass-local 0..1 fraction into a global percentage band so the
     // progress bar advances smoothly *within* long passes, not only between.
     auto band = [&](int lo, int hi) {
@@ -9885,9 +9951,11 @@ static void runHdPostProcessing(std::vector<RecordedFrame>& fr,
         };
     };
     if (progress) progress(0);
-    hdOutlierReject(fr, band(0, 15));   if (progress) progress(15);
-    hdQuatSmooth(fr,   band(15, 45));   if (progress) progress(45);
-    hdFingerSmooth(fr, band(45, 70));   if (progress) progress(70);
+    hdOutlierReject(fr, band(0, 15));   if (stop()) return; if (progress) progress(15);
+    hdQuatSmooth(fr,   band(15, 40));   if (stop()) return; if (progress) progress(40);
+    hdFingerSmooth(fr, band(40, 60));   if (stop()) return; if (progress) progress(60);
+    if (skel) hdJointLimits(fr, *skel, band(60, 75));  if (stop()) return;
+    if (progress) progress(75);
     hdRootLowpass(fr, fps);             if (progress) progress(90);
     hdZupt(fr);                         if (progress) progress(100);
 }
@@ -10490,6 +10558,21 @@ void MainWindow::onRenderTick()
     s_haveOut[SEG_L5] = s_haveOut[SEG_L3] = s_haveOut[SEG_T12] =
     s_haveOut[SEG_Neck] = s_haveOut[SEG_RToe] = s_haveOut[SEG_LToe] = true;
 
+    // Anatomical joint-limit safety net — always on, no flag.  Caps gross
+    // knee/elbow fold-through and unphysical long-axis spin so a mag/jump
+    // glitch can't push the live pose somewhere impossible.  Thresholds are
+    // deliberately loose: normal motion (deep flexion, forearm pronation) is
+    // never touched — only broken poses get pulled back.  Same convention-safe
+    // clamp the HD pass uses, so live and recorded output stay consistent.
+    if (m_skel) {
+        const double kneeSwing  = 178.0 * M_PI / 180.0;
+        const double kneeTwist  =  45.0 * M_PI / 180.0;
+        const double elbowSwing = 178.0 * M_PI / 180.0;
+        projectHingeLimit(q, SEG_RUpperLeg, SEG_RLowerLeg, *m_skel, kneeSwing,  kneeTwist);
+        projectHingeLimit(q, SEG_LUpperLeg, SEG_LLowerLeg, *m_skel, kneeSwing,  kneeTwist);
+        projectHingeLimit(q, SEG_RUpperArm, SEG_RForearm,  *m_skel, elbowSwing, M_PI);
+        projectHingeLimit(q, SEG_LUpperArm, SEG_LForearm,  *m_skel, elbowSwing, M_PI);
+    }
     m_viewport->updatePose(q, QVector3D(0.0f, 0.0f, 0.0f));
     const auto& qOut = m_viewport->filteredOrient();
 
@@ -11024,11 +11107,10 @@ void MainWindow::finishRecording()
         double mA0=0, rL0=0, fL0=0, mA1=0, rL1=0, fL1=0;
         computeMetrics(m_recBuffer, mA0, rL0, fL0);
 
-        QProgressDialog dlg(Lang::t("rec_hd_progress"), QString(),
+        QProgressDialog dlg(Lang::t("rec_hd_progress"), Lang::t("cancel"),
                             0, 100, this);
         dlg.setWindowTitle(Lang::t("rec_wiz_title"));
         dlg.setWindowModality(Qt::ApplicationModal);
-        dlg.setCancelButton(nullptr);
         dlg.setMinimumDuration(0);
         dlg.setAutoClose(false);
         dlg.setValue(0);
@@ -11042,11 +11124,15 @@ void MainWindow::finishRecording()
                 recFps = std::max(15, std::min(480, recFps));
             }
         }
-        runHdPostProcessing(m_recBuffer, recFps, [&](int p) {
-            dlg.setValue(p);
-            QCoreApplication::processEvents();
-        });
+        runHdPostProcessing(m_recBuffer, recFps, m_skel.get(),
+            [&](int p) { dlg.setValue(p); QCoreApplication::processEvents(); },
+            [&]{ return dlg.wasCanceled(); });
+        const bool hdCancelled = dlg.wasCanceled();
         dlg.close();
+        if (hdCancelled) {
+            logTest("[rec] HD post-processing cancelled by operator — nothing saved");
+            return;
+        }
 
         computeMetrics(m_recBuffer, mA1, rL1, fL1);
         std::ostringstream hd;
