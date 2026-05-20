@@ -1296,12 +1296,13 @@ private:
 // Live-stream wizard.  Lets the operator pick a target plugin and a port,
 // then start sending live pose data.  Concrete transport lives in the
 // sender class — wired after the plugin protocol research lands.
-// Live-stream target.  Оба варианта используют один и тот же MVN MXTP
-// wire протокол (UE LiveLink plugin = бывший XsensLivc), различие — в
-// координатной системе wire frame:
-//   BlenderMVN       — Y-up MVN frame (плагин делает (y,z,x) ремап).
-//   UnrealLiveLink   — Z-up RH frame (плагин делает Y-flip для UE LH).
-// См. rotateNwuToMvn/conjugateNwuToMvn в main.cpp.
+// Live-stream target.  BOTH targets use the same MVN MXTP wire protocol AND
+// the same wire coordinate frame: the MVN default **Z-Up, right-handed**,
+// which is identical to our internal NWU (X-fwd, Y-left, Z-up).  We therefore
+// emit one identical stream to either — no per-target axis conversion (the UE
+// LiveLink plugin does its own Z-up-RH→UE-LH Y-flip; the Blender add-on remaps
+// from the same Z-up global frame).  The enum only selects UI defaults such as
+// the subject name / port, not the coordinate math.
 enum class LiveTarget { BlenderMVN, UnrealLiveLink };
 
 struct LiveSettings {
