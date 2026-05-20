@@ -305,15 +305,8 @@ private:
     double m_heightMarginSlow = 0.08;
 
     // --- Per-instance state that used to live as function-local statics ---
-    QVector3D m_stillFootR   {0, 0, 0};
-    QVector3D m_stillFootL   {0, 0, 0};
-    int       m_stillTicksR  = 0;
-    int       m_stillTicksL  = 0;
     QVector3D m_offsetLast   {0, 0, 0};
     bool      m_offsetReady  = false;
-    bool      m_floorEmaValid= false;
-    float     m_floorEma     = 0.0f;
-    double    m_floorEmaRate = 0.05;
 
     // =====================================================================
         //               v3 STATE — weighted dual-anchor + ZUPT
@@ -465,11 +458,6 @@ private:
         double    m_actorHeightM      = 1.75;
 
         // === v3 additions END ===
-
-        // v3 no longer uses these v2 members, but they stay as data to keep
-        // the class layout and v2-era calls to m_loco.anchor() compilable:
-        //   m_floorEmaValid, m_floorEma, m_floorEmaRate — dead state
-        //   m_stillFootR/L, m_stillTicksR/L            — dead, replaced by confR/L
 
       public:
         void setActorHeight(double h) { m_actorHeightM = std::max(0.5, h); }
