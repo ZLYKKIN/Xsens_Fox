@@ -2745,6 +2745,42 @@ static Quat axisAngleQuat(const QVector3D& axis, double rad)
                 axis.x() * s, axis.y() * s, axis.z() * s).normalized();
 }
 
+// Estimate the toe (MTP / ball-of-foot joint) orientation from the foot.  There
+// is no toe IMU sensor, so the toe is derived biomechanically: during toe-off /
+// push-off the metatarsophalangeal joint extends so the toes stay near the
+// ground while the foot pitches forward over the ball — mirroring OpenSim's
+// gait2392 MTP joint and the Unreal plugin's separate ball/toe bone.  When the
+// foot is flat or heel-down the toe stays collinear with the foot (ext == 0),
+// so standing and heel-strike are identical to the previous foot==toe copy
+// (zero regression for the locomotion solver and pelvis height).
+//
+// footQuat is the foot's world-frame orientation (the foot segment's defAng is
+// identity, so the live q[SEG_*Foot] is already that world quat).  contactConf
+// in [0,1] attenuates the bend so a foot in mid-swing gets no spurious flex.
+static Quat estimateToeOrientation(const Quat& footQuat, double contactConf = 1.0)
+{
+    // Foot forward-pitch as sin(pitch): world Z of the foot's local +X (bone)
+    // axis.  Same formula the locomotion solver uses (see m_footPitchZ).
+    //   pz >= 0 → ball at/above heel (flat / heel-down) → toe stays flat
+    //   pz <  0 → ball below heel    (heel-up / push-off) → toe extends
+    const double pz = 2.0 * (footQuat.x * footQuat.z - footQuat.w * footQuat.y);
+    if (pz >= 0.0)
+        return footQuat;
+
+    // Extension that keeps the toe roughly parallel to the ground ≈ how far the
+    // foot front has dipped below horizontal, clamped to the anatomical MTP
+    // range and gated by ground-contact confidence.
+    constexpr double kMaxExtRad = 60.0 * M_PI / 180.0;
+    double ext = std::asin(std::clamp(-pz, 0.0, 1.0));
+    ext = std::min(ext, kMaxExtRad) * std::clamp(contactConf, 0.0, 1.0);
+    if (ext <= 1e-4)
+        return footQuat;
+
+    // Hinge about the foot's local medio-lateral (+Y) axis so the toe moves in
+    // the sagittal plane (tip up/down), like a real ball-of-foot joint.
+    return quat_mult(footQuat, axisAngleQuat(QVector3D(0.0f, 1.0f, 0.0f), -ext));
+}
+
 // Per-hand finger diagnostic capture for the -test FINGER SNAPSHOT.  Holds
 // the REAL angles parseErgoHand worked with — incoming ergo degrees, the
 // baseline-subtracted "effective" values, the per-joint spread/flex before
@@ -4691,6 +4727,43 @@ static const Tr kTr[] = {
     {"sns_l_upper_leg",    "левое бедро",                       "l thigh"},
     {"sns_l_lower_leg",    "левая голень",                      "l shin"},
     {"sns_l_foot",         "левая стопа",                       "l foot"},
+
+    // Transport / suit selectors (combo items keep the leading emoji).
+    {"transport_com",      "\xF0\x9F\x94\x8C  COM порт — Awinda / MT-Link",
+                           "\xF0\x9F\x94\x8C  COM port — Awinda / MT-Link"},
+    {"transport_wifi",     "\xF0\x9F\x93\xA1  WiFi — Awinda / Link station",
+                           "\xF0\x9F\x93\xA1  WiFi — Awinda / Link station"},
+    {"suit_awinda",        "\xF0\x9F\x9F\xA0  Xsens Awinda — 60 Гц",
+                           "\xF0\x9F\x9F\xA0  Xsens Awinda — 60 Hz"},
+    {"suit_link",          "\xF0\x9F\x9F\xA3  Xsens Link — 240 Гц",
+                           "\xF0\x9F\x9F\xA3  Xsens Link — 240 Hz"},
+
+    // WiFi credential placeholders.
+    {"wifi_ssid_ph",       "\xF0\x9F\x93\xB6  SSID сети",        "\xF0\x9F\x93\xB6  Network SSID"},
+    {"wifi_pass_ph",       "\xF0\x9F\x94\x91  Пароль",           "\xF0\x9F\x94\x91  Password"},
+
+    // K-pose seated calibration hint.
+    {"kpose_hint",         "K-поза: сядьте на стул (бёдра горизонтально, колени 90°) + руки прямо вперёд горизонтально",
+                           "K-Pose: sit on a chair (thighs horizontal, knees 90°) + arms straight forward, horizontal"},
+
+    // Calibration status messages (%1 = seconds / index, %2 = total).
+    {"calib_tpose_tune",     "T-поза — точная настройка: стойте %1с неподвижно",
+                             "T-Pose — fine-tuning: stand still for %1 s"},
+    {"calib_tpose_converge", "T-поза: сходимость фильтра %1с — стойте",
+                             "T-Pose: filter converging %1 s — hold still"},
+    {"calib_tpose_capture",  "T-поза: захват %1/%2 — стойте",
+                             "T-Pose: capture %1/%2 — hold still"},
+    {"calib_kpose_applied",  "K-калибровка применена — фильтр стабилизируется %1с…",
+                             "K-calibration applied — filter stabilizing %1 s…"},
+    {"calib_kpose_converge", "K-калибровка: фильтр %1с — не двигайтесь",
+                             "K-calibration: filter %1 s — don't move"},
+    {"calib_npose_settle",   "Стойте неподвижно %1с — фильтр настраивается…",
+                             "Stand still for %1 s — filter tuning…"},
+    {"calib_npose_converge", "Сходимость фильтра: %1с осталось — не двигайтесь",
+                             "Filter convergence: %1 s left — don't move"},
+    {"calib_npose_capture",  "Захват %1/%2 — продолжайте неподвижно",
+                             "Capture %1/%2 — keep still"},
+    {"calib_ok",             "OK",                              "OK"},
 };
 
 void Lang::setLanguage(Code c) { if (c == m_code) return; m_code = c; emit changed(); }
@@ -4948,8 +5021,8 @@ void NewSessionWizard::buildPages()
 
         // Transport selector: COM port or WiFi.
         m_cbxTransport = new QComboBox(p);
-        m_cbxTransport->addItem(QString::fromUtf8("\xF0\x9F\x94\x8C  COM порт — Awinda / MT-Link"));
-        m_cbxTransport->addItem(QString::fromUtf8("\xF0\x9F\x93\xA1  WiFi — Awinda / Link station"));
+        m_cbxTransport->addItem(Lang::t("transport_com"));
+        m_cbxTransport->addItem(Lang::t("transport_wifi"));
         m_cbxTransport->setMinimumHeight(36);
         m_cbxTransport->setMinimumWidth(360);
         m_cbxTransport->setStyleSheet(
@@ -4962,10 +5035,8 @@ void NewSessionWizard::buildPages()
         // Suit family selector — drives the whole-system update rate.  Item
         // order matches SuitType (0 = Awinda, 1 = Link).
         m_cbxSuit = new QComboBox(p);
-        m_cbxSuit->addItem(QString::fromUtf8("\xF0\x9F\x9F\xA0  Xsens Awinda — 60 Гц"),
-                           int(SuitType::Awinda));
-        m_cbxSuit->addItem(QString::fromUtf8("\xF0\x9F\x9F\xA3  Xsens Link — 240 Гц"),
-                           int(SuitType::Link));
+        m_cbxSuit->addItem(Lang::t("suit_awinda"), int(SuitType::Awinda));
+        m_cbxSuit->addItem(Lang::t("suit_link"),   int(SuitType::Link));
         m_cbxSuit->setCurrentIndex(m_result.suit == SuitType::Link ? 1 : 0);
         m_cbxSuit->setMinimumHeight(36);
         m_cbxSuit->setMinimumWidth(360);
@@ -4986,11 +5057,11 @@ void NewSessionWizard::buildPages()
             wl->setContentsMargins(0, 0, 0, 0);
             wl->setSpacing(10);
             m_edSsid = new QLineEdit(m_wifiRow);
-            m_edSsid->setPlaceholderText(QString::fromUtf8("\xF0\x9F\x93\xB6  SSID сети"));
+            m_edSsid->setPlaceholderText(Lang::t("wifi_ssid_ph"));
             m_edSsid->setMinimumHeight(34);
             m_edSsid->setMinimumWidth(200);
             m_edPassword = new QLineEdit(m_wifiRow);
-            m_edPassword->setPlaceholderText(QString::fromUtf8("\xF0\x9F\x94\x91  Пароль"));
+            m_edPassword->setPlaceholderText(Lang::t("wifi_pass_ph"));
             m_edPassword->setEchoMode(QLineEdit::Password);
             m_edPassword->setMinimumHeight(34);
             m_edPassword->setMinimumWidth(200);
@@ -5508,6 +5579,18 @@ void NewSessionWizard::retranslate()
     if (m_modeTitle)      m_modeTitle->setText(Lang::t("mode_title"));
     if (m_rbSuit)         m_rbSuit->setText(Lang::t("suit_only"));
     if (m_rbSuitG)        m_rbSuitG->setText(Lang::t("suit_with_gloves"));
+    // Combo items are populated once in the ctor — re-label them here so a
+    // language switch updates them (preserving item order and userData).
+    if (m_cbxTransport && m_cbxTransport->count() >= 2) {
+        m_cbxTransport->setItemText(0, Lang::t("transport_com"));
+        m_cbxTransport->setItemText(1, Lang::t("transport_wifi"));
+    }
+    if (m_cbxSuit && m_cbxSuit->count() >= 2) {
+        m_cbxSuit->setItemText(0, Lang::t("suit_awinda"));
+        m_cbxSuit->setItemText(1, Lang::t("suit_link"));
+    }
+    if (m_edSsid)         m_edSsid->setPlaceholderText(Lang::t("wifi_ssid_ph"));
+    if (m_edPassword)     m_edPassword->setPlaceholderText(Lang::t("wifi_pass_ph"));
     if (m_btnConnectSuit) m_btnConnectSuit->setText(Lang::t(
         (m_rx && m_rx->isStreaming()) ? "suit_connected" : "connect_suit"));
     if (m_btnConnectGloves) m_btnConnectGloves->setText(Lang::t("connect_gloves"));
@@ -5551,7 +5634,7 @@ void NewSessionWizard::retranslate()
         const bool kHalf = (m_phase == CalibPhase::PrepK
                          || m_phase == CalibPhase::CaptureK);
         if (kHalf)
-            m_poseHint->setText(QString("K-поза: сядьте на стул (бёдра горизонтально, колени 90°) + руки прямо вперёд горизонтально"));
+            m_poseHint->setText(Lang::t("kpose_hint"));
         else
             m_poseHint->setText(Lang::t(nHalf ? "npose_hint" : "tpose_hint"));
     }
@@ -6053,7 +6136,7 @@ void NewSessionWizard::onCaptureTick()
         constexpr int kSnapshotStepMs = 250;
         constexpr int kTotalCalibMs   = 12500;
         if (m_calibStatus)
-            m_calibStatus->setText(QString("T-поза — точная настройка: стойте %1с неподвижно")
+            m_calibStatus->setText(Lang::t("calib_tpose_tune")
                                    .arg(kTotalCalibMs / 1000));
         if (m_readyBar) {
             m_readyBar->setRange(0, kTotalCalibMs);
@@ -6088,12 +6171,12 @@ void NewSessionWizard::onCaptureTick()
             if (m_calibStatus) {
                 if (elapsed < kSettleMs) {
                     const int rem = int(std::max<qint64>(0, kSettleMs - elapsed));
-                    m_calibStatus->setText(QString("T-поза: сходимость фильтра %1с — стойте")
+                    m_calibStatus->setText(Lang::t("calib_tpose_converge")
                                            .arg((rem + 999) / 1000));
                 } else {
                     const int idx = int(std::min(kSnapshotCount - 1,
                         int((elapsed - kSettleMs) / kSnapshotStepMs) + 1));
-                    m_calibStatus->setText(QString("T-поза: захват %1/%2 — стойте")
+                    m_calibStatus->setText(Lang::t("calib_tpose_capture")
                                            .arg(idx).arg(kSnapshotCount));
                 }
             }
@@ -6857,7 +6940,7 @@ void NewSessionWizard::onCaptureTick()
         const int gen = m_settleGen;
         constexpr int kSettleMsK = 6000;
         if (m_calibStatus)
-            m_calibStatus->setText(QString("K-калибровка применена — фильтр стабилизируется %1с…")
+            m_calibStatus->setText(Lang::t("calib_kpose_applied")
                                    .arg(kSettleMsK / 1000));
         if (m_readyBar) {
             m_readyBar->setRange(0, kSettleMsK);
@@ -6874,7 +6957,7 @@ void NewSessionWizard::onCaptureTick()
             if (m_readyBar) m_readyBar->setValue(int(std::min<qint64>(elapsed, kSettleMsK)));
             if (m_calibStatus) {
                 const int rem = int(std::max<qint64>(0, kSettleMsK - elapsed));
-                m_calibStatus->setText(QString("K-калибровка: фильтр %1с — не двигайтесь")
+                m_calibStatus->setText(Lang::t("calib_kpose_converge")
                                        .arg((rem + 999) / 1000));
             }
             if (elapsed >= kSettleMsK) progressTimerK->stop();
@@ -6931,7 +7014,7 @@ void NewSessionWizard::onCaptureTick()
     m_captureTimer.stop();
     m_calibComplete = true;
     m_phase = CalibPhase::Settle;
-    if (m_calibStatus) m_calibStatus->setText("OK");
+    if (m_calibStatus) m_calibStatus->setText(Lang::t("calib_ok"));
     testLog("[calib] N-pose capture complete, solving s2s…", m_test);
 
     // ----- hipose apply_imu_calibration terms --------------------
@@ -7391,7 +7474,7 @@ void NewSessionWizard::onCaptureTick()
     constexpr int kSnapshotStepMs  = 250;
     constexpr int kTotalCalibMs    = 12500;
     if (m_calibStatus)
-        m_calibStatus->setText(QString("Стойте неподвижно %1с — фильтр настраивается…")
+        m_calibStatus->setText(Lang::t("calib_npose_settle")
                                .arg(kTotalCalibMs / 1000));
     if (m_readyBar) {
         m_readyBar->setRange(0, kTotalCalibMs);
@@ -7427,12 +7510,12 @@ void NewSessionWizard::onCaptureTick()
         if (m_calibStatus) {
             if (elapsed < kSettleMs) {
                 const int remaining = int(std::max<qint64>(0, kSettleMs - elapsed));
-                m_calibStatus->setText(QString("Сходимость фильтра: %1с осталось — не двигайтесь")
+                m_calibStatus->setText(Lang::t("calib_npose_converge")
                                        .arg((remaining + 999) / 1000));
             } else {
                 const int captureIdx = int(std::min(kSnapshotCount - 1,
                     int((elapsed - kSettleMs) / kSnapshotStepMs) + 1));
-                m_calibStatus->setText(QString("Захват %1/%2 — продолжайте неподвижно")
+                m_calibStatus->setText(Lang::t("calib_npose_capture")
                                        .arg(captureIdx).arg(kSnapshotCount));
             }
         }
@@ -7542,7 +7625,7 @@ void NewSessionWizard::onCaptureTick()
         m_phase = CalibPhase::PrepK;
         refreshPoseImage();
         if (m_poseHint)
-            m_poseHint->setText(QString("K-поза: сядьте на стул (бёдра горизонтально, колени 90°) + руки прямо вперёд горизонтально"));
+            m_poseHint->setText(Lang::t("kpose_hint"));
         if (m_calibStatus)
             m_calibStatus->setText(Lang::t("calib_k_prepare"));
 
@@ -11059,8 +11142,12 @@ void MainWindow::onRenderTick()
     q[SEG_L3]   = slerp_quat(q[SEG_Pelvis], q[SEG_T8],   smoothstep(0.50));
     q[SEG_T12]  = slerp_quat(q[SEG_Pelvis], q[SEG_T8],   smoothstep(0.78));
     q[SEG_Neck] = slerp_quat(q[SEG_T8],     q[SEG_Head], 0.50);
-    q[SEG_RToe] = q[SEG_RFoot];
-    q[SEG_LToe] = q[SEG_LFoot];
+    // Toe (MTP joint) — no toe sensor, so estimate ball-of-foot flexion from
+    // foot pitch so the toe hinges during push-off instead of staying a rigid
+    // extension of the foot.  ext==0 when the foot is flat/heel-down → identical
+    // to the old q[toe]=q[foot] copy, so standing & locomotion are unchanged.
+    q[SEG_RToe] = estimateToeOrientation(q[SEG_RFoot]);
+    q[SEG_LToe] = estimateToeOrientation(q[SEG_LFoot]);
     g_renderDiag.spineW_L5  = smoothstep(0.22);   // -test §3 capture (single source)
     g_renderDiag.spineW_L3  = smoothstep(0.50);
     g_renderDiag.spineW_T12 = smoothstep(0.78);
