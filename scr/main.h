@@ -1099,6 +1099,15 @@ public:
 
     const std::array<Quat, kXsensSegmentCount>& filteredOrient() const { return m_orient; }
 
+    // --- Per-segment drift-lock diagnostics (for the -test RENDER SNAPSHOT) ---
+    // These expose the REAL filter state so the log can distinguish a held
+    // (drift-locked) segment from one tracking live motion, and show how much
+    // accumulated drift the anchor is correcting.
+    bool   segLocked(int i)      const { return m_locked[i]; }
+    bool   segAnchorValid(int i) const { return m_anchorValid[i]; }
+    double segAngVelLP(int i)    const { return m_angVelLP[i]; }      // smoothed |ω| deg/s
+    Quat   segDriftLocal(int i)  const { return m_driftLocal[i]; }    // accumulated drift
+
     // Last on-screen pelvis position (post-locomotion + scene shift). Used by
     // the live streamer so the receiver gets the same dynamic pelvis as the
     // viewport — without this pelvis is static and the rig "doesn't move".
@@ -1322,6 +1331,10 @@ struct LiveSettings {
     // Используется в -test режиме для diff против известного хорошего
     // MVN Animate output.
     bool          debugDumpFirstFrame = false;
+    // -test verbose stream logging: periodic [STREAM SNAPSHOT] of the EXACT
+    // per-segment wire values (segId, position, quaternion delta) that leave
+    // the socket, so the log proves what the plugins actually receive.
+    bool          verboseLog = false;
     // T-pose origin position (meters) for each of 23 Xsens body segments.
     // Plugin (LiveLinkMvnSource) кладёт это в FTransform.Scale3D и потом
     // ULiveLinkMvnRetargetAsset делит unrealLength/xsensLength для масштаба
