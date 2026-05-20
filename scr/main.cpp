@@ -4613,7 +4613,6 @@ static const Tr kTr[] = {
     {"pause",              "⏸  Пауза",                          "⏸  Pause"},
     {"resume",             "▶  Продолжить",                     "▶  Resume"},
     {"motion_hint",        "Движение:",                         "Motion:"},
-    {"build_coordinates",  "Построить координаты",              "Build coordinates"},
     {"tab_live",           "\xF0\x9F\x93\xA1  Live",             "\xF0\x9F\x93\xA1  Live"},
     {"tab_record",         "\xF0\x9F\x94\xB4  Запись",            "\xF0\x9F\x94\xB4  Record"},
     {"record_placeholder", "Запись будет доступна в следующей версии.",
@@ -4657,6 +4656,8 @@ static const Tr kTr[] = {
     {"rec_save_title",     "Сохранить запись",                  "Save recording"},
     {"rec_save_failed",    "Не удалось сохранить файл.",        "Failed to save file."},
     {"rec_save_ok",        "Запись сохранена",                  "Recording saved"},
+    {"rec_take_kept",      "Запись не сохранена — дубль остался в памяти. Нажмите «Стоп» ещё раз, чтобы сохранить, или закройте окно, чтобы отменить.", "Recording not saved — the take is kept in memory. Press Stop again to save, or close the window to discard."},
+    {"rec_unsaved",        "● НЕ СОХРАНЕНО — Стоп",             "● UNSAVED — Stop"},
     {"rec_hd_progress",    "Обработка HD post-processing…",     "Running HD post-processing…"},
     {"rec_close_prompt",   "Идёт запись. Сохранить перед закрытием?", "Recording in progress. Save before closing?"},
 
@@ -5508,7 +5509,7 @@ void NewSessionWizard::retranslate()
     if (m_rbSuit)         m_rbSuit->setText(Lang::t("suit_only"));
     if (m_rbSuitG)        m_rbSuitG->setText(Lang::t("suit_with_gloves"));
     if (m_btnConnectSuit) m_btnConnectSuit->setText(Lang::t(
-        (m_rx && m_rx->isStreaming()) ? "disconnect_suit" : "connect_suit"));
+        (m_rx && m_rx->isStreaming()) ? "suit_connected" : "connect_suit"));
     if (m_btnConnectGloves) m_btnConnectGloves->setText(Lang::t("connect_gloves"));
     if (m_gloveText) {
         const char* k = "gloves_missing";
@@ -5590,7 +5591,7 @@ void NewSessionWizard::updateNavButtons()
     m_btnNext->setVisible(m_pageIdx > 0 && m_pageIdx < 3);
     // page 0 has its own hero button, page 3 has "Start calibration",
     // page 4 has "Finish".  Back is hidden on page 0 and page 4.
-    m_btnBack->setEnabled(!m_captureTimer.isActive() && !m_countTimer.isActive());
+    m_btnBack->setEnabled(!calibBusy());
 
     // Continue from Mode page is gated on hardware being connected.
     if (m_pageIdx == 1 && m_btnNext) {
@@ -5620,9 +5621,11 @@ void NewSessionWizard::onConnectSuit()
     // Debounce at the UI level — every click disables the button for a
     // second and re-enables it via the status tick.  Protects against
     // the user double-tapping while the worker is still on its way down.
+    m_suitBtnCooldown = true;
     m_btnConnectSuit->setEnabled(false);
     QTimer::singleShot(1200, this, [this]() {
-        if (m_btnConnectSuit) m_btnConnectSuit->setEnabled(true);
+        m_suitBtnCooldown = false;
+        onStatusTick();          // let the status logic decide the enabled state
     });
     testLog("[wizard] Connect suit clicked", m_test);
     // Bind the chosen suit's native rate before the scan so the receiver seeds
@@ -5631,7 +5634,6 @@ void NewSessionWizard::onConnectSuit()
         m_result.suit = (m_cbxSuit->currentIndex() == 1) ? SuitType::Link : SuitType::Awinda;
     m_rx->setExpectedRate(nativeRateHz(m_result.suit));
     m_rx->restart();
-    m_btnConnectSuit->setText(Lang::t("disconnect_suit"));
     onStatusTick();
 }
 
@@ -5740,8 +5742,15 @@ void NewSessionWizard::onStatusTick()
     // Mode page row badge / button.
     if (m_suitDot)  paintDot(m_suitDot, streaming ? "#2EC25A" : "#C03838");
     if (m_suitText) m_suitText->setText(Lang::t(key));
-    if (m_btnConnectSuit) m_btnConnectSuit->setText(
-        Lang::t(streaming ? "disconnect_suit" : "connect_suit"));
+    if (m_btnConnectSuit) {
+        // No real "disconnect" path exists here (the receiver thread owns the
+        // device lifecycle), so never advertise an action the button can't
+        // perform.  Connected → show connected + disable; scanning/connecting
+        // or within the click cooldown → disable; otherwise enable to connect.
+        const bool inFlight = (s == ConnStatus::Scanning || s == ConnStatus::Connecting);
+        m_btnConnectSuit->setText(Lang::t(streaming ? "suit_connected" : "connect_suit"));
+        m_btnConnectSuit->setEnabled(!streaming && !inFlight && !m_suitBtnCooldown);
+    }
     if (m_modeHint) {
         const bool needGlv = (m_rbSuitG && m_rbSuitG->isChecked());
         const bool glvUp   = m_rx->glovesReady();
@@ -5753,27 +5762,45 @@ void NewSessionWizard::onStatusTick()
 
     if (m_btnCalibBegin) {
         m_btnCalibBegin->setEnabled(streaming
-                                  && !m_countTimer.isActive()
-                                  && !m_captureTimer.isActive()
+                                  && !calibBusy()
                                   && !m_calibComplete);
         if (!streaming && m_calibStatus)
             m_calibStatus->setText(Lang::t("waiting_for_suit"));
     }
-    if (!streaming && (m_countTimer.isActive() || m_captureTimer.isActive())) {
-        // Lost connection mid-calibration — reset both halves.
-        m_countTimer.stop(); m_captureTimer.stop();
-        m_countdownBar->setValue(0); m_readyBar->setValue(0);
-        m_goodSamples = 0; m_samples.clear(); m_havePrev = false;
-        m_phase = CalibPhase::Idle;
-        refreshPoseImage();
-        m_countLabel->setText("—");
+    if (!streaming && calibBusy()) {
+        // Lost connection mid-calibration (countdown, capture OR the timer-less
+        // settle phases) — abort so pending settle callbacks can't bake garbage
+        // from a dead suit into the calibration reference.
+        abortCalibration();
         if (m_calibStatus) m_calibStatus->setText(Lang::t("waiting_for_suit"));
     }
+}
+
+void NewSessionWizard::abortCalibration()
+{
+    ++m_settleGen;          // invalidate any pending settle / singleShot callbacks
+    m_countTimer.stop();
+    m_captureTimer.stop();
+    if (m_countdownBar) m_countdownBar->setValue(0);
+    if (m_readyBar) {
+        m_readyBar->setRange(0, kCalibrationSamples);
+        m_readyBar->setValue(0);
+        m_readyBar->setFormat("%v / %m");
+    }
+    m_goodSamples = 0;
+    m_samples.clear();
+    m_havePrev = false;
+    m_calibComplete = false;
+    m_phase = CalibPhase::Idle;
+    refreshPoseImage();
+    if (m_countLabel) m_countLabel->setText("—");
 }
 
 void NewSessionWizard::onCalibrationBegin()
 {
     if (!m_rx || m_rx->status() != ConnStatus::Streaming) return;
+
+    ++m_settleGen;          // a fresh run invalidates callbacks from any prior aborted run
 
     m_result.poseKind = "npose";
 
@@ -6019,6 +6046,7 @@ void NewSessionWizard::onCaptureTick()
         }
 
         m_phase = CalibPhase::SettleT;
+        const int gen = m_settleGen;
 
         constexpr int kSettleMs       = 8000;
         constexpr int kSnapshotCount  = 16;
@@ -6030,7 +6058,7 @@ void NewSessionWizard::onCaptureTick()
         if (m_readyBar) {
             m_readyBar->setRange(0, kTotalCalibMs);
             m_readyBar->setValue(0);
-            m_readyBar->setFormat("%v / %m мс");
+            m_readyBar->setFormat("%p %");
         }
 
         auto tSnapshots = std::make_shared<std::vector<
@@ -6040,9 +6068,23 @@ void NewSessionWizard::onCaptureTick()
         auto progressStart = std::make_shared<qint64>(QDateTime::currentMSecsSinceEpoch());
         progressTimer->setInterval(100);
         connect(progressTimer.get(), &QTimer::timeout, this,
-                [this, progressTimer, progressStart, kTotalCalibMs, kSettleMs, kSnapshotCount, kSnapshotStepMs]() {
+                [this, gen, tSnapshots, progressTimer, progressStart, kTotalCalibMs, kSettleMs, kSnapshotCount, kSnapshotStepMs]() {
+            if (gen != m_settleGen) { progressTimer->stop(); return; }
             const qint64 elapsed = QDateTime::currentMSecsSinceEpoch() - *progressStart;
-            if (m_readyBar) m_readyBar->setValue(int(std::min<qint64>(elapsed, kTotalCalibMs)));
+            // Honest progress: first half tracks the timed filter-convergence
+            // wait; second half reflects the REAL number of snapshots captured
+            // (stalls if the actor moves and snapshots are dropped) rather than
+            // raw elapsed time.
+            if (m_readyBar) {
+                if (elapsed < kSettleMs) {
+                    m_readyBar->setValue(int(kTotalCalibMs / 2
+                        * std::min<qint64>(elapsed, kSettleMs) / kSettleMs));
+                } else {
+                    const int captured = int(tSnapshots->size());
+                    m_readyBar->setValue(kTotalCalibMs / 2
+                        + (kTotalCalibMs / 2) * std::min(captured, kSnapshotCount) / kSnapshotCount);
+                }
+            }
             if (m_calibStatus) {
                 if (elapsed < kSettleMs) {
                     const int rem = int(std::max<qint64>(0, kSettleMs - elapsed));
@@ -6062,7 +6104,8 @@ void NewSessionWizard::onCaptureTick()
 
         for (int k = 0; k < kSnapshotCount; ++k) {
             const int delayMs = kSettleMs + k * kSnapshotStepMs;
-            QTimer::singleShot(delayMs, this, [this, tSnapshots, tDropped, k]() {
+            QTimer::singleShot(delayMs, this, [this, gen, tSnapshots, tDropped, k]() {
+                if (gen != m_settleGen) return;
                 const SuitPose post = m_rx->snapshot();
                 const double pelvisGyr = double(post.gyrSensor[SEG_Pelvis].length());
                 const double rArmGyr   = double(post.gyrSensor[SEG_RUpperArm].length());
@@ -6079,7 +6122,8 @@ void NewSessionWizard::onCaptureTick()
             });
         }
 
-        QTimer::singleShot(kTotalCalibMs, this, [this, tSnapshots, tDropped]() {
+        QTimer::singleShot(kTotalCalibMs, this, [this, gen, tSnapshots, tDropped]() {
+            if (gen != m_settleGen) return;
             if (m_test) {
                 std::cout << "[calib] T-pose settled snapshots: " << tSnapshots->size()
                           << " kept, " << *tDropped << " dropped\n";
@@ -6810,6 +6854,7 @@ void NewSessionWizard::onCaptureTick()
         }
 
         m_phase = CalibPhase::Settle;
+        const int gen = m_settleGen;
         constexpr int kSettleMsK = 6000;
         if (m_calibStatus)
             m_calibStatus->setText(QString("K-калибровка применена — фильтр стабилизируется %1с…")
@@ -6823,7 +6868,8 @@ void NewSessionWizard::onCaptureTick()
         auto progressStartK = std::make_shared<qint64>(QDateTime::currentMSecsSinceEpoch());
         progressTimerK->setInterval(100);
         connect(progressTimerK.get(), &QTimer::timeout, this,
-                [this, progressTimerK, progressStartK, kSettleMsK]() {
+                [this, gen, progressTimerK, progressStartK, kSettleMsK]() {
+            if (gen != m_settleGen) { progressTimerK->stop(); return; }
             const qint64 elapsed = QDateTime::currentMSecsSinceEpoch() - *progressStartK;
             if (m_readyBar) m_readyBar->setValue(int(std::min<qint64>(elapsed, kSettleMsK)));
             if (m_calibStatus) {
@@ -6837,7 +6883,8 @@ void NewSessionWizard::onCaptureTick()
         QApplication::processEvents();
 
         auto baselineGyrBias = std::make_shared<std::array<QVector3D, kXsensSegmentCount>>(gyrBias);
-        QTimer::singleShot(kSettleMsK - 1500, this, [this, baselineGyrBias]() {
+        QTimer::singleShot(kSettleMsK - 1500, this, [this, gen, baselineGyrBias]() {
+            if (gen != m_settleGen) return;
             const int kSamples = 8;
             std::array<QVector3D, kXsensSegmentCount> sums{};
             std::array<int,       kXsensSegmentCount> cnt{};
@@ -6871,7 +6918,8 @@ void NewSessionWizard::onCaptureTick()
             }
         });
 
-        QTimer::singleShot(kSettleMsK, this, [this]() {
+        QTimer::singleShot(kSettleMsK, this, [this, gen]() {
+            if (gen != m_settleGen) return;
             m_phase = CalibPhase::Done;
             this->goNext();
         });
@@ -7348,15 +7396,34 @@ void NewSessionWizard::onCaptureTick()
     if (m_readyBar) {
         m_readyBar->setRange(0, kTotalCalibMs);
         m_readyBar->setValue(0);
-        m_readyBar->setFormat("%v / %m мс");
+        m_readyBar->setFormat("%p %");
     }
+    const int gen = m_settleGen;
+    // Declared before the progress timer so the timer lambda can reflect the
+    // real captured-snapshot count in the second half of the bar.
+    auto snapshots = std::make_shared<std::vector<
+        std::array<Quat, kXsensSegmentCount>>>();
+    auto badCount     = std::make_shared<int>(0);
+    auto droppedCount = std::make_shared<int>(0);
     auto progressTimer = std::make_shared<QTimer>(this);
     auto progressStart = std::make_shared<qint64>(QDateTime::currentMSecsSinceEpoch());
     progressTimer->setInterval(100);
     connect(progressTimer.get(), &QTimer::timeout, this,
-            [this, progressTimer, progressStart, kTotalCalibMs, kSettleMs, kSnapshotCount, kSnapshotStepMs]() {
+            [this, gen, snapshots, progressTimer, progressStart, kTotalCalibMs, kSettleMs, kSnapshotCount, kSnapshotStepMs]() {
+        if (gen != m_settleGen) { progressTimer->stop(); return; }
         const qint64 elapsed = QDateTime::currentMSecsSinceEpoch() - *progressStart;
-        if (m_readyBar) m_readyBar->setValue(int(std::min<qint64>(elapsed, kTotalCalibMs)));
+        // Honest progress: first half = timed filter-convergence wait, second
+        // half = REAL captured-snapshot count (stalls on dropped snapshots).
+        if (m_readyBar) {
+            if (elapsed < kSettleMs) {
+                m_readyBar->setValue(int(kTotalCalibMs / 2
+                    * std::min<qint64>(elapsed, kSettleMs) / kSettleMs));
+            } else {
+                const int captured = int(snapshots->size());
+                m_readyBar->setValue(kTotalCalibMs / 2
+                    + (kTotalCalibMs / 2) * std::min(captured, kSnapshotCount) / kSnapshotCount);
+            }
+        }
         if (m_calibStatus) {
             if (elapsed < kSettleMs) {
                 const int remaining = int(std::max<qint64>(0, kSettleMs - elapsed));
@@ -7374,14 +7441,10 @@ void NewSessionWizard::onCaptureTick()
     progressTimer->start();
     QApplication::processEvents();
 
-    auto snapshots = std::make_shared<std::vector<
-        std::array<Quat, kXsensSegmentCount>>>();
-    auto badCount  = std::make_shared<int>(0);
-    auto droppedCount = std::make_shared<int>(0);
-
     for (int k = 0; k < kSnapshotCount; ++k) {
         const int delayMs = kSettleMs + k * kSnapshotStepMs;
-        QTimer::singleShot(delayMs, this, [this, snapshots, badCount, droppedCount, k]() {
+        QTimer::singleShot(delayMs, this, [this, gen, snapshots, badCount, droppedCount, k]() {
+            if (gen != m_settleGen) return;
             const SuitPose post = m_rx->snapshot();
             const double pelvisGyrDegS = double(post.gyrSensor[SEG_Pelvis].length());
             const double rArmGyr  = double(post.gyrSensor[SEG_RUpperArm].length());
@@ -7408,7 +7471,8 @@ void NewSessionWizard::onCaptureTick()
         });
     }
 
-    QTimer::singleShot(12500, this, [this, snapshots, badCount, droppedCount]() {
+    QTimer::singleShot(12500, this, [this, gen, snapshots, badCount, droppedCount]() {
+        if (gen != m_settleGen) return;
         if (m_test) {
             std::cout << "[calib] N-pose snapshots collected: " << snapshots->size()
                       << " kept, " << *droppedCount << " dropped (actor moved)\n";
@@ -7498,6 +7562,7 @@ void NewSessionWizard::onCaptureTick()
 
 void NewSessionWizard::closeEvent(QCloseEvent* e)
 {
+    ++m_settleGen;          // drop any pending settle callbacks before teardown
     m_countTimer.stop();
     m_captureTimer.stop();
     m_statusTimer.stop();
@@ -7639,9 +7704,6 @@ SensorIndicatorsPanel::SensorIndicatorsPanel(bool useGloves, QWidget* parent)
     // ---- Reset + Freeze buttons, directly under the sensor grid ---------
     // Reset: skeleton snaps to scene origin (0, 0), feet on floor.
     // Freeze (toggle): pin XY while allowing local sit/stand. One-button toggle.
-    m_btnPauseResume = new QPushButton(this);  // legacy, unused visually
-    m_btnPauseResume->setVisible(false);
-
     m_btnReset = new QPushButton(this);
     m_btnReset->setObjectName("primary");
     m_btnReset->setMinimumHeight(38);
@@ -7900,9 +7962,12 @@ void SensorIndicatorsPanel::setSessionRunning(bool running)
     if (m_lblSession)
         m_lblSession->setText(running ? Lang::t("session_running")
                                        : Lang::t("session_paused"));
-    if (m_btnReset)  m_btnReset->setText(Lang::t("reset_coords"));
-    if (m_btnFreeze) m_btnFreeze->setText(Lang::t(
-        m_frozen ? "unfreeze_coords" : "freeze_coords"));
+    // Reset / Freeze act on the live skeleton — disable them while the session
+    // is paused (suit down) so the operator can't fire them with nothing to act
+    // on, and re-enable on resume.
+    if (m_btnReset)  { m_btnReset->setEnabled(running);  m_btnReset->setText(Lang::t("reset_coords")); }
+    if (m_btnFreeze) { m_btnFreeze->setEnabled(running); m_btnFreeze->setText(Lang::t(
+        m_frozen ? "unfreeze_coords" : "freeze_coords")); }
 }
 
 void SensorIndicatorsPanel::updateFromPose(const SuitPose& f)
@@ -10445,12 +10510,8 @@ MainWindow::MainWindow(MocapReceiver* rx,
     logTest("[rate] processing rate = " + std::to_string(int(m_procRateHz)) + " Hz ("
             + (m_setup.suit == SuitType::Link ? "Xsens Link" : "Xsens Awinda") + ")");
 
-    // Left-hand indicators panel.  Its bottom button is now "Build
-    // coordinates" — we reroute the existing pauseClicked signal to the
-    // new handler instead of growing a second signal for one use site.
+    // Left-hand indicators panel.
     m_panel = new SensorIndicatorsPanel(m_setup.useGloves, this);
-    connect(m_panel, &SensorIndicatorsPanel::pauseClicked,
-            this, &MainWindow::onBuildCoordinates);
     // Reset: skeleton snaps to scene origin with feet on floor.
     connect(m_panel, &SensorIndicatorsPanel::resetClicked,
             this, [this]() {
@@ -10717,7 +10778,11 @@ void MainWindow::onConnStatusChanged(int status, const QString& /*detail*/)
     const ConnStatus s = (ConnStatus)status;
     const bool streaming = (s == ConnStatus::Streaming);
     m_panel->setSuitLive(streaming, {});
-    if (!streaming && m_sessionRunning) onPauseSession();
+    // Pause the solve/render loop while the suit is down, and — crucially —
+    // resume it when the suit comes back. Without the resume the session stayed
+    // paused forever after the first blip and onRenderTick() never ran again.
+    if (!streaming && m_sessionRunning)      onPauseSession();
+    else if (streaming && !m_sessionRunning) onResumeSession();
     logTest(std::string("[suit] ") + connStatusName(s));
 }
 
@@ -11952,6 +12017,11 @@ void MainWindow::onOpenRecordWizard()
                            "Остановите стрим сначала."));
         return;
     }
+    if (m_finishing) return;          // a save is in progress
+    if (m_takePending) {              // an unsaved take exists — resolve it first
+        QMessageBox::warning(this, Lang::t("rec_wiz_title"), Lang::t("rec_take_kept"));
+        return;
+    }
     RecordWizard w(m_setup.suit, this);
     (void)w.winId();
     applyDarkTitleBar(&w);
@@ -11961,6 +12031,7 @@ void MainWindow::onOpenRecordWizard()
 
 void MainWindow::startRecording(const RecordSettings& cfg)
 {
+    if (m_finishing || m_takePending) return;   // don't clobber an unsaved take
     m_recCfg = cfg;
     m_recBuffer.clear();
     m_recBuffer.reserve(size_t(m_procRateHz * 60 * 10)); // ~10 min at the suit rate (one frame per unique sample)
@@ -11987,18 +12058,36 @@ void MainWindow::startRecording(const RecordSettings& cfg)
 
 void MainWindow::onRecordStop()
 {
-    if (!m_recording) return;
+    if (m_finishing) return;                    // a save is already running
+    if (!m_recording && !m_takePending) return;
     m_recording = false;
-    if (m_hud) m_hud->hide();
     finishRecording();
 }
 
 void MainWindow::finishRecording()
 {
+    if (m_finishing) return;          // guard re-entrancy via the modal loops below
     if (m_recBuffer.empty()) {
+        m_takePending = false;
+        if (m_hud) m_hud->hide();
         logTest("[rec] stop — empty buffer, nothing to save");
         return;
     }
+    m_finishing   = true;
+    m_takePending = true;             // hold the take until a save actually succeeds
+    if (m_hud) m_hud->hide();         // not actively recording during the save dialogs
+
+    // On any cancel/failure: re-show the HUD (relabelled) and clear the in-flight
+    // flag so the operator can retry via Stop or discard via window-close —
+    // instead of the take vanishing silently.
+    auto keepUnsavedTake = [this](const char* logMsg) {
+        m_finishing = false;
+        if (m_hud) {
+            m_hud->setFormatLabel(Lang::t("rec_unsaved"));
+            m_hud->show(); m_hud->raise(); layoutHud();
+        }
+        logTest(logMsg);
+    };
 
     // --- Optional HD post-processing pass -----------------------------------
     if (m_recCfg.quality == RecordQuality::HdPostProcessing) {
@@ -12050,7 +12139,8 @@ void MainWindow::finishRecording()
         const bool hdCancelled = dlg.wasCanceled();
         dlg.close();
         if (hdCancelled) {
-            logTest("[rec] HD post-processing cancelled by operator — nothing saved");
+            QMessageBox::warning(this, Lang::t("rec_save_title"), Lang::t("rec_take_kept"));
+            keepUnsavedTake("[rec] HD post-processing cancelled — take kept (not saved)");
             return;
         }
 
@@ -12110,7 +12200,8 @@ void MainWindow::finishRecording()
     QString path = QFileDialog::getSaveFileName(
         this, Lang::t("rec_save_title"), suggest, filter);
     if (path.isEmpty()) {
-        logTest("[rec] save cancelled by operator");
+        QMessageBox::warning(this, Lang::t("rec_save_title"), Lang::t("rec_take_kept"));
+        keepUnsavedTake("[rec] save cancelled — take kept (not saved)");
         return;
     }
     if (!path.endsWith(defSuffix, Qt::CaseInsensitive))
@@ -12120,6 +12211,7 @@ void MainWindow::finishRecording()
     if (!m_skel) {
         QMessageBox::warning(this, Lang::t("rec_save_title"),
                              Lang::t("rec_save_failed"));
+        keepUnsavedTake("[rec] no skeleton — cannot save, take kept");
         return;
     }
     const bool ok = bvh ? writeBvh(path, out, m_recCfg.fps, h, *m_skel)
@@ -12127,12 +12219,17 @@ void MainWindow::finishRecording()
     if (!ok) {
         QMessageBox::warning(this, Lang::t("rec_save_title"),
                              Lang::t("rec_save_failed"));
+        keepUnsavedTake("[rec] write failed — take kept");
         return;
     }
     QMessageBox::information(this, Lang::t("rec_save_title"),
                              Lang::t("rec_save_ok") + "\n" + path);
     logTest("[rec] saved " + std::to_string(out.size())
             + " frames → " + path.toStdString());
+    m_recBuffer.clear();
+    m_takePending = false;
+    m_finishing   = false;
+    if (m_hud) m_hud->hide();
 }
 
 void MainWindow::layoutHud()
@@ -12231,19 +12328,6 @@ void MainWindow::resizeEvent(QResizeEvent* e)
     layoutHud();
 }
 
-void MainWindow::onBuildCoordinates()
-{
-    // Operator action — rebuild the scene coordinate frame to the actor's
-    // current position.  We intentionally keep this out of the mocap math
-    // for now (the user asked us not to touch the movement pipeline) and
-    // just flash a status message so the click is acknowledged.  Wiring
-    // into the locomotion solver can happen in a dedicated pass later.
-    if (statusBar()) {
-        statusBar()->showMessage(Lang::t("build_coordinates"), 2000);
-    }
-    logTest("[action] build-coordinates requested");
-}
-
 void MainWindow::logTest(const std::string& msg) const
 {
     testLog(msg, m_test);
@@ -12251,17 +12335,21 @@ void MainWindow::logTest(const std::string& msg) const
 
 void MainWindow::closeEvent(QCloseEvent* e)
 {
-    // Don't silently drop an in-progress take when the window is closed.
-    if (m_recording) {
+    // A save is mid-flight (modal dialogs up) — don't tear down under it.
+    if (m_finishing) { e->ignore(); return; }
+    // Don't silently drop an in-progress OR unsaved take when the window closes.
+    if (m_recording || m_takePending) {
         const auto btn = QMessageBox::question(
             this, Lang::t("rec_wiz_title"), Lang::t("rec_close_prompt"),
             QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel,
             QMessageBox::Save);
         if (btn == QMessageBox::Cancel) { e->ignore(); return; }
         if (btn == QMessageBox::Save) {
-            onRecordStop();              // m_recording=false, hide HUD, save dialog
+            onRecordStop();              // m_recording=false, run save dialog
+            if (m_takePending) { e->ignore(); return; }  // save cancelled — stay open
         } else {                         // Discard
-            m_recording = false;
+            m_recording   = false;
+            m_takePending = false;
             if (m_hud) m_hud->hide();
             m_recBuffer.clear();
         }

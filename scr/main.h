@@ -947,6 +947,8 @@ private:
     std::array<Quat, kXsensSegmentCount> m_prevSnap{};
     bool   m_havePrev = false;
     bool   m_calibComplete = false;
+    int    m_settleGen = 0;   // bumped to invalidate pending settle / singleShot callbacks
+    bool   m_suitBtnCooldown = false;  // debounce window after a Connect-suit click
 
     // Double-pose calibration state machine.
     //
@@ -1020,6 +1022,16 @@ private:
     void refreshPoseImage();
     void setBadge(QLabel* lab, const QString& txt, bool green);
 
+    // True while a calibration run is in progress (any phase except Idle/Done),
+    // INCLUDING the timer-less "settle" phases. Gates navigation and tells us
+    // when a lost connection must abort the run.
+    bool calibBusy() const {
+        return m_phase != CalibPhase::Idle && m_phase != CalibPhase::Done;
+    }
+    // Cancel an in-progress calibration: invalidate pending settle callbacks,
+    // stop timers, reset progress bars and accumulated samples back to Idle.
+    void abortCalibration();
+
 protected:
     void closeEvent(QCloseEvent*) override;
 };
@@ -1051,8 +1063,6 @@ public:
     void setActorDefaults(const ActorConfig& a);
 
 signals:
-    void pauseClicked();              // legacy (kept compat)
-    void resumeClicked();
     void resetClicked();              // Reset: feet-on-floor, scene origin
     void freezeToggled(bool frozen);  // one toggle
     void actorChanged(ActorConfig actor);
@@ -1067,7 +1077,6 @@ private:
     QLabel*        m_lblFps       = nullptr;
     QLabel*        m_lblBattery   = nullptr;
     QLabel*        m_lblSession   = nullptr;
-    QPushButton*   m_btnPauseResume = nullptr;  // legacy, kept compat
     QPushButton*   m_btnReset   = nullptr;
     QPushButton*   m_btnFreeze  = nullptr;
 
@@ -1521,7 +1530,6 @@ private slots:
     void onRenderTick();
     void onPauseSession();
     void onResumeSession();
-    void onBuildCoordinates();
     void onOpenLiveWizard();
     void onOpenRecordWizard();
     void onRecordStop();
@@ -1549,7 +1557,9 @@ private:
     std::unique_ptr<SkeletonXsens> m_skel;
 
     // Recording state.
-    bool                       m_recording = false;
+    bool                       m_recording   = false;
+    bool                       m_finishing   = false;  // inside finishRecording() modal loops
+    bool                       m_takePending = false;  // a recorded take is held unsaved
     RecordSettings             m_recCfg{};
     std::vector<RecordedFrame> m_recBuffer;
     qint64                     m_recStartMs = 0;
