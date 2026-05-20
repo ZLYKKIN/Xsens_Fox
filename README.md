@@ -2,15 +2,72 @@
 
 ![Fox Mocap — New Session](image/newsession.png)
 
-**Fox Mocap** is a free Windows app that captures full-body motion from an
-[Xsens MVN](https://www.movella.com/products/motion-capture/xsens-mvn-link)
-inertial suit and streams it live into **Unreal Engine** and **Blender**.
-
-Plug in your suit, run the wizard, hit *Start* — your character moves with you.
-
 [![Release](https://img.shields.io/github/v/release/ZLYKKIN/Xsens_Fox?include_prereleases&sort=semver&label=release)](https://github.com/ZLYKKIN/Xsens_Fox/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/ZLYKKIN/Xsens_Fox/total.svg)](https://github.com/ZLYKKIN/Xsens_Fox/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+---
+
+## 🇬🇧 About the project
+
+**Fox Mocap** is a free Windows application for full-body motion capture with an
+[Xsens / Movella MVN](https://www.movella.com/products/motion-capture/xsens-mvn-link)
+inertial suit. It takes the raw sensor stream straight off the suit, builds a clean
+17-sensor / 23-segment skeleton, shows it live in its own 3-D viewport, and streams the
+exact same pose into **Unreal Engine 5.6** and **Blender** in real time — no MVN Live
+licence required. Optional **Manus** gloves add full finger tracking.
+
+You put on the suit, run a short three-pose calibration, press *Start*, and your
+character moves with you everywhere at once: in the app's viewport, in Unreal, and in
+Blender.
+
+**How it works under the hood:**
+
+1. **Receive** — the suit's inertial data arrives over UDP (Movella MXTP02 / MXTP25).
+   Update rate follows the hardware automatically — 240 Hz for MVN Link, 60 Hz for Awinda.
+2. **Fuse** — each sensor runs through an [xio Fusion](https://github.com/xioTechnologies/Fusion)
+   AHRS (Madgwick filter + gyro-bias estimator) to produce a stable orientation, hardened
+   against NaN / dropouts at every external boundary.
+3. **Calibrate** — a guided **T-pose → N-pose → K-pose** sequence solves the
+   sensor-to-segment alignment, including asymmetric and mirrored sensor mounts.
+4. **Solve the skeleton** — forward kinematics drives all 23 segments (spine, arms, legs,
+   articulated feet/toes) with anatomical joint limits; locomotion logic keeps the pelvis
+   anchored and kills foot-sliding and vertical drift.
+5. **Render & stream** — the pose is drawn in an OpenGL window and streamed simultaneously
+   to Unreal and Blender from a single shared world-frame, so every viewer agrees.
+6. **Record** — capture takes to BVH / FBX for editing later.
+
+The whole interface is fully localized in **English and Russian**.
+
+## 🇷🇺 О проекте
+
+**Fox Mocap** — это бесплатное приложение для Windows для захвата движений всего тела с
+инерциального костюма [Xsens / Movella MVN](https://www.movella.com/products/motion-capture/xsens-mvn-link).
+Программа принимает поток данных прямо с костюма, строит чистый скелет из 17 сенсоров и
+23 сегментов, показывает его вживую в собственном 3-D окне и одновременно транслирует ту же
+позу в **Unreal Engine 5.6** и **Blender** в реальном времени — лицензия MVN Live не нужна.
+Опционально перчатки **Manus** добавляют полный трекинг пальцев.
+
+Надеваете костюм, проходите короткую калибровку из трёх поз, нажимаете *Start* — и ваш
+персонаж двигается вместе с вами сразу везде: во вьюпорте приложения, в Unreal и в Blender.
+
+**Как это работает внутри:**
+
+1. **Приём** — инерциальные данные костюма приходят по UDP (Movella MXTP02 / MXTP25).
+   Частота подстраивается под оборудование автоматически — 240 Гц для MVN Link, 60 Гц для Awinda.
+2. **Фьюжн** — каждый сенсор проходит через AHRS-фильтр [xio Fusion](https://github.com/xioTechnologies/Fusion)
+   (фильтр Маджвика + оценка дрейфа гироскопа) для получения стабильной ориентации, с защитой
+   от NaN и пропусков на всех внешних границах.
+3. **Калибровка** — последовательность **T-поза → N-поза → K-поза** вычисляет привязку
+   сенсоров к сегментам, включая случаи зеркальной и несимметричной установки датчиков.
+4. **Решение скелета** — прямая кинематика управляет всеми 23 сегментами (позвоночник, руки,
+   ноги, артикулированные стопы и носки) с анатомическими ограничениями суставов; логика
+   локомоции удерживает таз на месте и убирает проскальзывание стоп и вертикальный дрейф.
+5. **Отрисовка и стриминг** — поза рисуется в окне OpenGL и одновременно отправляется в Unreal
+   и Blender из единой мировой системы координат, поэтому все вьюверы показывают одно и то же.
+6. **Запись** — съёмка дублей в BVH / FBX для последующего монтажа.
+
+Весь интерфейс полностью переведён на **английский и русский** языки.
 
 ---
 
