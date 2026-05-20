@@ -148,8 +148,6 @@ struct FingerJointLimit {
     double flexMax;
 };
 
-extern const FingerJointLimit kFingerLimits[5][3];
-
 // ============================================================================
 //  SuitPose — the latest per-frame suit data shared between threads.
 // ============================================================================
