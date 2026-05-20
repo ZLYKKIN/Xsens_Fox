@@ -1342,13 +1342,8 @@ void foxLocoResetStatics() { /* no-op — state is now per-instance */ }
         m_rPlantTicks = m_lPlantTicks = m_rLiftTicks = m_lLiftTicks = 0;
         m_contact = {};
 
-        // v2 dead state (kept for layout compat)
-        m_stillFootR = m_stillFootL = QVector3D(0, 0, 0);
-        m_stillTicksR = m_stillTicksL = 0;
         m_offsetLast = QVector3D(0, 0, 0);
         m_offsetReady = false;
-        m_floorEmaValid = false;
-        m_floorEma = 0.0f;
 
         // v3 state
         m_prevPelvisQ     = Quat(1, 0, 0, 0);
@@ -2492,6 +2487,14 @@ struct MocapReceiver::Impl {
     std::array<float, kXsensSegmentCount> segGain{};
     bool                                  segGainActive = false;
 
+    // Bumped (atomically) by the calibration setters whenever s2s / gyr-bias /
+    // segment-gain change, to ask the network thread to re-initialise every
+    // fusion / bias filter.  Replaces the old cross-thread writes to
+    // fusionReady/biasReady (which were reset under the lock here but read &
+    // written lock-free in the poll loop — a data race).  fusion/bias/ahrsCfg/
+    // fusionReady/biasReady are now strictly owned by the network thread.
+    std::atomic<uint32_t> calGen{0};
+
     // Connection transport preference: COM = scanPorts first, Network =
     // enumerateNetworkDevices first (skip serial scan for faster WiFi boot).
     std::atomic<int> transport{0};              // 0 = ComPort, 1 = Network
@@ -3359,9 +3362,9 @@ bool MocapReceiver::glovesDllLoaded() const { return m_impl->manusDllLoaded; }
 
 void MocapReceiver::resetFusion()
 {
-    QMutexLocker lk(&m_impl->lock);
-    for (auto& r : m_impl->fusionReady) r = false;
-    for (auto& r : m_impl->biasReady)   r = false;
+    // Ask the network thread to re-init every fusion / bias filter on its next
+    // packet (fusionReady/biasReady are owned by that thread; see Impl::calGen).
+    m_impl->calGen.fetch_add(1, std::memory_order_relaxed);
     testLog("[fusion] reset — all 17 xio AHRS filters will re-init", m_impl->test);
 }
 
@@ -3372,9 +3375,9 @@ void MocapReceiver::setS2sAlignment(const std::array<Quat, kXsensSegmentCount>& 
     for (int i = 0; i < kXsensSegmentCount; ++i)
         m_impl->s2sInv[i] = s2s[i].inv();
     m_impl->s2sActive = true;
-    // Force re-init of every fusion filter so the first few samples after
-    // s2s goes live don't corrupt the existing steady state.
-    for (auto& r : m_impl->fusionReady) r = false;
+    // Ask the network thread to re-init every fusion filter so the first few
+    // samples after s2s goes live don't corrupt the existing steady state.
+    m_impl->calGen.fetch_add(1, std::memory_order_relaxed);
     testLog("[s2s] sensor-to-segment alignment installed", m_impl->test);
 }
 
@@ -3427,7 +3430,7 @@ void MocapReceiver::setGyroBias(const std::array<QVector3D, kXsensSegmentCount>&
     QMutexLocker lk(&m_impl->lock);
     m_impl->gyrBias = gb;
     m_impl->gyrBiasActive = true;
-    for (auto& r : m_impl->biasReady) r = false;
+    m_impl->calGen.fetch_add(1, std::memory_order_relaxed);
     testLog("[s2s] per-sensor gyr_bias correction installed", m_impl->test);
 }
 
@@ -3447,7 +3450,7 @@ void MocapReceiver::setSegmentGain(const std::array<float, kXsensSegmentCount>& 
     QMutexLocker lk(&m_impl->lock);
     m_impl->segGain = gain;
     m_impl->segGainActive = true;
-    for (auto& r : m_impl->fusionReady) r = false;
+    m_impl->calGen.fetch_add(1, std::memory_order_relaxed);
     testLog("[s2s] per-segment AHRS gain installed", m_impl->test);
 }
 
@@ -3697,6 +3700,21 @@ void MocapReceiver::run()
         }
     }
 
+    // Per-segment calibration/config copied out of Impl under the lock once
+    // per packet, so the fusion math below never reads a half-written array
+    // (torn Quat / QVector3D) while the calibration wizard commits new values
+    // from the GUI thread.  Defaults are "inactive / identity" so an invalid
+    // segment id simply applies nothing.
+    struct SegCal {
+        bool   s2sActive = false, magNormActive = false, accNormActive = false,
+               gyrBiasActive = false, magSoftActive = false, segGainActive = false;
+        double accMagn = 1.0, magMagn = 1.0;
+        QVector3D gyrBias, magSoftOff;
+        std::array<double, 9> magSoftMat{};
+        Quat   s2sInv;
+        float  segGain = 0.0f;
+    };
+
     // ---- Poll loop -----------------------------------------------------
     SuitPose staging;
     int framesThisSec = 0;
@@ -3706,6 +3724,10 @@ void MocapReceiver::run()
     // Per-sensor "dumped once in -test" flag — we want to see each sensor's
     // first three complete frames, then stop spamming.
     std::array<int, kXsensSegmentCount> dumpCount{};
+
+    // Last observed calibration generation; when a setter bumps Impl::calGen we
+    // re-initialise every fusion / bias filter on the next packet.
+    uint32_t lastCalGen = I.calGen.load(std::memory_order_relaxed);
 
     while (!I.stop.load()) {
         bool gotAny = false;
@@ -3737,6 +3759,34 @@ void MocapReceiver::run()
                 const int locId = api.dataPacketStoredLocationId(pkt);
                 const int ss = segmentFromLocationId(locId);
                 if (ss >= 0) targetSeg = ss;
+            }
+
+            // Snapshot the GUI-thread-written calibration/config for this
+            // segment under the lock, and pick up any pending re-init request.
+            SegCal cal;
+            {
+                QMutexLocker lk(&I.lock);
+                const uint32_t gen = I.calGen.load(std::memory_order_relaxed);
+                if (gen != lastCalGen) {
+                    I.fusionReady.fill(false);
+                    I.biasReady.fill(false);
+                    lastCalGen = gen;
+                }
+                if (targetSeg >= 0 && targetSeg < kXsensSegmentCount) {
+                    cal.s2sActive     = I.s2sActive;
+                    cal.magNormActive = I.magNormActive;
+                    cal.accNormActive = I.accNormActive;
+                    cal.gyrBiasActive = I.gyrBiasActive;
+                    cal.magSoftActive = I.magSoftActive;
+                    cal.segGainActive = I.segGainActive;
+                    cal.accMagn       = I.accMagn[targetSeg];
+                    cal.magMagn       = I.magMagn[targetSeg];
+                    cal.gyrBias       = I.gyrBias[targetSeg];
+                    cal.magSoftOff    = I.magSoftOff[targetSeg];
+                    cal.magSoftMat    = I.magSoftMat[targetSeg];
+                    cal.s2sInv        = I.s2sInv[targetSeg];
+                    cal.segGain       = I.segGain[targetSeg];
+                }
             }
 
             // --- Quaternion (if packet carries one) ----------------------
@@ -3847,8 +3897,8 @@ void MocapReceiver::run()
             //
             // Acc magnitude normalisation — cancels per-tracker accel
             // scaling bias so gravity evaluates to exactly 1 g in rest.
-            if (I.accNormActive && targetSeg >= 0 && targetSeg < kXsensSegmentCount) {
-                const double a = I.accMagn[targetSeg];
+            if (cal.accNormActive) {
+                const double a = cal.accMagn;
                 if (a > 1e-6) accForFilter = accForFilter / float(a);
             }
 
@@ -3856,15 +3906,14 @@ void MocapReceiver::run()
             // drift accumulates into a visible yaw/pitch creep over the
             // span of a minute of motion, which is precisely what broke
             // elbows / wrists / twists in the previous runs.
-            if (I.gyrBiasActive && targetSeg >= 0 && targetSeg < kXsensSegmentCount) {
-                gyrForFilter = gyrForFilter - I.gyrBias[targetSeg];
+            if (cal.gyrBiasActive) {
+                gyrForFilter = gyrForFilter - cal.gyrBias;
             }
 
-            if (I.magSoftActive && haveMag && targetSeg >= 0 &&
-                targetSeg < kXsensSegmentCount)
+            if (cal.magSoftActive && haveMag)
             {
-                const auto& M = I.magSoftMat[targetSeg];
-                const QVector3D off = I.magSoftOff[targetSeg];
+                const auto& M = cal.magSoftMat;
+                const QVector3D off = cal.magSoftOff;
                 const double dx = double(mag.x()) - double(off.x());
                 const double dy = double(mag.y()) - double(off.y());
                 const double dz = double(mag.z()) - double(off.z());
@@ -3873,25 +3922,38 @@ void MocapReceiver::run()
                 const double rz = M[6]*dx + M[7]*dy + M[8]*dz;
                 mag = QVector3D(float(rx), float(ry), float(rz));
             }
-            else if (I.magNormActive && haveMag && targetSeg >= 0 &&
-                targetSeg < kXsensSegmentCount)
+            else if (cal.magNormActive && haveMag)
             {
-                const double m = I.magMagn[targetSeg];
+                const double m = cal.magMagn;
                 if (m > 1e-6) mag = mag / float(m);
             }
 
             // Sensor-to-segment rotation so the fusion output is already
             // in body-segment-world space.
-            if (I.s2sActive && targetSeg >= 0 && targetSeg < kXsensSegmentCount) {
-                const Quat& inv = I.s2sInv[targetSeg];
+            if (cal.s2sActive) {
+                const Quat& inv = cal.s2sInv;
                 accForFilter = vec_rotate(accForFilter, inv);
                 gyrForFilter = vec_rotate(gyrForFilter, inv);
                 if (haveMag) mag = vec_rotate(mag, inv);
             }
 
+            // A corrupt / partial packet (or a degenerate s2s) can yield a
+            // non-finite IMU sample.  Feeding NaN/Inf to FusionAhrsUpdate
+            // permanently poisons that sensor's filter state (and Quat::
+            // normalized() does NOT sanitise NaN), so we skip the update this
+            // tick and let the segment hold its last good orientation.
+            const bool inputsFinite =
+                std::isfinite(accForFilter.x()) && std::isfinite(accForFilter.y()) &&
+                std::isfinite(accForFilter.z()) &&
+                std::isfinite(gyrForFilter.x()) && std::isfinite(gyrForFilter.y()) &&
+                std::isfinite(gyrForFilter.z()) &&
+                (!haveMag || (std::isfinite(mag.x()) && std::isfinite(mag.y()) &&
+                              std::isfinite(mag.z())));
+
             Quat fusedQuat;
             bool haveFused = false;
-            if (fuseReady && targetSeg >= 0 && targetSeg < kXsensSegmentCount) {
+            if (fuseReady && inputsFinite &&
+                targetSeg >= 0 && targetSeg < kXsensSegmentCount) {
                 FusionAhrs& ahrs = I.fusion[targetSeg];
                 FusionAhrsSettings& s = I.ahrsCfg[targetSeg];
                 if (!I.fusionReady[targetSeg]) {
@@ -3905,8 +3967,8 @@ void MocapReceiver::run()
                     //     because the lib stores the pre-squared magnitude)
                     //   * recoveryTriggerPeriod=0 so we never get locked in
                     //     gyro-only mode during fast motion
-                    s.gain                  = (I.segGainActive && I.segGain[targetSeg] > 0.0f)
-                                              ? I.segGain[targetSeg] : 0.7f;
+                    s.gain                  = (cal.segGainActive && cal.segGain > 0.0f)
+                                              ? cal.segGain : 0.7f;
                     s.gyroscopeRange        = 2000.0f;
                     // Softened rejection thresholds — tight values (15°/30°)
                     // parked the filter in gyro-only mode during static but
@@ -3979,9 +4041,16 @@ void MocapReceiver::run()
                 // xio AHRS natively outputs in the convention we picked
                 // (NWU), no extra rotation needed.
                 const FusionQuaternion fq = FusionAhrsGetQuaternion(&ahrs);
-                fusedQuat = Quat(fq.element.w, fq.element.x,
-                                 fq.element.y, fq.element.z).normalized();
-                haveFused = true;
+                if (std::isfinite(fq.element.w) && std::isfinite(fq.element.x) &&
+                    std::isfinite(fq.element.y) && std::isfinite(fq.element.z)) {
+                    fusedQuat = Quat(fq.element.w, fq.element.x,
+                                     fq.element.y, fq.element.z).normalized();
+                    haveFused = true;
+                } else {
+                    // Filter state went non-finite — drop it and force a clean
+                    // re-init on the next packet so the sensor can recover.
+                    I.fusionReady[targetSeg] = false;
+                }
             }
 
             // --- Publish into the shared frame ---------------------------
