@@ -1206,6 +1206,8 @@ public:
     bool   segLocked(int i)      const { return m_locked[i]; }
     bool   segAnchorValid(int i) const { return m_anchorValid[i]; }
     double segAngVelLP(int i)    const { return m_angVelLP[i]; }      // smoothed |ω| deg/s
+    double segAngAcc(int i)      const { return m_dbgAngAcc[i]; }     // |Δω|/dt deg/s² (lock gate)
+    double segStillTicks(int i)  const { return m_stillTicks[i]; }    // seconds held still
     Quat   segDriftLocal(int i)  const { return m_driftLocal[i]; }    // accumulated drift
 
     // Last on-screen pelvis position (post-locomotion + scene shift). Used by
@@ -1282,6 +1284,7 @@ private:
     std::array<bool, kXsensSegmentCount>   m_locked{};
     std::array<double, kXsensSegmentCount> m_angVelPrev{};    // last |ω|
     std::array<double, kXsensSegmentCount> m_angVelLP{};      // smoothed |ω|
+    std::array<double, kXsensSegmentCount> m_dbgAngAcc{};     // |Δω|/dt deg/s² (-test lock gate)
     std::array<double, kXsensSegmentCount> m_stillTicks{};    // consecutive
     std::array<Quat, kXsensSegmentCount>   m_prevQ{};
     std::array<Quat, kXsensSegmentCount>   m_outPrevQ{};

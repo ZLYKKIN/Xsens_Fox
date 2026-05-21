@@ -8075,6 +8075,7 @@ void MocapViewport::updatePose(const std::array<Quat, kXsensSegmentCount>& orien
             // Angular acceleration magnitude (change of speed).
             const double angAcc = std::abs(angVel - m_angVelPrev[i]) / dt;
             m_angVelPrev[i] = angVel;
+            m_dbgAngAcc[i]  = angAcc;   // -test: lock-gate "steady" input
 
             const bool isWrist  = (i == SEG_RHand || i == SEG_LHand);
             const bool isFootSeg = (i == SEG_RFoot || i == SEG_LFoot
@@ -11356,6 +11357,10 @@ void MainWindow::onRenderTick()
                    << " lock=" << (m_viewport && m_viewport->segLocked(i) ? "LOCK" : "live")
                    << " ω=" << std::setprecision(2) << std::setw(6)
                    << (m_viewport ? m_viewport->segAngVelLP(i) : 0.0) << "°/s"
+                   << " αacc=" << std::setw(7)
+                   << (m_viewport ? m_viewport->segAngAcc(i) : 0.0) << "°/s²"
+                   << " stillT=" << std::setw(5)
+                   << (m_viewport ? m_viewport->segStillTicks(i) : 0.0) << "s"
                    << " stC=" << std::setw(4) << s_stillCount[i]
                    << " wω=" << std::setw(6) << s_worldOmegaLP[i]
                    << std::setprecision(3) << "\n";
