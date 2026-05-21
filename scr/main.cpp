@@ -8,6 +8,7 @@
 //     convert_euler_to_quat                   (rotations.py)
 
 #include "main.h"
+#include "foxwire.h"   // MVN MXTP byte encoders (extracted, unit-tested)
 
 #include <QtCore/QCommandLineOption>
 #include <QtCore/QCommandLineParser>
@@ -181,87 +182,12 @@ const char* kFingerChainNames[kFingerChainCount] = {
 };
 
 // ============================================================================
-//  Quaternion math  (WXYZ, scalar-first).  Ported from hipose/rotations.py.
+//  Quaternion math (WXYZ, scalar-first) now lives in foxmath.h / foxmath.cpp
+//  — Quat, quat_mult, vec_rotate, swingTwistDecompose, euler_to_quat,
+//  yaw_only_quat, slerp_quat, quat_angle_deg, mirror_y_quat and
+//  hemisphereContinuous — extracted verbatim so the exact code the live
+//  pipeline runs is unit-tested in isolation.  Included via main.h.
 // ============================================================================
-
-Quat quat_mult(const Quat& a, const Quat& b)
-{
-    // Hamilton product: matches scipy.spatial.transform.Rotation composition.
-    return Quat(
-        a.w*b.w - a.x*b.x - a.y*b.y - a.z*b.z,
-        a.w*b.x + a.x*b.w + a.y*b.z - a.z*b.y,
-        a.w*b.y - a.x*b.z + a.y*b.w + a.z*b.x,
-        a.w*b.z + a.x*b.y - a.y*b.x + a.z*b.w);
-}
-
-QVector3D vec_rotate(const QVector3D& v, const Quat& q)
-{
-    // Efficient formulation: v' = v + 2w(qv × v) + 2(qv × (qv × v))
-    const QVector3D qv(float(q.x), float(q.y), float(q.z));
-    const QVector3D t = 2.0f * QVector3D::crossProduct(qv, v);
-    return v + float(q.w) * t + QVector3D::crossProduct(qv, t);
-}
-
-void swingTwistDecompose(const Quat& q, const QVector3D& axisU,
-                         Quat& outSwing, Quat& outTwist)
-{
-    const double dot = q.x * double(axisU.x()) + q.y * double(axisU.y()) + q.z * double(axisU.z());
-    Quat twist(q.w, dot * double(axisU.x()), dot * double(axisU.y()), dot * double(axisU.z()));
-    const double n2 = twist.w * twist.w + twist.x * twist.x + twist.y * twist.y + twist.z * twist.z;
-    if (n2 < 1e-12) {
-        outTwist = Quat(1, 0, 0, 0);
-        outSwing = q;
-        return;
-    }
-    const double inv = 1.0 / std::sqrt(n2);
-    twist.w *= inv; twist.x *= inv; twist.y *= inv; twist.z *= inv;
-    if (twist.w < 0) {
-        twist.w = -twist.w; twist.x = -twist.x; twist.y = -twist.y; twist.z = -twist.z;
-    }
-    outTwist = twist;
-    outSwing = quat_mult(q, twist.inv()).normalized();
-}
-
-static Quat axis_quat(char axis, double ang)
-{
-    const double h = ang * 0.5;
-    const double c = std::cos(h);
-    const double s = std::sin(h);
-    switch (axis) {
-        case 'X': case 'x': return Quat(c, s, 0, 0);
-        case 'Y': case 'y': return Quat(c, 0, s, 0);
-        case 'Z': case 'z': return Quat(c, 0, 0, s);
-    }
-    return Quat(1, 0, 0, 0);
-}
-
-Quat euler_to_quat(double a, double b, double c, const char* seq)
-{
-    // Intrinsic rotations (uppercase scipy convention).
-    // "XYZ" means: first rotate by a about local X, then b about new Y,
-    //              then c about newest Z.  As a Hamilton product this is
-    //              Qx(a) * Qy(b) * Qz(c).
-    const Quat qa = axis_quat(seq[0], a);
-    const Quat qb = axis_quat(seq[1], b);
-    const Quat qc = axis_quat(seq[2], c);
-    return quat_mult(quat_mult(qa, qb), qc).normalized();
-}
-
-static Quat yaw_only_quat(const Quat& q);
-static double quat_angle_deg(const Quat& q);
-static inline Quat mirror_y_quat(const Quat& q) {
-    return Quat(q.w, -q.x, q.y, -q.z);
-}
-
-// Return `q` expressed in the same hemisphere as `prev`.  A quaternion and its
-// negation encode the *same* rotation, so this never changes what a frame
-// represents — but it stops the sign from flipping between consecutive frames,
-// which would otherwise make a receiver that interpolates (UE LiveLink /
-// Blender) SLERP the long way around and visibly pop ("terminator-line" jitter).
-static inline Quat hemisphereContinuous(const Quat& q, const Quat& prev) {
-    const double dot = q.w*prev.w + q.x*prev.x + q.y*prev.y + q.z*prev.z;
-    return (dot < 0.0) ? Quat(-q.w, -q.x, -q.y, -q.z) : q;
-}
 
 // ============================================================================
 //  SkeletonXsens — topology, lengths, default angles, FK.
@@ -497,7 +423,6 @@ SkeletonXsens::addDummySegments(const std::array<Quat, kXsensSegmentCount>& s) c
 }
 
 // Forward declarations — the helpers themselves live near LocomotionSolver.
-static Quat slerp_quat(const Quat& a, const Quat& b, double t);
 static Quat constrain_shoulder_cone(const Quat& q_seg, const Quat& q_pelvis,
                                      bool isRight);
 static Quat constrain_wrist_twist(const Quat& q_hand_world,
@@ -635,54 +560,12 @@ static Quat ecompassNED(const QVector3D& a, const QVector3D& m)
 //  xme64.dll ghidra decomp (see header for references).
 // ============================================================================
 
-// ---------- [A] yaw-only kvaternion — swing-twist decomposition along world Z
-//
-// Любой кватернион q можно разложить на q = q_swing · q_twist, где
-// q_twist — чистый поворот вокруг заданной оси (у нас Z), а q_swing —
-// поворот вокруг оси, перпендикулярной Z. Выделяем q_twist.
-//
-// Для оси Z: q_twist_unnorm = (w, 0, 0, z), затем нормализуем.  Свойство
-// в корне защищает от gimbal lock при pitch = ±π/2 (где Tait-Bryan Z-Y-X
-// через atan2 возвращает 0): FK-композиция oriented[Pelvis] = raw · Rot_y(-π/2)
-// постоянно держит таз в окрестности -90° pitch, и Эйлер-извлечение там
-// всегда даёт yaw=0 — чем и был сломан shoulder cone.
-static Quat yaw_only_quat(const Quat& q)
-{
-    double w = q.w, z = q.z;
-    // Hemisphere fix — берём ветвь с положительным w для непрерывности.
-    if (w < 0.0) { w = -w; z = -z; }
-    const double n2 = w*w + z*z;
-    if (n2 < 1e-12) {
-        // Оба компонента нулевые: yaw неопределён, возвращаем identity.
-        return Quat(1, 0, 0, 0);
-    }
-    const double n = 1.0 / std::sqrt(n2);
-    return Quat(w * n, 0.0, 0.0, z * n);
-}
-
-// ---------- [B] slerp ----------
-static Quat slerp_quat(const Quat& a, const Quat& b, double t)
-{
-    double dot = a.w*b.w + a.x*b.x + a.y*b.y + a.z*b.z;
-    Quat b2 = b;
-    if (dot < 0.0) {
-        b2 = Quat(-b.w, -b.x, -b.y, -b.z);
-        dot = -dot;
-    }
-    if (dot > 0.9995) {
-        Quat r(a.w + t*(b2.w - a.w), a.x + t*(b2.x - a.x),
-               a.y + t*(b2.y - a.y), a.z + t*(b2.z - a.z));
-        return r.normalized();
-    }
-    const double theta0 = std::acos(dot);
-    const double theta  = theta0 * t;
-    const double sinT0  = std::sin(theta0);
-    const double s0 = std::sin(theta0 - theta) / sinT0;
-    const double s1 = std::sin(theta) / sinT0;
-    return Quat(s0*a.w + s1*b2.w, s0*a.x + s1*b2.x,
-                s0*a.y + s1*b2.y, s0*a.z + s1*b2.z).normalized();
-}
-
+// ---------- [A]/[B] yaw_only_quat + slerp_quat now live in foxmath.{h,cpp} ----
+// Gimbal-lock note (still relevant to the FK below): the composition
+// oriented[Pelvis] = raw · Rot_y(-π/2) keeps the pelvis near -90° pitch, where a
+// Tait-Bryan Z-Y-X atan2 yaw extraction would collapse to 0.  yaw_only_quat's
+// swing-twist split about world-Z sidesteps that singularity and is what drives
+// the shoulder cone.
 
 // ---------- [C] shoulder cone soft-constraint ----------
 static Quat constrain_shoulder_cone(const Quat& q_seg, const Quat& q_pelvis,
@@ -815,12 +698,7 @@ static Quat constrain_wrist_twist(const Quat& q_hand_world,
     return quat_mult(q_forearm_world, qLocalOut).normalized();
 }
 
-// ---------- [D] angle in degrees ----------
-static double quat_angle_deg(const Quat& q)
-{
-    const double w = std::abs(q.w) > 1.0 ? 1.0 : std::abs(q.w);
-    return 2.0 * std::acos(w) * 180.0 / 3.14159265358979323846;
-}
+// ---------- [D] quat_angle_deg now lives in foxmath.{h,cpp} ----------
 
 // ---------- Matrix → quaternion helper ----------
 // Pass 3x3 rotation matrix by rows m00,m01,m02,m10,m11,m12,m20,m21,m22.
@@ -8800,44 +8678,10 @@ void MocapViewport::wheelEvent(QWheelEvent* e)
 //  mark "single datagram per frame".
 // ============================================================================
 
-static QByteArray buildMxtpHeader(const char* msgId2,
-                                  quint32 sample,
-                                  quint8  dgCounter,
-                                  quint8  dataCount,
-                                  quint32 frameTimeMs,
-                                  quint8  segCount,
-                                  quint8  fingerCount = 0)
-{
-    QByteArray pkt;
-    pkt.reserve(24);
-    pkt.append("MXTP");
-    pkt.append(msgId2, 2);
-    const quint32 sampleBE = qToBigEndian<quint32>(sample);
-    pkt.append(reinterpret_cast<const char*>(&sampleBE), 4);
-    pkt.append(char(dgCounter));
-    pkt.append(char(dataCount));
-    const quint32 ftBE = qToBigEndian<quint32>(frameTimeMs);
-    pkt.append(reinterpret_cast<const char*>(&ftBE), 4);
-    pkt.append(char(0));               // avatarId
-    pkt.append(char(segCount));        // bodySegmentCount
-    pkt.append(char(0));               // props
-    pkt.append(char(fingerCount));     // fingerSegmentCount
-    pkt.append(4, '\0');               // padding
-    return pkt;
-}
-
-static void appendFloatBE(QByteArray& pkt, float v)
-{
-    quint32 bits;
-    std::memcpy(&bits, &v, 4);
-    bits = qToBigEndian<quint32>(bits);
-    pkt.append(reinterpret_cast<const char*>(&bits), 4);
-}
-static void appendInt32BE(QByteArray& pkt, qint32 v)
-{
-    const quint32 be = qToBigEndian<quint32>(static_cast<quint32>(v));
-    pkt.append(reinterpret_cast<const char*>(&be), 4);
-}
+// buildMxtpHeader / appendFloatBE / appendInt32BE now live in foxwire.{h,cpp}
+// (unit-tested against the immutable Plugins MXTP byte contract).  appendFloatBE
+// there also coerces any non-finite value to 0.0f so a degenerate frame can
+// never push NaN/Inf onto the wire.
 
 // ============================================================================
 // COORDINATE CONTRACT — the complete frame chain, end to end (verified audit).

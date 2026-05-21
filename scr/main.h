@@ -43,6 +43,8 @@
 #include <string>
 #include <vector>
 
+#include "foxmath.h"   // Quat + pure rotation math (extracted, unit-tested)
+
 // ============================================================================
 //  Constants
 // ============================================================================
@@ -100,39 +102,12 @@ extern const char* kSegmentNames[kXsensSegmentCount];
 
 // ============================================================================
 //  Quaternion math (WXYZ, scalar first) — mirrors hipose/rotations.py
+//
+//  The Quat struct and the rotation primitives (quat_mult / vec_rotate /
+//  euler_to_quat / swingTwistDecompose / slerp_quat / yaw_only_quat /
+//  mirror_y_quat / hemisphereContinuous) now live in foxmath.h (included
+//  above) so the exact code the live pipeline runs is unit-tested in isolation.
 // ============================================================================
-
-struct Quat {
-    double w, x, y, z;
-
-    constexpr Quat() : w(1.0), x(0.0), y(0.0), z(0.0) {}
-    constexpr Quat(double w_, double x_, double y_, double z_)
-        : w(w_), x(x_), y(y_), z(z_) {}
-
-    double norm() const { return std::sqrt(w*w + x*x + y*y + z*z); }
-
-    Quat normalized() const {
-        const double n = norm();
-        if (n < 1e-12) return Quat(1, 0, 0, 0);
-        return Quat(w/n, x/n, y/n, z/n);
-    }
-
-    Quat conj() const { return Quat(w, -x, -y, -z); }
-    Quat inv()  const { Quat q = conj(); double n2 = w*w+x*x+y*y+z*z;
-                        if (n2 < 1e-12) return Quat();
-                        return Quat(q.w/n2, q.x/n2, q.y/n2, q.z/n2); }
-};
-
-// Hamilton product (scipy Rotation composition).
-Quat quat_mult(const Quat& a, const Quat& b);
-// Rotate vector v by quaternion q  (v' = q * [0,v] * q^-1)
-QVector3D vec_rotate(const QVector3D& v, const Quat& q);
-// Convert Euler angles to quaternion. seq is a 3-char upper-case code like
-// "XYZ" or "YXZ"  (intrinsic rotations, matches scipy 'XYZ' uppercase).
-Quat euler_to_quat(double a, double b, double c, const char* seq);
-
-void swingTwistDecompose(const Quat& q, const QVector3D& axisU,
-                         Quat& outSwing, Quat& outTwist);
 
 struct WristAnatomicalCfg {
     double maxFlexRad   = M_PI * 0.5;
