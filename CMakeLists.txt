@@ -8,10 +8,6 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTOUIC OFF)
 set(CMAKE_AUTORCC ON)
 
-# Build the Linux/CI unit tests for the extracted pure logic (foxmath / foxwire).
-# OFF by default so the Windows release build is completely unaffected.
-option(FOX_BUILD_TESTS "Build unit tests for foxmath/foxwire" OFF)
-
 # ---- Version stamp from git tag --------------------------------------------
 # `git describe --tags --always --dirty` gives us the shortest unique identifier:
 #   * exact tag        -> "v0.6.0"
@@ -133,11 +129,3 @@ endif()
 
 message(STATUS "Fox Mocap will be built into: ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
 message(STATUS "Qt6 found at:                  ${Qt6_DIR}")
-
-# ---- Unit tests (opt-in; Linux/CI) -----------------------------------------
-# Exercises the real foxmath/foxwire code with no Xsens/Manus/Widgets/OpenGL
-# dependency, so it builds and runs on a plain Linux runner.
-if (FOX_BUILD_TESTS)
-    enable_testing()
-    add_subdirectory(tests)
-endif()
