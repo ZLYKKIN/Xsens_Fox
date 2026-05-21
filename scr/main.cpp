@@ -33,8 +33,13 @@
 #include <QtWidgets/QFileDialog>
 #include <QtWidgets/QLineEdit>
 #include <QtWidgets/QSpinBox>
+#include <QtWidgets/QSlider>
 #include <QtWidgets/QScrollArea>
+#include <QtWidgets/QFrame>
 #include <QtWidgets/QProgressDialog>
+#include <QtCore/QFile>
+#include <QtCore/QJsonDocument>
+#include <QtCore/QJsonObject>
 #include <QtNetwork/QUdpSocket>
 #include <QtNetwork/QHostAddress>
 #include <QtNetwork/QNetworkInterface>
@@ -4535,6 +4540,55 @@ static const Tr kTr[] = {
     {"motion_hint",        "Движение:",                         "Motion:"},
     {"tab_live",           "\xF0\x9F\x93\xA1  Live",             "\xF0\x9F\x93\xA1  Live"},
     {"tab_record",         "\xF0\x9F\x94\xB4  Запись",            "\xF0\x9F\x94\xB4  Record"},
+    {"tab_settings",       "\xE2\x9A\x99\xEF\xB8\x8F  Настройки", "\xE2\x9A\x99\xEF\xB8\x8F  Settings"},
+
+    // --- Joint-orientation settings window ---
+    {"js_title",           "Коррекция ориентации суставов",      "Joint orientation correction"},
+    {"js_intro",           "Подправьте ориентацию любого сустава по осям X/Y/Z. "
+                           "Изменения видны на скелете сразу и применяются к стриму и записи. "
+                           "Сохранённый пресет загружается как дефолтный при следующем запуске.",
+                           "Fine-tune any joint's orientation along X/Y/Z. Changes show on the "
+                           "skeleton instantly and apply to the stream and recording too. A saved "
+                           "preset loads as the default on the next launch."},
+    {"js_axis_x",          "X",                                  "X"},
+    {"js_axis_y",          "Y",                                  "Y"},
+    {"js_axis_z",          "Z",                                  "Z"},
+    {"js_save",            "Сохранить пресет",                   "Save preset"},
+    {"js_load",            "Загрузить пресет",                   "Load preset"},
+    {"js_reset",           "Сброс",                              "Reset"},
+    {"js_saved",           "Пресет сохранён",                    "Preset saved"},
+    {"js_save_err",        "Не удалось сохранить пресет",         "Failed to save preset"},
+    {"js_loaded",          "Пресет загружен",                    "Preset loaded"},
+    {"js_load_err",        "Пресет не найден",                   "No preset found"},
+    {"js_reset_done",      "Все поправки обнулены",              "All offsets cleared"},
+    {"js_grp_torso",       "Корпус и голова",                    "Torso & head"},
+    {"js_grp_rarm",        "Правая рука",                        "Right arm"},
+    {"js_grp_larm",        "Левая рука",                         "Left arm"},
+    {"js_grp_rleg",        "Правая нога",                        "Right leg"},
+    {"js_grp_lleg",        "Левая нога",                         "Left leg"},
+    {"js_pelvis",          "Таз",                                "Pelvis"},
+    {"js_l5",              "Поясница (L5)",                      "Lower back (L5)"},
+    {"js_l3",              "Поясница (L3)",                      "Lower back (L3)"},
+    {"js_t12",             "Грудной отдел (T12)",                "Mid spine (T12)"},
+    {"js_t8",              "Грудной отдел (T8)",                 "Upper spine (T8)"},
+    {"js_neck",            "Шея",                                "Neck"},
+    {"js_head",            "Голова",                             "Head"},
+    {"js_r_shoulder",      "Правое плечо",                       "Right shoulder"},
+    {"js_r_upper_arm",     "Правое предплечье (верх)",           "Right upper arm"},
+    {"js_r_forearm",       "Правое предплечье",                  "Right forearm"},
+    {"js_r_hand",          "Правая кисть",                       "Right hand"},
+    {"js_l_shoulder",      "Левое плечо",                        "Left shoulder"},
+    {"js_l_upper_arm",     "Левое предплечье (верх)",            "Left upper arm"},
+    {"js_l_forearm",       "Левое предплечье",                   "Left forearm"},
+    {"js_l_hand",          "Левая кисть",                        "Left hand"},
+    {"js_r_upper_leg",     "Правое бедро",                       "Right thigh"},
+    {"js_r_lower_leg",     "Правая голень",                      "Right shin"},
+    {"js_r_foot",          "Правая стопа",                       "Right foot"},
+    {"js_r_toe",           "Правый носок",                       "Right toe"},
+    {"js_l_upper_leg",     "Левое бедро",                        "Left thigh"},
+    {"js_l_lower_leg",     "Левая голень",                       "Left shin"},
+    {"js_l_foot",          "Левая стопа",                        "Left foot"},
+    {"js_l_toe",           "Левый носок",                        "Left toe"},
     {"menu_start_stream",  "Начать трансляцию",                 "Start streaming"},
     {"menu_camera",        "Камера",                            "Camera"},
     {"menu_view_opts",     "Параметры отображения",             "View options"},
@@ -10430,6 +10484,229 @@ static void runHdPostProcessing(std::vector<RecordedFrame>& fr,
 } // anonymous namespace
 
 // ============================================================================
+//  JointOffsets — JSON persistence next to the executable
+// ============================================================================
+
+QString JointOffsets::filePath()
+{
+    return QCoreApplication::applicationDirPath() + "/joint_offsets.json";
+}
+
+bool JointOffsets::save(const QString& path) const
+{
+    QJsonObject joints;
+    for (int i = 0; i < kXsensSegmentCount; ++i) {
+        QJsonObject xyz;
+        xyz["x"] = double(deg[i].x());
+        xyz["y"] = double(deg[i].y());
+        xyz["z"] = double(deg[i].z());
+        joints[QString::fromUtf8(kSegmentNames[i])] = xyz;
+    }
+    QJsonObject root;
+    root["version"] = 1;
+    root["joints"]  = joints;
+
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) return false;
+    f.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
+    f.close();
+    return true;
+}
+
+bool JointOffsets::load(const QString& path)
+{
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly)) return false;
+    const QByteArray bytes = f.readAll();
+    f.close();
+
+    QJsonParseError err{};
+    const QJsonDocument doc = QJsonDocument::fromJson(bytes, &err);
+    if (err.error != QJsonParseError::NoError || !doc.isObject()) return false;
+
+    const QJsonObject joints = doc.object().value("joints").toObject();
+    std::array<QVector3D, kXsensSegmentCount> tmp{};
+    for (int i = 0; i < kXsensSegmentCount; ++i) {
+        const QJsonObject xyz =
+            joints.value(QString::fromUtf8(kSegmentNames[i])).toObject();
+        tmp[i] = QVector3D(float(xyz.value("x").toDouble(0.0)),
+                           float(xyz.value("y").toDouble(0.0)),
+                           float(xyz.value("z").toDouble(0.0)));
+    }
+    deg = tmp;
+    return true;
+}
+
+// ============================================================================
+//  JointOffsetsDialog — non-modal X/Y/Z editor
+// ============================================================================
+
+namespace {
+// Lang key for the human-readable name of each segment (display only; the JSON
+// keys stay the canonical kSegmentNames).  Indexed by the Seg enum.
+const char* jointDispKey(int seg)
+{
+    static const char* k[kXsensSegmentCount] = {
+        "js_pelvis", "js_l5", "js_l3", "js_t12", "js_t8", "js_neck", "js_head",
+        "js_r_shoulder", "js_r_upper_arm", "js_r_forearm", "js_r_hand",
+        "js_l_shoulder", "js_l_upper_arm", "js_l_forearm", "js_l_hand",
+        "js_r_upper_leg", "js_r_lower_leg", "js_r_foot", "js_r_toe",
+        "js_l_upper_leg", "js_l_lower_leg", "js_l_foot", "js_l_toe",
+    };
+    return (seg >= 0 && seg < kXsensSegmentCount) ? k[seg] : "js_pelvis";
+}
+} // anonymous namespace
+
+JointOffsetsDialog::JointOffsetsDialog(JointOffsets* offsets, QWidget* parent)
+    : QDialog(parent), m_offsets(offsets)
+{
+    setWindowFlag(Qt::Window, true);
+    setModal(false);                       // never block the live viewport
+    setWindowTitle(Lang::t("js_title"));
+    resize(580, 780);
+    buildUi();
+    syncControlsFromModel();
+}
+
+void JointOffsetsDialog::buildUi()
+{
+    auto* outer = new QVBoxLayout(this);
+    outer->setContentsMargins(14, 14, 14, 12);
+    outer->setSpacing(10);
+
+    auto* intro = new QLabel(Lang::t("js_intro"), this);
+    intro->setObjectName("subtle");
+    intro->setWordWrap(true);
+    outer->addWidget(intro);
+
+    auto* scroll = new QScrollArea(this);
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    auto* content = new QWidget(scroll);
+    auto* cl = new QVBoxLayout(content);
+    cl->setContentsMargins(2, 2, 6, 2);
+    cl->setSpacing(10);
+
+    const char* axisKey[3] = { "js_axis_x", "js_axis_y", "js_axis_z" };
+
+    auto buildRegion = [&](const char* titleKey, const std::vector<int>& segs) {
+        auto* box  = new QGroupBox(Lang::t(titleKey), content);
+        auto* grid = new QGridLayout(box);
+        grid->setContentsMargins(10, 6, 10, 8);
+        grid->setHorizontalSpacing(8);
+        grid->setVerticalSpacing(5);
+        int row = 0;
+        for (int seg : segs) {
+            auto* segLbl = new QLabel(Lang::t(jointDispKey(seg)), box);
+            segLbl->setStyleSheet("font-weight:700; color:#FFB066; margin-top:4px;");
+            grid->addWidget(segLbl, row, 0, 1, 3);
+            ++row;
+            for (int a = 0; a < 3; ++a) {
+                auto* axLbl = new QLabel(Lang::t(axisKey[a]), box);
+                axLbl->setObjectName("subtle");
+                axLbl->setMinimumWidth(22);
+
+                auto* sld = new QSlider(Qt::Horizontal, box);
+                sld->setRange(-180, 180);
+                sld->setPageStep(5);
+
+                auto* spin = new QDoubleSpinBox(box);
+                spin->setRange(-180.0, 180.0);
+                spin->setSingleStep(0.5);
+                spin->setDecimals(1);
+                spin->setSuffix(QString::fromUtf8("°"));
+                spin->setMinimumWidth(86);
+
+                m_ctl[seg][a] = { sld, spin };
+
+                // Two-way slider<->spinbox sync; both write the model so the
+                // next render tick picks the correction up live.
+                auto applyAxis = [this, seg, a](double v) {
+                    QVector3D& vv = m_offsets->deg[seg];
+                    if      (a == 0) vv.setX(float(v));
+                    else if (a == 1) vv.setY(float(v));
+                    else             vv.setZ(float(v));
+                };
+                connect(sld, &QSlider::valueChanged, this, [this, seg, a, applyAxis](int v) {
+                    if (m_syncing) return;
+                    m_syncing = true;
+                    m_ctl[seg][a].spin->setValue(double(v));
+                    m_syncing = false;
+                    applyAxis(double(v));
+                });
+                connect(spin, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
+                        [this, seg, a, applyAxis](double v) {
+                    if (m_syncing) return;
+                    m_syncing = true;
+                    m_ctl[seg][a].slider->setValue(int(std::lround(v)));
+                    m_syncing = false;
+                    applyAxis(v);
+                });
+
+                grid->addWidget(axLbl, row, 0);
+                grid->addWidget(sld,   row, 1);
+                grid->addWidget(spin,  row, 2);
+                ++row;
+            }
+        }
+        grid->setColumnStretch(1, 1);
+        cl->addWidget(box);
+    };
+
+    buildRegion("js_grp_torso", { SEG_Pelvis, SEG_L5, SEG_L3, SEG_T12, SEG_T8, SEG_Neck, SEG_Head });
+    buildRegion("js_grp_rarm",  { SEG_RShoulder, SEG_RUpperArm, SEG_RForearm, SEG_RHand });
+    buildRegion("js_grp_larm",  { SEG_LShoulder, SEG_LUpperArm, SEG_LForearm, SEG_LHand });
+    buildRegion("js_grp_rleg",  { SEG_RUpperLeg, SEG_RLowerLeg, SEG_RFoot, SEG_RToe });
+    buildRegion("js_grp_lleg",  { SEG_LUpperLeg, SEG_LLowerLeg, SEG_LFoot, SEG_LToe });
+    cl->addStretch();
+    scroll->setWidget(content);
+    outer->addWidget(scroll, 1);
+
+    auto* btnRow = new QHBoxLayout();
+    m_status = new QLabel(QString(), this);
+    m_status->setObjectName("subtle");
+    btnRow->addWidget(m_status, 1);
+
+    auto* btnReset = new QPushButton(Lang::t("js_reset"), this);
+    auto* btnLoad  = new QPushButton(Lang::t("js_load"),  this);
+    auto* btnSave  = new QPushButton(Lang::t("js_save"),  this);
+    btnSave->setObjectName("primary");
+    btnRow->addWidget(btnReset);
+    btnRow->addWidget(btnLoad);
+    btnRow->addWidget(btnSave);
+    outer->addLayout(btnRow);
+
+    connect(btnReset, &QPushButton::clicked, this, [this]() {
+        m_offsets->clear();
+        syncControlsFromModel();
+        if (m_status) m_status->setText(Lang::t("js_reset_done"));
+    });
+    connect(btnSave, &QPushButton::clicked, this, [this]() {
+        const bool ok = m_offsets->save(JointOffsets::filePath());
+        if (m_status) m_status->setText(ok ? Lang::t("js_saved") : Lang::t("js_save_err"));
+    });
+    connect(btnLoad, &QPushButton::clicked, this, [this]() {
+        const bool ok = m_offsets->load(JointOffsets::filePath());
+        if (ok) syncControlsFromModel();
+        if (m_status) m_status->setText(ok ? Lang::t("js_loaded") : Lang::t("js_load_err"));
+    });
+}
+
+void JointOffsetsDialog::syncControlsFromModel()
+{
+    m_syncing = true;
+    for (int seg = 0; seg < kXsensSegmentCount; ++seg) {
+        const QVector3D v = m_offsets->deg[seg];
+        const double comp[3] = { double(v.x()), double(v.y()), double(v.z()) };
+        for (int a = 0; a < 3; ++a) {
+            if (m_ctl[seg][a].slider) m_ctl[seg][a].slider->setValue(int(std::lround(comp[a])));
+            if (m_ctl[seg][a].spin)   m_ctl[seg][a].spin->setValue(comp[a]);
+        }
+    }
+    m_syncing = false;
+}
+
+// ============================================================================
 //  MainWindow
 // ============================================================================
 
@@ -10612,6 +10889,16 @@ MainWindow::MainWindow(MocapReceiver* rx,
     auto* liveBtn   = makeTab("tab_live");
     auto* recordBtn = makeTab("tab_record");
 
+    // Settings tab — same pill styling, but a plain click opens the non-modal
+    // joint-orientation editor instead of dropping a menu.
+    auto* settingsBtn = new QToolButton(this);
+    settingsBtn->setObjectName("topTabBtn");
+    settingsBtn->setProperty("tabKey", "tab_settings");
+    settingsBtn->setText(Lang::t("tab_settings"));
+    settingsBtn->setCursor(Qt::PointingHandCursor);
+    settingsBtn->setToolButtonStyle(Qt::ToolButtonTextOnly);
+    connect(settingsBtn, &QToolButton::clicked, this, &MainWindow::onOpenJointSettings);
+
     auto refreshLiveMenu = [this, liveBtn]() {
         auto* m = liveBtn->menu();
         m->clear();
@@ -10654,8 +10941,8 @@ MainWindow::MainWindow(MocapReceiver* rx,
     connect(liveBtn->menu(),   &QMenu::aboutToShow, this, refreshLiveMenu);
     connect(recordBtn->menu(), &QMenu::aboutToShow, this, refreshRecordMenu);
 
-    connect(&Lang::instance(), &Lang::changed, this, [liveBtn, recordBtn]() {
-        for (auto* b : { liveBtn, recordBtn }) {
+    connect(&Lang::instance(), &Lang::changed, this, [liveBtn, recordBtn, settingsBtn]() {
+        for (auto* b : { liveBtn, recordBtn, settingsBtn }) {
             const QString tk = b->property("tabKey").toString();
             if (!tk.isEmpty()) b->setText(Lang::t(tk.toUtf8().constData()));
         }
@@ -10677,6 +10964,7 @@ MainWindow::MainWindow(MocapReceiver* rx,
     tabRow->setSpacing(6);
     tabRow->addWidget(liveBtn);
     tabRow->addWidget(recordBtn);
+    tabRow->addWidget(settingsBtn);
     tabRow->addStretch();
     vl->addLayout(tabRow);
     vl->addWidget(liveWidget, 1);
@@ -10690,6 +10978,16 @@ MainWindow::MainWindow(MocapReceiver* rx,
     connect(m_rx, &MocapReceiver::statusChanged,      this, &MainWindow::onConnStatusChanged);
     connect(m_rx, &MocapReceiver::gloveStatusChanged, this, &MainWindow::onGloveStatus);
     connect(m_rx, &MocapReceiver::fpsUpdated,         this, &MainWindow::onFps);
+
+    // Joint-correction preset.  If one was saved next to the executable it
+    // becomes the default for this session; otherwise the default is the
+    // current state (all zeros) and we write that file so the operator has a
+    // starting point to hand-tune from.
+    {
+        const QString jp = JointOffsets::filePath();
+        if (QFile::exists(jp)) m_jointOffsets.load(jp);
+        else                   m_jointOffsets.save(jp);
+    }
 
     // Tick the solve / record / stream loop at the suit's native rate.  A
     // precise timer is requested so 240 Hz (Link) is honoured as closely as the
@@ -11124,6 +11422,24 @@ void MainWindow::onRenderTick()
         projectHingeLimit(q, SEG_RUpperArm, SEG_RForearm,  *m_skel, elbowSwing, M_PI);
         projectHingeLimit(q, SEG_LUpperArm, SEG_LForearm,  *m_skel, elbowSwing, M_PI);
     }
+
+    // --- Manual per-joint orientation correction (Settings window) -------
+    // Final operator override, applied AFTER the anatomical/joint-limit pass
+    // so a deliberate fix isn't clamped back.  Composed in the segment's own
+    // body frame (local post-multiply) for every segment; because qOut below
+    // is derived from this same q[], the correction reaches the viewport, the
+    // UDP stream and the recording identically.
+    if (!m_jointOffsets.isZero()) {
+        for (int i = 0; i < kXsensSegmentCount; ++i) {
+            const QVector3D d = m_jointOffsets.deg[i];
+            if (d.x() == 0.0f && d.y() == 0.0f && d.z() == 0.0f) continue;
+            const Quat off = euler_to_quat(d.x() * M_PI / 180.0,
+                                           d.y() * M_PI / 180.0,
+                                           d.z() * M_PI / 180.0, "XYZ");
+            q[i] = quat_mult(q[i], off).normalized();
+        }
+    }
+
     m_viewport->updatePose(q, QVector3D(0.0f, 0.0f, 0.0f));
     const auto& qOut = m_viewport->filteredOrient();
 
@@ -12037,6 +12353,18 @@ void MainWindow::onOpenRecordWizard()
     startRecording(w.result());
 }
 
+void MainWindow::onOpenJointSettings()
+{
+    if (!m_jointDlg) {
+        m_jointDlg = new JointOffsetsDialog(&m_jointOffsets, this);
+        (void)m_jointDlg->winId();
+        applyDarkTitleBar(m_jointDlg);
+    }
+    m_jointDlg->show();
+    m_jointDlg->raise();
+    m_jointDlg->activateWindow();
+}
+
 void MainWindow::startRecording(const RecordSettings& cfg)
 {
     if (m_finishing || m_takePending) return;   // don't clobber an unsaved take
@@ -12514,6 +12842,19 @@ const char* kStyleSheet = R"(
   QScrollBar:vertical { background: #0E0E0E; width: 10px; }
   QScrollBar::handle:vertical { background: #2A2A2A; border-radius: 5px; }
   QScrollBar::handle:vertical:hover { background: #FF7A1A; }
+  QScrollBar:horizontal { background: #0E0E0E; height: 10px; }
+  QScrollBar::handle:horizontal { background: #2A2A2A; border-radius: 5px; }
+  QScrollBar::handle:horizontal:hover { background: #FF7A1A; }
+  QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; }
+
+  /* Joint-correction sliders (Settings window). */
+  QSlider::groove:horizontal { height: 4px; background: #2A2A2A; border-radius: 2px; }
+  QSlider::sub-page:horizontal { background: #3A2A1A; border-radius: 2px; }
+  QSlider::add-page:horizontal { background: #2A2A2A; border-radius: 2px; }
+  QSlider::handle:horizontal { width: 14px; height: 14px; margin: -6px 0;
+                               border-radius: 7px; background: #FF7A1A;
+                               border: 1px solid #FF9340; }
+  QSlider::handle:horizontal:hover { background: #FF9340; }
 
   /* ---- Language selector on the welcome page ------------------------- */
   QComboBox#langCombo {

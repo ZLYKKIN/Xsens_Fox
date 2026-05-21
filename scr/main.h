@@ -1525,6 +1525,54 @@ private:
 };
 
 // ============================================================================
+//  Joint-orientation correction — manual per-joint X/Y/Z offsets
+//
+//  After calibration an operator may spot a single joint oriented wrong (e.g.
+//  a leg bending the wrong way).  These offsets are a final manual correction
+//  composed onto every segment in MainWindow::onRenderTick, AFTER the
+//  anatomical solver/joint-limit pass and right before updatePose().  Because
+//  the viewport, the UDP stream and the recording are all fed from the same
+//  post-correction qOut, one offset reaches all three identically.  Persisted
+//  as JSON next to the executable so a saved preset becomes the default on the
+//  next launch; if no preset exists the default is the current state (zeros).
+// ============================================================================
+
+struct JointOffsets {
+    std::array<QVector3D, kXsensSegmentCount> deg{};   // X/Y/Z degrees, default 0
+
+    bool isZero() const {
+        for (const auto& v : deg)
+            if (v.x() != 0.0f || v.y() != 0.0f || v.z() != 0.0f) return false;
+        return true;
+    }
+    void clear() { for (auto& v : deg) v = QVector3D(0, 0, 0); }
+
+    static QString filePath();          // <program dir>/joint_offsets.json
+    bool load(const QString& path);     // false on missing / malformed file
+    bool save(const QString& path) const;
+};
+
+// Non-modal window of X/Y/Z sliders (+ numeric entry) for every segment.  Edits
+// the JointOffsets it is given in place; the owner reads them every render tick
+// so the skeleton updates live.  Does NOT block the viewport (Qt::Window, show()).
+class JointOffsetsDialog : public QDialog {
+    Q_OBJECT
+public:
+    explicit JointOffsetsDialog(JointOffsets* offsets, QWidget* parent = nullptr);
+
+private:
+    void buildUi();
+    void syncControlsFromModel();       // refresh sliders/spins after load/reset
+
+    struct AxisCtl { class QSlider* slider = nullptr; class QDoubleSpinBox* spin = nullptr; };
+
+    JointOffsets* m_offsets = nullptr;
+    std::array<std::array<AxisCtl, 3>, kXsensSegmentCount> m_ctl{};
+    bool         m_syncing = false;     // guard against slider<->spin feedback
+    class QLabel* m_status = nullptr;
+};
+
+// ============================================================================
 //  MainWindow — wires everything together + black/orange theme.
 // ============================================================================
 
@@ -1550,6 +1598,7 @@ private slots:
     void onOpenLiveWizard();
     void onOpenRecordWizard();
     void onRecordStop();
+    void onOpenJointSettings();
 
 private:
     NewSessionWizard::Result m_setup;
@@ -1591,6 +1640,10 @@ private:
 
     // Live streaming.
     LiveStreamSender*          m_streamer = nullptr;
+
+    // Manual per-joint orientation correction + its non-modal editor window.
+    JointOffsets               m_jointOffsets;
+    JointOffsetsDialog*        m_jointDlg = nullptr;
 
     void logTest(const std::string& msg) const;
     void startRecording(const RecordSettings& cfg);
