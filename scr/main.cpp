@@ -10563,7 +10563,8 @@ JointOffsetsDialog::JointOffsetsDialog(JointOffsets* offsets, QWidget* parent)
     setWindowFlag(Qt::Window, true);
     setModal(false);                       // never block the live viewport
     setWindowTitle(Lang::t("js_title"));
-    resize(580, 780);
+    resize(600, 800);
+    setMinimumSize(560, 480);
     buildUi();
     syncControlsFromModel();
 }
@@ -10590,32 +10591,42 @@ void JointOffsetsDialog::buildUi()
     const char* axisKey[3] = { "js_axis_x", "js_axis_y", "js_axis_z" };
 
     auto buildRegion = [&](const char* titleKey, const std::vector<int>& segs) {
-        auto* box  = new QGroupBox(Lang::t(titleKey), content);
-        auto* grid = new QGridLayout(box);
-        grid->setContentsMargins(10, 6, 10, 8);
-        grid->setHorizontalSpacing(8);
-        grid->setVerticalSpacing(5);
-        int row = 0;
+        auto* box     = new QGroupBox(Lang::t(titleKey), content);
+        auto* boxLay  = new QVBoxLayout(box);
+        boxLay->setContentsMargins(10, 8, 10, 10);
+        boxLay->setSpacing(8);
         for (int seg : segs) {
-            auto* segLbl = new QLabel(Lang::t(jointDispKey(seg)), box);
-            segLbl->setStyleSheet("font-weight:700; color:#FFB066; margin-top:4px;");
-            grid->addWidget(segLbl, row, 0, 1, 3);
-            ++row;
-            for (int a = 0; a < 3; ++a) {
-                auto* axLbl = new QLabel(Lang::t(axisKey[a]), box);
-                axLbl->setObjectName("subtle");
-                axLbl->setMinimumWidth(22);
+            // Each joint becomes a self-contained card so its X/Y/Z rows never
+            // collide with the next joint's header (the old flat grid relied on
+            // a CSS margin that the layout did not reserve space for).
+            auto* card = new QFrame(box);
+            card->setObjectName("jointCard");
+            auto* grid = new QGridLayout(card);
+            grid->setContentsMargins(12, 9, 12, 10);
+            grid->setHorizontalSpacing(10);
+            grid->setVerticalSpacing(6);
 
-                auto* sld = new QSlider(Qt::Horizontal, box);
+            auto* segLbl = new QLabel(Lang::t(jointDispKey(seg)), card);
+            segLbl->setObjectName("jointName");
+            grid->addWidget(segLbl, 0, 0, 1, 3);
+            int row = 1;
+            for (int a = 0; a < 3; ++a) {
+                auto* axLbl = new QLabel(Lang::t(axisKey[a]), card);
+                axLbl->setObjectName("subtle");
+                axLbl->setFixedWidth(20);
+                axLbl->setAlignment(Qt::AlignVCenter);
+
+                auto* sld = new QSlider(Qt::Horizontal, card);
                 sld->setRange(-180, 180);
                 sld->setPageStep(5);
 
-                auto* spin = new QDoubleSpinBox(box);
+                auto* spin = new QDoubleSpinBox(card);
                 spin->setRange(-180.0, 180.0);
                 spin->setSingleStep(0.5);
                 spin->setDecimals(1);
                 spin->setSuffix(QString::fromUtf8("°"));
-                spin->setMinimumWidth(86);
+                spin->setMinimumWidth(96);
+                spin->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
 
                 m_ctl[seg][a] = { sld, spin };
 
@@ -10648,8 +10659,9 @@ void JointOffsetsDialog::buildUi()
                 grid->addWidget(spin,  row, 2);
                 ++row;
             }
+            grid->setColumnStretch(1, 1);
+            boxLay->addWidget(card);
         }
-        grid->setColumnStretch(1, 1);
         cl->addWidget(box);
     };
 
@@ -10663,8 +10675,11 @@ void JointOffsetsDialog::buildUi()
     outer->addWidget(scroll, 1);
 
     auto* btnRow = new QHBoxLayout();
+    btnRow->setSpacing(8);
     m_status = new QLabel(QString(), this);
     m_status->setObjectName("subtle");
+    m_status->setWordWrap(false);
+    m_status->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     btnRow->addWidget(m_status, 1);
 
     auto* btnReset = new QPushButton(Lang::t("js_reset"), this);
@@ -12846,6 +12861,11 @@ const char* kStyleSheet = R"(
   QScrollBar::handle:horizontal { background: #2A2A2A; border-radius: 5px; }
   QScrollBar::handle:horizontal:hover { background: #FF7A1A; }
   QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; }
+
+  /* Joint-correction window (Settings): per-joint cards + header. */
+  QFrame#jointCard  { background: #141414; border: 1px solid #242424;
+                      border-radius: 8px; }
+  QLabel#jointName  { color: #FFB066; font-weight: 700; }
 
   /* Joint-correction sliders (Settings window). */
   QSlider::groove:horizontal { height: 4px; background: #2A2A2A; border-radius: 2px; }
