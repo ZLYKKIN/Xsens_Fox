@@ -330,6 +330,11 @@ private:
 
     // --- Per-instance state that used to live as function-local statics ---
     QVector3D m_offsetLast   {0, 0, 0};
+    // Pelvis world offset as of the last foot commit.  Carries the accumulated
+    // travel across the swing→plant transition: when no single foot is locked,
+    // re-anchoring off the LP-smoothed m_offsetLast (which lags / is pulled
+    // toward origin) discarded each step's forward progress ("walks in place").
+    QVector3D m_offsetCommitted {0, 0, 0};
     bool      m_offsetReady  = false;
 
     // =====================================================================

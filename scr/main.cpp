@@ -1126,6 +1126,7 @@ static QVector3D gravityInBodyFrame(const Quat& defAng)
         m_contact = {};
 
         m_offsetLast = QVector3D(0, 0, 0);
+        m_offsetCommitted = QVector3D(0, 0, 0);
         m_offsetReady = false;
 
         // v3 state
@@ -1332,13 +1333,15 @@ QVector3D LocomotionSolver::update(const Quat& qR,
             m_fkxyCount = 0;
         }
         if (!yawFreeze && m_yawFrozenPrev && m_initialised) {
+            // Re-base off the committed (travel-correct) offset so a turn
+            // doesn't reset accumulated displacement back toward origin.
             if (m_committedR) {
-                m_anchorR.setX(fkR.x() + m_offsetLast.x());
-                m_anchorR.setY(fkR.y() + m_offsetLast.y());
+                m_anchorR.setX(fkR.x() + m_offsetCommitted.x());
+                m_anchorR.setY(fkR.y() + m_offsetCommitted.y());
             }
             if (m_committedL) {
-                m_anchorL.setX(fkL.x() + m_offsetLast.x());
-                m_anchorL.setY(fkL.y() + m_offsetLast.y());
+                m_anchorL.setX(fkL.x() + m_offsetCommitted.x());
+                m_anchorL.setY(fkL.y() + m_offsetCommitted.y());
             }
             m_fkxyHead  = 0;
             m_fkxyCount = 0;
@@ -1577,9 +1580,14 @@ QVector3D LocomotionSolver::update(const Quat& qR,
                 return QVector3D(m_anchorL.x() - fkL.x(),
                                  m_anchorL.y() - fkL.y(),
                                  m_offsetLast.z());
-            // Обе или ни одной — используем отфильтрованный offsetLast
-            // (это надёжнее на момент когда обе ноги в воздухе).
-            return m_offsetLast;
+            // Обе или ни одной committed: при пере-anchor'е (новый plant)
+            // m_offsetLast отстаёт и подтянут к origin → шаг "теряется".
+            // Берём XY из m_offsetCommitted (offset на момент прошлого commit,
+            // несёт накопленный travel), Z — из m_offsetLast (его ведёт
+            // отдельная zSnap/drift-kill логика ниже).
+            return QVector3D(m_offsetCommitted.x(),
+                             m_offsetCommitted.y(),
+                             m_offsetLast.z());
         };
 
         // FIX (heel/toe contact discrimination): при смене contact-point
@@ -1626,6 +1634,12 @@ QVector3D LocomotionSolver::update(const Quat& qR,
                 // FIX: оценка таза от ДРУГОЙ committed-ноги (мгновенная),
                 // а не от LP-сглаженного m_offsetLast.
                 const QVector3D pelvis = bestPelvisEstimate();
+                // Carry the accumulated travel forward: snapshot the (now
+                // travel-correct, contralateral-anchored) pelvis offset so the
+                // next swing phase re-anchors off real progress, not the
+                // origin-biased m_offsetLast.  Fixes "walks in place".
+                m_offsetCommitted = QVector3D(pelvis.x(), pelvis.y(),
+                                              m_offsetCommitted.z());
                 QVector3D world(fk.x() + pelvis.x(),
                                 fk.y() + pelvis.y(),
                                 fk.z() + pelvis.z());
@@ -9004,6 +9018,40 @@ void LiveStreamSender::setTposeBaseline(
     m_impl->resetWireContinuity();
 }
 
+// ---------------------------------------------------------------------------
+//  Wire frame transforms — the SINGLE tunable point for live Blender/UE diff.
+// ---------------------------------------------------------------------------
+// Orientation: the wire carries each segment's *absolute calibrated world
+// orientation* — exactly the `qOut` the viewport renders (identity at the
+// calibration pose).  Both bundled plugins do their OWN neutral referencing
+// (Blender: local = parent_global^-1 * child_global + per-bone remap in
+// source_animator.calculate_rotation; UE: FQuat(-qx,qy,-qz,qw) flip), which is
+// why real MVN streams the absolute global pose and we must too.  The previous
+// `qOut * baselineBodyQ^-1` pre-subtracted a *reconstructed* T-pose baseline
+// (tposeReference*calibReference^-1) that does NOT match the runtime
+// `raw*calibReference^-1` pipeline, injecting a ~165° per-segment rotation that
+// laid the skeleton flat (logs/fox_mocap.log: pelvis |wire|=165° while internal
+// qOut≈23°).  If a single residual global roll appears live, a uniform
+// conjugation q -> G*q*G^-1 belongs HERE and nowhere else.
+static inline Quat mvnWireOrient(const Quat& worldSeg, LiveTarget /*target*/)
+{
+    return worldSeg;
+}
+
+// Pelvis world position (metres, our NWU = X-forward, Y-left, Z-up, RH) -> wire.
+// UE consumes Z-up RH directly (LiveLinkMvnSource.h: FVector(x,-y,z)*100), so we
+// emit native NWU for it.  The Blender add-on remaps the *pose* vector
+// (x,y,z)->(y,z,x) (pose.py:_convert_vectors) which would route our forward
+// (+X) onto Blender's vertical (Z); pre-remap NWU(X,Y,Z)->wire(Z,X,Y) so Blender
+// recovers (X_fwd, Y_left, Z_up) and walking reads horizontally.  (Sign/order to
+// be confirmed against a live Blender + UE capture — see PR notes.)
+static inline QVector3D mvnWirePelvisPos(const QVector3D& nwu, LiveTarget target)
+{
+    if (target == LiveTarget::BlenderMVN)
+        return QVector3D(nwu.z(), nwu.x(), nwu.y());
+    return nwu;  // UnrealLiveLink: native Z-up RH
+}
+
 void LiveStreamSender::pushFrame(quint32 sample,
     const std::array<Quat, kXsensSegmentCount>& segQuat,
     const QVector3D& pelvisPos)
@@ -9036,18 +9084,18 @@ void LiveStreamSender::pushFrame(quint32 sample,
                << "\n========== [STREAM SNAPSHOT] body-only  sample=" << sample
                << "  -> " << m_cfg.host.toStdString() << ":" << m_cfg.port
                << "  ==========\n"
-               << "  wire=MVN MXTP02 (Z-up RH); q = segWorld * Tpose_baseline^-1 "
-                  "(identity at T-pose); pos in metres\n";
+               << "  wire=MVN MXTP02; q = absolute calibrated world pose (= qOut); "
+                  "pelvis pos absolute, per-target remap; metres\n";
     }
     QByteArray body;
     for (int i = 0; i < kXsensSegmentCount; ++i) {
         const QVector3D p = (i == SEG_Pelvis)
-                ? (pelvisPos - m_impl->baselinePelvisPos)
-                : QVector3D(0, 0, 0);  // MVN wire = NWU (Z-up RH); no conversion.
-        Quat qDelta = quat_mult(segQuat[i], m_impl->baselineBodyQ[i].inv()).normalized();
-        qDelta = hemisphereContinuous(qDelta, m_impl->prevWireBodyQ[i]);
-        m_impl->prevWireBodyQ[i] = qDelta;
-        const Quat q = qDelta;  // MVN wire = NWU (Z-up RH); no conversion.
+                ? mvnWirePelvisPos(pelvisPos, m_cfg.target)
+                : QVector3D(0, 0, 0);
+        Quat qWire = mvnWireOrient(segQuat[i], m_cfg.target).normalized();
+        qWire = hemisphereContinuous(qWire, m_impl->prevWireBodyQ[i]);
+        m_impl->prevWireBodyQ[i] = qWire;
+        const Quat q = qWire;
         appendPoseSegment(body, i + 1, p.x(), p.y(), p.z(),
                           float(q.w), float(q.x), float(q.y), float(q.z));
         if (wireDue) {
@@ -9156,17 +9204,17 @@ void LiveStreamSender::pushFrameWithGloves(quint32 sample,
                << "\n========== [STREAM SNAPSHOT] body+gloves  sample=" << sample
                << "  -> " << m_cfg.host.toStdString() << ":" << m_cfg.port
                << "  (body=" << int(bodyCount) << " fingers=" << int(fingerCount) << ") ==========\n"
-               << "  wire=MVN MXTP02 (Z-up RH); q = world * baseline^-1 (identity at T-pose); pos in metres\n";
+               << "  wire=MVN MXTP02; q = absolute calibrated world pose (= qOut); pelvis pos absolute, per-target remap; metres\n";
     }
     QByteArray body;
     for (int i = 0; i < kXsensSegmentCount; ++i) {
         const QVector3D p = (i == SEG_Pelvis)
-                ? (pelvisPos - m_impl->baselinePelvisPos)
-                : QVector3D(0, 0, 0);  // MVN wire = NWU (Z-up RH); no conversion.
-        Quat qDelta = quat_mult(segQuat[i], m_impl->baselineBodyQ[i].inv()).normalized();
-        qDelta = hemisphereContinuous(qDelta, m_impl->prevWireBodyQ[i]);
-        m_impl->prevWireBodyQ[i] = qDelta;
-        const Quat q = qDelta;  // MVN wire = NWU (Z-up RH); no conversion.
+                ? mvnWirePelvisPos(pelvisPos, m_cfg.target)
+                : QVector3D(0, 0, 0);
+        Quat qWire = mvnWireOrient(segQuat[i], m_cfg.target).normalized();
+        qWire = hemisphereContinuous(qWire, m_impl->prevWireBodyQ[i]);
+        m_impl->prevWireBodyQ[i] = qWire;
+        const Quat q = qWire;
         appendPoseSegment(body, i + 1, p.x(), p.y(), p.z(),
                           float(q.w), float(q.x), float(q.y), float(q.z));
         if (wireDue) {
@@ -9193,10 +9241,10 @@ void LiveStreamSender::pushFrameWithGloves(quint32 sample,
                           std::array<Quat, kFingerSegmentsHand>& prevArr) {
         const int mIdx = kXsensSlotToManus[slot];
         if (mIdx < 0) {
-            Quat qDelta = quat_mult(segQuat[handSeg], m_impl->baselineBodyQ[handSeg].inv()).normalized();
-            qDelta = hemisphereContinuous(qDelta, prevArr[slot]);
-            prevArr[slot] = qDelta;
-            const Quat q = qDelta;  // MVN wire = NWU (Z-up RH); no conversion.
+            Quat qWire = mvnWireOrient(segQuat[handSeg], m_cfg.target).normalized();
+            qWire = hemisphereContinuous(qWire, prevArr[slot]);
+            prevArr[slot] = qWire;
+            const Quat q = qWire;  // carpus follows the (now absolute) hand pose
             appendPoseSegment(body, segmentIdBase + slot, 0.f, 0.f, 0.f,
                               float(q.w), float(q.x), float(q.y), float(q.z));
             if (wireDue)
@@ -9205,11 +9253,15 @@ void LiveStreamSender::pushFrameWithGloves(quint32 sample,
                        << ") pos=(0,0,0) q=(" << q.w << "," << q.x << ","
                        << q.y << "," << q.z << ")  [follows hand]\n";
         } else {
+            (void)baseArr;  // fingers now stream absolute (see body change)
             const QVector3D p = pArr[mIdx];  // MVN wire = NWU (Z-up RH); no conversion.
-            Quat qDelta = quat_mult(qArr[mIdx], baseArr[mIdx].inv()).normalized();
-            qDelta = hemisphereContinuous(qDelta, prevArr[slot]);
-            prevArr[slot] = qDelta;
-            const Quat q = qDelta;  // MVN wire = NWU (Z-up RH); no conversion.
+            // Absolute world finger orientation (qArr is already wrist-composed
+            // world pose).  Matches the body/carpus going absolute so Blender's
+            // parent^-1*child stays in one frame across the hand→finger joint.
+            Quat qWire = mvnWireOrient(qArr[mIdx], m_cfg.target).normalized();
+            qWire = hemisphereContinuous(qWire, prevArr[slot]);
+            prevArr[slot] = qWire;
+            const Quat q = qWire;
             appendPoseSegment(body, segmentIdBase + slot, p.x(), p.y(), p.z(),
                               float(q.w), float(q.x), float(q.y), float(q.z));
             if (wireDue)
@@ -10504,23 +10556,12 @@ MainWindow::MainWindow(MocapReceiver* rx,
             g_fingerBaseline.valid.store(true);
         }
 
-        std::array<Quat, kXsensSegmentCount> baselineCand{};
-        for (int i = 0; i < kXsensSegmentCount; ++i) {
-            baselineCand[i] = quat_mult(m_setup.tposeReference[i],
-                                        m_setup.calibReference[i].inv()).normalized();
-        }
-        auto ss22 = [](double x) { return x * x * (3.0 - 2.0 * x); };
-        baselineCand[SEG_L5]   = slerp_quat(baselineCand[SEG_Pelvis],
-                                            baselineCand[SEG_T8],   ss22(0.22));
-        baselineCand[SEG_L3]   = slerp_quat(baselineCand[SEG_Pelvis],
-                                            baselineCand[SEG_T8],   ss22(0.50));
-        baselineCand[SEG_T12]  = slerp_quat(baselineCand[SEG_Pelvis],
-                                            baselineCand[SEG_T8],   ss22(0.78));
-        baselineCand[SEG_Neck] = slerp_quat(baselineCand[SEG_T8],
-                                            baselineCand[SEG_Head], 0.50);
-        baselineCand[SEG_RToe] = baselineCand[SEG_RFoot];
-        baselineCand[SEG_LToe] = baselineCand[SEG_LFoot];
-        m_streamer->setTposeBaseline(baselineCand, m_setup.tposePelvisPos);
+        // NOTE: the wire no longer pre-subtracts a T-pose baseline.  We stream
+        // the absolute calibrated world pose (qOut) and let each plugin do its
+        // own neutral referencing — see mvnWireOrient().  The old
+        // setTposeBaseline(tposeReference*calibReference^-1) reconstruction did
+        // not match the runtime raw*calibReference^-1 pipeline and flipped the
+        // skeleton ~165°, so it has been removed.
     }
 
     if (m_test) {
@@ -11180,9 +11221,18 @@ void MainWindow::onRenderTick()
             static QVector3D s_lastStreamPelvis(0, 0, 0);
             static bool s_havePrevPelvis = false;
             static int s_streamTick = 0;
+            // Self-check (Bug 2 travel): cumulative path length + net horizontal
+            // displacement from session start.  "Walks in place" reads as
+            // cumHoriz growing while netHoriz stays tiny; real traversal grows
+            // both.  Cross-reference [loco commit] density.
+            static double s_cumHoriz = 0.0;
+            static QVector3D s_startPelvis(0, 0, 0);
+            static bool s_haveStart = false;
+            if (!s_haveStart) { s_startPelvis = pelvisM; s_haveStart = true; }
             if (s_havePrevPelvis) {
                 const QVector3D d = pelvisM - s_lastStreamPelvis;
                 const float dxy = std::sqrt(d.x()*d.x() + d.y()*d.y());
+                if (dxy < 0.5f) s_cumHoriz += dxy;   // cap rejects teleport spikes
                 if (dxy > 0.03f || std::abs(d.z()) > 0.03f) {
                     std::cout << "[stream Δpelvis] dxy=" << std::fixed << std::setprecision(3)
                               << dxy << "m dz=" << d.z() << "m pelvisM=("
@@ -11206,6 +11256,11 @@ void MainWindow::onRenderTick()
                           << qStream[SEG_LHand].x << "," << qStream[SEG_LHand].y << ","
                           << qStream[SEG_LHand].z << ")"
                           << " sample=" << f.sampleCounter << "\n";
+                const QVector3D dn = pelvisM - s_startPelvis;
+                const double netHoriz = std::sqrt(dn.x()*dn.x() + dn.y()*dn.y());
+                std::cout << "[stream travel] cumHoriz=" << std::fixed
+                          << std::setprecision(2) << s_cumHoriz << "m netHoriz="
+                          << netHoriz << "m (walks-in-place if cum>>net)\n";
             }
         }
     }
