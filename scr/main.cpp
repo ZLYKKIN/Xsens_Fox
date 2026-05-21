@@ -2326,6 +2326,12 @@ struct MocapReceiver::Impl {
     std::array<QVector3D, kXsensSegmentCount> dbgGyrUnbias{}; // deg/s, post gyr-bias
     std::array<QVector3D, kXsensSegmentCount> dbgMagSoft{};   // post soft-iron/norm
     std::array<Quat,      kXsensSegmentCount> dbgFusedQuat{}; // fusion output (world)
+    // Per-segment dynamic AHRS rejection (the knob that widens accel/mag
+    // trust during fast motion — the prime suspect when a limb's orientation
+    // flips mid-jump because gravity is momentarily corrupted by linear accel).
+    std::array<float,     kXsensSegmentCount> dbgDynAccRej{}; // deg, accel rejection this frame
+    std::array<float,     kXsensSegmentCount> dbgDynMagRej{}; // deg, mag rejection this frame
+    std::array<float,     kXsensSegmentCount> dbgAccErr{};    // ||acc|-1g| gravity-estimate error
     std::array<quint8,    kXsensSegmentCount> dbgChainFlags{};// bit0 haveMag bit1 SDI bit2 absAccGyr
 
     std::array<std::array<double, 9>, kXsensSegmentCount> magSoftMat{};
@@ -4005,6 +4011,11 @@ void MocapReceiver::run()
                     s.magneticRejection     = dynMagRej;
                     FusionAhrsSetSettings(&ahrs, &s);
                 }
+                if (I.test) {
+                    I.dbgDynAccRej[targetSeg] = dynAccRej;
+                    I.dbgDynMagRej[targetSeg] = dynMagRej;
+                    I.dbgAccErr[targetSeg]    = aErr;
+                }
 
                 if (useMag) {
                     const FusionVector m = {{ float(mag.x()),
@@ -4241,7 +4252,10 @@ void MocapReceiver::run()
                        << " gyrFused=(" << std::setw(9) << gf.x() << "," << std::setw(9) << gf.y()
                                      << "," << std::setw(9) << gf.z() << ")"
                        << " magB=("  << std::setw(8) << mb.x() << "," << std::setw(8) << mb.y()
-                                     << "," << std::setw(8) << mb.z() << ")\n";
+                                     << "," << std::setw(8) << mb.z() << ")"
+                       << " accErr=" << std::setw(7) << I.dbgAccErr[i]
+                       << " rej[acc=" << std::setw(5) << I.dbgDynAccRej[i]
+                       << " mag="     << std::setw(5) << I.dbgDynMagRej[i] << "]deg\n";
                 }
                 // -test: full per-axis transform chain from arrival to fusion
                 // input for every sensor that produced a sample this snapshot.
