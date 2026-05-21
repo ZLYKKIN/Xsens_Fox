@@ -32,4 +32,18 @@ void appendFloatBE(QByteArray& pkt, float v);
 // Append a big-endian 32-bit signed integer.
 void appendInt32BE(QByteArray& pkt, qint32 v);
 
+// Append one MXTP02 pose segment — the ">I3f4f" 32-byte record the receivers
+// parse (Plugins/.../QuaternionDatagram.cpp, receiver.py): segId (1-based, i32
+// BE) + position XYZ (3×f32 BE, metres, Z-up RH) + quaternion WXYZ (4×f32 BE,
+// scalar first).  Floats go through appendFloatBE, so NaN/Inf is coerced to 0.
+void appendPoseSegment(QByteArray& pkt, qint32 segId,
+                       float px, float py, float pz,
+                       float qw, float qx, float qy, float qz);
+
+// Append one MXTP13 scale segment — "[nameLen i32 BE][name bytes][x y z f32 BE]"
+// (Plugins/.../ScaleDatagram.cpp, receiver.py:decode_character_scale_pose_message).
+// The receivers key the rest skeleton by `name`, so it must match segment_maps.
+void appendScaleSegment(QByteArray& pkt, const char* name,
+                        float x, float y, float z);
+
 }  // namespace fox

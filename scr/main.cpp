@@ -4002,10 +4002,15 @@ void MocapReceiver::run()
                 // --- Merge latest glove snapshot (Manus ergonomics stream)
                 // into staging.  Positions are in HAND-LOCAL frame here —
                 // the render tick rotates them by the wrist's world quat.
-                const bool haveL = g_ergo.haveLeft.load();
-                const bool haveR = g_ergo.haveRight.load();
-                if (haveL || haveR) {
+                // Read the connection flags AND the joint arrays under the same
+                // g_ergo lock.  Loading the atomics first and locking second
+                // left a window in which the Manus callback thread could flip a
+                // hand's "have" state between the load and the lock, pairing a
+                // stale flag with freshly-(re)written arrays.
+                {
                     QMutexLocker lk2(&g_ergo.lock);
+                    const bool haveL = g_ergo.haveLeft.load();
+                    const bool haveR = g_ergo.haveRight.load();
                     if (haveL) {
                         staging.leftGloveQ  = g_ergo.leftQ;
                         staging.leftGloveP  = g_ergo.leftP;
@@ -4014,7 +4019,8 @@ void MocapReceiver::run()
                         staging.rightGloveQ = g_ergo.rightQ;
                         staging.rightGloveP = g_ergo.rightP;
                     }
-                    staging.hasGloves = (haveL || haveR);
+                    if (haveL || haveR)
+                        staging.hasGloves = true;
                 }
 
                 I.frame = staging;
@@ -8895,28 +8901,15 @@ bool LiveStreamSender::start(const LiveSettings& cfg, QString* err)
         QByteArray payload;
         appendInt32BE(payload, segCount);
         for (int i = 0; i < kXsensSegmentCount; ++i) {
-            const char* n = kBodyMvn[i];
-            const qint32 L = qint32(std::strlen(n));
-            appendInt32BE(payload, L);
-            payload.append(n, L);
             // T-pose origin position in METERS, MVN wire frame = Z-Up,
             // right-handed = our NWU (X-fwd, Y-left, Z-up).  Plugins use these
             // for rig scaling (UE ScaleDatagram / Blender create_target_skeleton).
             const QVector3D o = cfg.tposeOriginM[i];
-            appendFloatBE(payload, o.x());
-            appendFloatBE(payload, o.y());
-            appendFloatBE(payload, o.z());
+            appendScaleSegment(payload, kBodyMvn[i], o.x(), o.y(), o.z());
         }
         if (cfg.useGloves) {
-            for (int i = 0; i < 40; ++i) {
-                const char* n = kFingerMvn[i];
-                const qint32 L = qint32(std::strlen(n));
-                appendInt32BE(payload, L);
-                payload.append(n, L);
-                appendFloatBE(payload, 0.0f);
-                appendFloatBE(payload, 0.0f);
-                appendFloatBE(payload, 0.0f);
-            }
+            for (int i = 0; i < 40; ++i)
+                appendScaleSegment(payload, kFingerMvn[i], 0.0f, 0.0f, 0.0f);
         }
         // MXTP13 datagram counter MUST be 0 (not 0x80).  Real MVN sends the
         // scale message as a multi-packet sequence whose first (segments)
@@ -8997,22 +8990,15 @@ void LiveStreamSender::pushFrame(quint32 sample,
     }
     QByteArray body;
     for (int i = 0; i < kXsensSegmentCount; ++i) {
-        appendInt32BE(body, i + 1);
-        const QVector3D pRaw = (i == SEG_Pelvis)
+        const QVector3D p = (i == SEG_Pelvis)
                 ? (pelvisPos - m_impl->baselinePelvisPos)
-                : QVector3D(0, 0, 0);
-        const QVector3D p = pRaw;  // MVN wire = NWU (Z-up RH); no conversion.
-        appendFloatBE(body, p.x());
-        appendFloatBE(body, p.y());
-        appendFloatBE(body, p.z());
+                : QVector3D(0, 0, 0);  // MVN wire = NWU (Z-up RH); no conversion.
         Quat qDelta = quat_mult(segQuat[i], m_impl->baselineBodyQ[i].inv()).normalized();
         qDelta = hemisphereContinuous(qDelta, m_impl->prevWireBodyQ[i]);
         m_impl->prevWireBodyQ[i] = qDelta;
         const Quat q = qDelta;  // MVN wire = NWU (Z-up RH); no conversion.
-        appendFloatBE(body, float(q.w));
-        appendFloatBE(body, float(q.x));
-        appendFloatBE(body, float(q.y));
-        appendFloatBE(body, float(q.z));
+        appendPoseSegment(body, i + 1, p.x(), p.y(), p.z(),
+                          float(q.w), float(q.x), float(q.y), float(q.z));
         if (wireDue) {
             wireSS << "  wire[" << std::setw(2) << (i + 1) << "] "
                    << std::left << std::setw(14) << kSegmentNames[i] << std::right
@@ -9123,22 +9109,15 @@ void LiveStreamSender::pushFrameWithGloves(quint32 sample,
     }
     QByteArray body;
     for (int i = 0; i < kXsensSegmentCount; ++i) {
-        appendInt32BE(body, i + 1);
-        const QVector3D pRaw = (i == SEG_Pelvis)
+        const QVector3D p = (i == SEG_Pelvis)
                 ? (pelvisPos - m_impl->baselinePelvisPos)
-                : QVector3D(0, 0, 0);
-        const QVector3D p = pRaw;  // MVN wire = NWU (Z-up RH); no conversion.
-        appendFloatBE(body, p.x());
-        appendFloatBE(body, p.y());
-        appendFloatBE(body, p.z());
+                : QVector3D(0, 0, 0);  // MVN wire = NWU (Z-up RH); no conversion.
         Quat qDelta = quat_mult(segQuat[i], m_impl->baselineBodyQ[i].inv()).normalized();
         qDelta = hemisphereContinuous(qDelta, m_impl->prevWireBodyQ[i]);
         m_impl->prevWireBodyQ[i] = qDelta;
         const Quat q = qDelta;  // MVN wire = NWU (Z-up RH); no conversion.
-        appendFloatBE(body, float(q.w));
-        appendFloatBE(body, float(q.x));
-        appendFloatBE(body, float(q.y));
-        appendFloatBE(body, float(q.z));
+        appendPoseSegment(body, i + 1, p.x(), p.y(), p.z(),
+                          float(q.w), float(q.x), float(q.y), float(q.z));
         if (wireDue) {
             wireSS << "  wire[" << std::setw(2) << (i + 1) << "] "
                    << std::left << std::setw(14) << kSegmentNames[i] << std::right
@@ -9161,18 +9140,14 @@ void LiveStreamSender::pushFrameWithGloves(quint32 sample,
                           const std::array<QVector3D, kFingerSegmentsHand>& pArr,
                           const std::array<Quat, kFingerSegmentsHand>& baseArr,
                           std::array<Quat, kFingerSegmentsHand>& prevArr) {
-        appendInt32BE(body, segmentIdBase + slot);
         const int mIdx = kXsensSlotToManus[slot];
         if (mIdx < 0) {
-            appendFloatBE(body, 0.f); appendFloatBE(body, 0.f); appendFloatBE(body, 0.f);
             Quat qDelta = quat_mult(segQuat[handSeg], m_impl->baselineBodyQ[handSeg].inv()).normalized();
             qDelta = hemisphereContinuous(qDelta, prevArr[slot]);
             prevArr[slot] = qDelta;
             const Quat q = qDelta;  // MVN wire = NWU (Z-up RH); no conversion.
-            appendFloatBE(body, float(q.w));
-            appendFloatBE(body, float(q.x));
-            appendFloatBE(body, float(q.y));
-            appendFloatBE(body, float(q.z));
+            appendPoseSegment(body, segmentIdBase + slot, 0.f, 0.f, 0.f,
+                              float(q.w), float(q.x), float(q.y), float(q.z));
             if (wireDue)
                 wireSS << "  wireF[" << std::setw(2) << (segmentIdBase + slot) << "] "
                        << (segmentIdBase >= 44 ? "R" : "L") << "carpus(slot " << slot
@@ -9180,15 +9155,12 @@ void LiveStreamSender::pushFrameWithGloves(quint32 sample,
                        << q.y << "," << q.z << ")  [follows hand]\n";
         } else {
             const QVector3D p = pArr[mIdx];  // MVN wire = NWU (Z-up RH); no conversion.
-            appendFloatBE(body, p.x()); appendFloatBE(body, p.y()); appendFloatBE(body, p.z());
             Quat qDelta = quat_mult(qArr[mIdx], baseArr[mIdx].inv()).normalized();
             qDelta = hemisphereContinuous(qDelta, prevArr[slot]);
             prevArr[slot] = qDelta;
             const Quat q = qDelta;  // MVN wire = NWU (Z-up RH); no conversion.
-            appendFloatBE(body, float(q.w));
-            appendFloatBE(body, float(q.x));
-            appendFloatBE(body, float(q.y));
-            appendFloatBE(body, float(q.z));
+            appendPoseSegment(body, segmentIdBase + slot, p.x(), p.y(), p.z(),
+                              float(q.w), float(q.x), float(q.y), float(q.z));
             if (wireDue)
                 wireSS << "  wireF[" << std::setw(2) << (segmentIdBase + slot) << "] "
                        << (segmentIdBase >= 44 ? "R" : "L") << "fing(slot " << std::setw(2) << slot
