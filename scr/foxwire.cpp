@@ -51,4 +51,29 @@ void appendInt32BE(QByteArray& pkt, qint32 v)
     pkt.append(reinterpret_cast<const char*>(&be), 4);
 }
 
+void appendPoseSegment(QByteArray& pkt, qint32 segId,
+                       float px, float py, float pz,
+                       float qw, float qx, float qy, float qz)
+{
+    appendInt32BE(pkt, segId);
+    appendFloatBE(pkt, px);
+    appendFloatBE(pkt, py);
+    appendFloatBE(pkt, pz);
+    appendFloatBE(pkt, qw);
+    appendFloatBE(pkt, qx);
+    appendFloatBE(pkt, qy);
+    appendFloatBE(pkt, qz);
+}
+
+void appendScaleSegment(QByteArray& pkt, const char* name,
+                        float x, float y, float z)
+{
+    const qint32 len = qint32(std::strlen(name));
+    appendInt32BE(pkt, len);
+    pkt.append(name, len);
+    appendFloatBE(pkt, x);
+    appendFloatBE(pkt, y);
+    appendFloatBE(pkt, z);
+}
+
 }  // namespace fox
