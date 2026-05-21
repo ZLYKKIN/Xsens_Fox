@@ -2296,28 +2296,6 @@ struct MocapReceiver::Impl {
     std::array<Quat, kXsensSegmentCount> s2s{};
     std::array<Quat, kXsensSegmentCount> s2sInv{};
     bool                                 s2sActive = false;
-
-    // FIX (right-foot heading): the foot s2s YAW is unobservable from the static
-    // T/N/K calibration (the foot stays flat → gravity never reveals its heading),
-    // so it is taken from the per-sensor magnetometer, which is locally unreliable
-    // near the floor → the right foot ends up ~118° off while the left lands right
-    // by chance.  But when the foot PITCHES (tiptoe/walk) its gravity vector sweeps
-    // an arc whose axis IS the foot's medial-lateral (body +Y) axis — observable
-    // from the foot's OWN accelerometer, no neighbour, no extra pose.  We watch
-    // each foot, accumulate that axis, and once a wide-enough pitch is seen correct
-    // ONLY the foot's s2s yaw toward body ±Y (same math as correctLegYaw, without
-    // the 34° cap).  Gated on a LARGE residual so a well-calibrated foot (e.g. the
-    // working left, ~17°) is never touched.  Identical code for both feet.
-    struct FootYawRefine {
-        bool      haveRef     = false;
-        bool      applied     = false;
-        QVector3D gRef{0, 0, 0};        // reference (flat, still) gravity dir, sensor frame
-        QVector3D axisAcc{0, 0, 0};     // Σ cross(gRef,gCur) — signed lateral-axis estimate
-        double    maxPitchDeg = 0.0;
-        int       obs         = 0;
-    };
-    std::array<FootYawRefine, 2> footRefine{};   // [0]=RFoot, [1]=LFoot
-
     // Per-sensor magnetometer scaling (hipose mag_magn).  1.0 = do nothing.
     std::array<double, kXsensSegmentCount> magMagn{};
     bool                                   magNormActive = false;
@@ -3364,8 +3342,6 @@ void MocapReceiver::setS2sAlignment(const std::array<Quat, kXsensSegmentCount>& 
     for (int i = 0; i < kXsensSegmentCount; ++i)
         m_impl->s2sInv[i] = s2s[i].inv();
     m_impl->s2sActive = true;
-    // (online foot-yaw observation is reset by the receiver thread when it sees
-    //  the calGen bump below — keeps footRefine single-threaded / race-free)
     // Ask the network thread to re-init every fusion filter so the first few
     // samples after s2s goes live don't corrupt the existing steady state.
     m_impl->calGen.fetch_add(1, std::memory_order_relaxed);
@@ -3397,8 +3373,6 @@ void MocapReceiver::resetS2sAlignment()
     m_impl->accNormActive = false;
     m_impl->gyrBiasActive = false;
     m_impl->magSoftActive = false;
-    // online foot-yaw observation idles while s2sActive==false and is reset by the
-    // receiver thread on the next calGen bump (setS2sAlignment) — no cross-thread write.
 }
 
 void MocapReceiver::setMagNormalisation(const std::array<double, kXsensSegmentCount>& mm)
@@ -3794,9 +3768,6 @@ void MocapReceiver::run()
                 if (gen != lastCalGen) {
                     I.fusionReady.fill(false);
                     I.biasReady.fill(false);
-                    I.footRefine = {};   // restart online foot-yaw observation
-                                         // (receiver-thread reset: footRefine is
-                                         //  touched only by this thread → no race)
                     lastCalGen = gen;
                 }
                 if (targetSeg >= 0 && targetSeg < kXsensSegmentCount) {
@@ -3914,76 +3885,6 @@ void MocapReceiver::run()
                 staging.accSensor[targetSeg] = accForFilter;   // g
                 staging.gyrSensor[targetSeg] = gyrForFilter;   // deg/s
                 if (haveMag) staging.magSensor[targetSeg] = mag;
-            }
-
-            // --- Online foot-yaw self-observation (see Impl::FootYawRefine) ----
-            // Runs only after calibration (s2sActive), per foot, from its OWN
-            // accelerometer; corrects a grossly-wrong foot heading once the foot
-            // has pitched enough. accForFilter here is still the raw sensor-frame
-            // gravity reaction (g), before acc-norm/s2s.
-            if (fuseReady && I.s2sActive &&
-                (targetSeg == SEG_RFoot || targetSeg == SEG_LFoot)) {
-                Impl::FootYawRefine& fr = I.footRefine[(targetSeg == SEG_RFoot) ? 0 : 1];
-                const float aMag = accForFilter.length();
-                if (!fr.applied && aMag > 1e-3f) {
-                    const QVector3D gCur = accForFilter / aMag;          // sensor-frame gravity dir
-                    // "still" = quasi-static, so the accelerometer reads the gravity
-                    // DIRECTION.  Gate on low angular rate, NOT |acc|≈1: a real foot
-                    // sensor reads its own magnitude (the right foot ≈0.82 g), so an
-                    // |acc|≈1 gate would never accept it.  A loose band rejects
-                    // impacts / free-fall (heel strike, swing).
-                    const bool  sane = (aMag > 0.5f && aMag < 1.5f);
-                    const float gMag = gyrForFilter.length();            // deg/s
-                    if (!fr.haveRef) {
-                        if (sane && gMag < 8.0f) { fr.gRef = gCur; fr.haveRef = true; }
-                    } else if (sane && gMag < 15.0f) {
-                        const double c = std::clamp(
-                            double(QVector3D::dotProduct(fr.gRef, gCur)), -1.0, 1.0);
-                        const double pitch = std::acos(c) * 180.0 / M_PI;
-                        if (pitch > fr.maxPitchDeg) fr.maxPitchDeg = pitch;
-                        // Accumulate the lateral axis ONLY from meaningfully-pitched,
-                        // still frames (gRef≈flat contributes ~0 and just adds noise);
-                        // obs then counts genuine tiptoe observations.
-                        if (pitch > 15.0) {
-                            fr.axisAcc += QVector3D::crossProduct(fr.gRef, gCur);  // signed lateral axis
-                            fr.obs++;
-                        }
-                        if (fr.maxPitchDeg >= 25.0 && fr.obs >= ticksFor(0.30, I.freqHz)
-                            && fr.axisAcc.length() > 1.0f) {
-                            const QVector3D latS = fr.axisAcc.normalized();   // lateral axis, sensor frame
-                            const Quat s2s  = I.s2s[targetSeg];
-                            const QVector3D latB = vec_rotate(latS, s2s.inv());  // -> body frame
-                            const double yawRes   = std::atan2(double(latB.y()), double(latB.x()));
-                            // Toe-down pitch (tiptoe / push-off) rotates the foot about
-                            // its medial-lateral axis, which in the body frame is -Y
-                            // (verified against the working foot: a correct foot's
-                            // lateral axis lands at ~-90°).  This is a FIXED anatomical
-                            // target — we must NOT take the sign from the current (wrong)
-                            // latB, since a grossly-misaligned foot has the wrong sign
-                            // (that would push it ~180° the wrong way).
-                            const double expected = -(M_PI / 2);
-                            const double yawErr   = std::atan2(std::sin(yawRes - expected),
-                                                               std::cos(yawRes - expected));
-                            // Only correct a grossly-wrong foot (>~40°); leave a
-                            // well-calibrated foot (e.g. the working left) untouched.
-                            if (std::abs(yawErr) > 0.70) {
-                                const Quat corr   = axisAngleQuat(QVector3D(0, 0, 1), yawErr);
-                                const Quat s2sNew = quat_mult(s2s, corr).normalized();
-                                { QMutexLocker lk(&I.lock);
-                                  I.s2s[targetSeg]    = s2sNew;
-                                  I.s2sInv[targetSeg] = s2sNew.inv(); }
-                                if (I.test) {
-                                    std::cout << "[foot-yaw] " << kSegmentNames[targetSeg]
-                                              << " online-corrected by " << std::fixed
-                                              << std::setprecision(1) << (yawErr * 180.0 / M_PI)
-                                              << "deg (pitch " << fr.maxPitchDeg << "deg, obs "
-                                              << fr.obs << ") — from own gravity, mag-free\n";
-                                }
-                            }
-                            fr.applied = true;   // one-shot per calibration
-                        }
-                    }
-                }
             }
 
             // -test: capture the raw SDI increments and the post-SDI,
@@ -6658,17 +6559,13 @@ void NewSessionWizard::onCaptureTick()
                 const Quat qL = s2sNew[lSeg];
                 const double devMirr = mirrorYDeviationDeg(qR, qL);
                 const double devPar  = parallelDeviationDeg(qR, qL);
-                // Limb pairs are anatomically mirror-symmetric.  "parallel" fusion
-                // yields an IDENTICAL L/R s2s, only physical if both sensors sit
-                // body-aligned (whole limb parallel) — rare.  Accept parallel ONLY
-                // on a clearly good, decisively-better parallel fit (or a strongly-
-                // trusted parallel vote with a good fit); otherwise mirror.  A weak/
-                // ambiguous parallel signal previously mis-fused the forearm into
-                // identical s2s while the rest of the arm was mirror.
-                const bool parallelClear =
-                    (devPar <= 25.0 && devPar + 15.0 < devMirr) ||
-                    (mType == 2 && score >= 0.5 && devPar <= 30.0 && devPar + 10.0 < devMirr);
-                const bool useMirror = (mType == 1) || !parallelClear;
+                // FIX issue 4: trust strong vote (score >= 0.5) including
+                // explicit "parallel" — old code defaulted to mirror when
+                // mType==0 via devMirr<=devPar (which was the common case
+                // for legs because gravity dominates).
+                const bool trustVote = (score >= 0.5);
+                const bool useMirror = (mType == 1) ||
+                                       (mType == 0 && !trustVote && devMirr <= devPar);
                 const double dev = useMirror ? devMirr : devPar;
                 const char* sym = useMirror ? "mirror-Y" : "parallel";
                 if (m_test) {
@@ -6837,6 +6734,35 @@ void NewSessionWizard::onCaptureTick()
             for (int seg : { SEG_RUpperLeg, SEG_LUpperLeg,
                              SEG_RLowerLeg, SEG_LLowerLeg }) {
                 s2sNew[seg] = correctLegYaw(seg, s2sNew[seg]);
+            }
+        }
+
+        // FIX (right-foot heading, real root cause): a foot's s2s heading is
+        // unobservable from the static T/N/K gravity — the foot stays flat, so
+        // gravity never separates and the solver falls back to the foot's OWN
+        // magnetometer (ecompass).  Near the floor that mag sits almost parallel
+        // to gravity (compassCond≈0.2), so the ecompass yaw is near-singular: the
+        // left foot lands right by chance, the right ~100° off.  But s2s is a
+        // body→sensor MOUNTING and must be facing-INVARIANT, exactly like the
+        // gravity-solved thigh (which comes out correct and mirror-symmetric).
+        // The ecompass wrongly produced a world→sensor map, baking the absolute
+        // world heading (body facing + the bad-mag error) into the foot s2s.
+        // Restore facing-invariance: drop the world-+Z yaw, keep the gravity-
+        // derived tilt.  In the calibration pose the foot shares the leg's facing
+        // (foot points forward, like the thigh), so the facing-invariant foot s2s
+        // is its mounting alone — which the working left foot confirms is ~0 yaw.
+        // Identical code for both feet; only feet whose heading came from ecompass
+        // (mode==1) are touched, so a gravity-solved foot is left untouched.
+        for (int seg : { SEG_RFoot, SEG_LFoot }) {
+            if (s2sNewMode[seg] != 1) continue;
+            const Quat yawW = yaw_only_quat(s2sNew[seg]);
+            s2sNew[seg] = quat_mult(s2sNew[seg], yawW.inv()).normalized();
+            if (m_test) {
+                std::cout << "[calib K] foot heading made facing-invariant "
+                          << kSegmentNames[seg] << " (removed world-yaw "
+                          << std::fixed << std::setprecision(2)
+                          << 2.0 * std::atan2(yawW.z, yawW.w) * 180.0 / M_PI
+                          << "°, kept gravity tilt)\n";
             }
         }
 
@@ -7289,17 +7215,9 @@ void NewSessionWizard::onCaptureTick()
             const Quat qL = s2s[lSeg];
             const double devMirr = mirrorYDeviationDeg(qR, qL);
             const double devPar  = parallelDeviationDeg(qR, qL);
-            // Limb pairs are anatomically mirror-symmetric.  "parallel" fusion
-            // yields an IDENTICAL L/R s2s, which is only physical if BOTH sensors
-            // sit body-aligned (making the whole limb parallel) — rare.  Accept
-            // parallel ONLY on a clearly good, decisively-better parallel fit (or a
-            // strongly-trusted parallel vote with a good fit); otherwise mirror.
-            // A weak/ambiguous parallel signal previously mis-fused the forearm to
-            // identical s2s while the rest of the arm was mirror.
-            const bool parallelClear =
-                (devPar <= 25.0 && devPar + 15.0 < devMirr) ||
-                (mType == 2 && score >= 0.5 && devPar <= 30.0 && devPar + 10.0 < devMirr);
-            const bool useMirror = (mType == 1) || !parallelClear;
+            const bool trustVote = (score >= 0.5);
+            const bool useMirror = (mType == 1) ||
+                                   (mType == 0 && !trustVote && devMirr <= devPar);
             const double dev = useMirror ? devMirr : devPar;
             const char* sym = useMirror ? "mirror-Y" : "parallel";
             if (m_test) {
@@ -7417,6 +7335,27 @@ void NewSessionWizard::onCaptureTick()
         symYawS2S(SEG_RLowerLeg,  SEG_LLowerLeg);
         symYawS2S(SEG_RFoot,      SEG_LFoot);
         symYawS2S(SEG_RToe,       SEG_LToe);
+    }
+
+    // FIX (right-foot heading, real root cause) — see the K-path block for the
+    // full rationale.  A foot's s2s heading is unobservable from static gravity
+    // (foot stays flat) and falls back to the foot's own near-singular
+    // magnetometer, so the right foot lands ~100° off while the left is right by
+    // chance.  s2s is a facing-INVARIANT body→sensor mounting (like the gravity-
+    // solved thigh); the ecompass wrongly baked the world heading into it.
+    // Restore facing-invariance: drop the world-+Z yaw, keep the gravity tilt.
+    // Identical for both feet; only ecompass-derived feet (mode==1) are touched.
+    for (int seg : { SEG_RFoot, SEG_LFoot }) {
+        if (s2sMode[seg] != 1) continue;
+        const Quat yawW = yaw_only_quat(s2s[seg]);
+        s2s[seg] = quat_mult(s2s[seg], yawW.inv()).normalized();
+        if (m_test) {
+            std::cout << "[calib T+N] foot heading made facing-invariant "
+                      << kSegmentNames[seg] << " (removed world-yaw "
+                      << std::fixed << std::setprecision(2)
+                      << 2.0 * std::atan2(yawW.z, yawW.w) * 180.0 / M_PI
+                      << "°, kept gravity tilt)\n";
+        }
     }
 
     std::array<float, kXsensSegmentCount> segGainN{};
