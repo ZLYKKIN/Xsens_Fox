@@ -2464,6 +2464,16 @@ struct ManusErgoSnapshot {
     std::array<float, 20> emaRight {};
     bool emaLeftInit  = false;
     bool emaRightInit = false;
+
+    // Finger-EMA rate compensation.  The glove stream runs at its own cadence
+    // (Manus ~60-120 Hz, independent of the Xsens suit rate), so the per-frame
+    // EMA alphas below are re-expressed each tick via rateAdjustAlpha() for the
+    // measured inter-frame dt — exactly like the loco/render EMAs.  Without
+    // this the finger smoothing time-constant drifts with the glove cadence
+    // (visible finger jitter at high rates).  Touched only inside the serial
+    // Manus callback, so plain (lock-free) members are safe.
+    double prevTickSec = 0.0;          // steady_clock seconds of previous frame
+    double emaDtSec    = 1.0 / 90.0;   // LP-smoothed inter-frame dt (robust to bursts)
 };
 static ManusErgoSnapshot g_ergo;
 
@@ -2829,6 +2839,17 @@ static void __cdecl foxManusErgonomicsCb(const void* raw)
     g_ergo.lastTimeMs.store(GetTickCount64());
     g_ergo.lastCount.store(s->dataCount);
 
+    // Measure the glove stream cadence (high-res, robust to bursty delivery via
+    // a slow LP) so the finger EMA below keeps a rate-independent time-constant.
+    const double nowSec = std::chrono::duration<double>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    if (g_ergo.prevTickSec > 0.0) {
+        const double rawDt = std::clamp(nowSec - g_ergo.prevTickSec, 1.0 / 1000.0, 0.1);
+        g_ergo.emaDtSec = 0.9 * g_ergo.emaDtSec + 0.1 * rawDt;
+    }
+    g_ergo.prevTickSec = nowSec;
+    const double ergoDt = g_ergo.emaDtSec;
+
     // ---- Test-mode raw dump ------------------------------------------
     // First 20 frames go out in full so the exact layout of stream->data
     // is recoverable from the log.  After that we emit one full dump per
@@ -2882,14 +2903,18 @@ static void __cdecl foxManusErgonomicsCb(const void* raw)
             if (std::abs(e.data[20 + j]) > 0.01f) anyR = true;
         }
         const bool testMode = g_ergo.rawDump.load();
-        auto alphaForJoint = [testMode](int idx, float delta, const char* hand) -> float {
+        auto alphaForJoint = [testMode, ergoDt](int idx, float delta, const char* hand) -> float {
             // FIX (gloves polish): thumb base α 0.20 → 0.15 — thumb sensor
             // на Manus традиционно шумнее остальных; больше LP-сглаживания
             // не даёт заметной latency (15ms vs 11ms @ 90Hz) но визуально
             // убирает джиттер большого пальца.
+            // FIX (Hz-correctness): the four α below were tuned at 90 Hz; the
+            // glove stream rarely runs at exactly 90 Hz, so re-express each via
+            // rateAdjustAlpha(a0, ergoDt) (dt0 = 1/90) to hold the smoothing
+            // time-constant constant regardless of glove cadence.
             const bool isThumb = (idx < 4);
-            const float baseAlpha = isThumb ? 0.15f : 0.35f;
-            const float outlierAlpha = isThumb ? 0.04f : 0.10f;
+            const float baseAlpha    = float(rateAdjustAlpha(isThumb ? 0.15 : 0.35, ergoDt));
+            const float outlierAlpha = float(rateAdjustAlpha(isThumb ? 0.04 : 0.10, ergoDt));
             const float outlierThresh = isThumb ? 15.0f : 30.0f;
             const bool outlier = (delta > outlierThresh);
             if (outlier && testMode) {
@@ -6643,6 +6668,44 @@ void NewSessionWizard::onCaptureTick()
             }
         }
 
+        // FIX (right-foot s2s magnetometer fragility): the feet have identical
+        // T- and N-pose default angles, so |cross(gT_b,gN_b)|≈0 → TRIAD cannot
+        // run → the foot s2s ALWAYS comes from ecompass, i.e. its yaw is fixed by
+        // the magnetometer.  A foot sensor tucked in a sock near the floor reads a
+        // distorted field → a large yaw error (the log's r_foot s2s = 124°),
+        // while a cleaner foot stays correct; symYawS2S_K then BAILS because the
+        // two feet disagree (|d| < guard), leaving the bad foot uncorrected.  The
+        // foot TILT (pitch/roll) from gravity is reliable (ecompass residual≈0);
+        // only the YAW is bad.  In the calibration pose the foot and its shank
+        // share the same heading and both sensors sit roughly limb-aligned, so a
+        // correct foot yaw is CLOSE to the (now K-pose-corrected, magnetometer-
+        // FREE) shank yaw.  If a foot's yaw deviates far from its shank's, the
+        // magnetometer is the cause → snap that foot's yaw to the shank's, keeping
+        // its gravity tilt.  Per-foot and threshold-gated, so a clean foot (small
+        // deviation) — e.g. the working left foot — is left exactly as-is.
+        {
+            auto rescueFootYaw = [&](int footSeg, int shankSeg) {
+                if (s2sNewMode[footSeg] == 2 || s2sNewMode[shankSeg] == 2) return;
+                if (m_accumCountT[shankSeg] < 10 || m_accumCountK[shankSeg] < 10) return;
+                const Quat yawFoot  = yaw_only_quat(s2sNew[footSeg]);
+                const Quat yawShank = yaw_only_quat(s2sNew[shankSeg]);
+                const double dev = quat_angle_deg(
+                    quat_mult(yawShank.inv(), yawFoot).normalized());   // 0..180°
+                constexpr double kFootYawTolDeg = 50.0;
+                if (dev <= kFootYawTolDeg) return;     // foot heading already sane
+                const Quat tiltFoot = quat_mult(s2sNew[footSeg], yawFoot.inv()).normalized();
+                s2sNew[footSeg] = quat_mult(yawShank, tiltFoot).normalized();
+                if (m_test) {
+                    std::cout << "[calib K] foot yaw rescued " << kSegmentNames[footSeg]
+                              << " (was " << std::fixed << std::setprecision(1) << dev
+                              << "° off " << kSegmentNames[shankSeg]
+                              << " — magnetometer suspected, inherited shank yaw)\n";
+                }
+            };
+            rescueFootYaw(SEG_RFoot, SEG_RLowerLeg);
+            rescueFootYaw(SEG_LFoot, SEG_LLowerLeg);
+        }
+
         std::array<float, kXsensSegmentCount> segGain{};
         for (int i = 0; i < kXsensSegmentCount; ++i) {
             const float noise = std::sqrt(float(gyrStdDev[i].lengthSquared() / 3.0f));
@@ -8063,6 +8126,7 @@ void MocapViewport::updatePose(const std::array<Quat, kXsensSegmentCount>& orien
             const double angVel = angRad * 180.0 / M_PI / dt;    // deg/s
             // LP smooth so single-frame noise doesn't release lock.
             const double alpha = rateAdjustAlpha(0.30, dt);
+            const double prevAngVelLP = m_angVelLP[i];   // trend BEFORE this frame
             m_angVelLP[i] = (1.0 - alpha) * m_angVelLP[i] + alpha * angVel;
             // Angular acceleration magnitude (change of speed).
             const double angAcc = std::abs(angVel - m_angVelPrev[i]) / dt;
@@ -8314,6 +8378,30 @@ void MocapViewport::updatePose(const std::array<Quat, kXsensSegmentCount>& orien
                         const Quat fCorrected = quat_mult(correctionWorld, fWorld).normalized();
                         filtered[i] = quat_mult(fCorrected, dA_f.inv()).normalized();
                     }
+                }
+            }
+
+            // FIX (right-wrist jerk): reject single-frame non-physical spikes.
+            // The log shows isolated >3000°/s pops on r_hand (a fusion/seam
+            // glitch), well above the ~2000°/s ceiling of a real wrist.  Cap the
+            // frame-to-frame OUTPUT step to a physical maximum, but ONLY when the
+            // step is a transient far above the pre-spike trend (prevAngVelLP) —
+            // a real ballistic palm-spin ramps up over several frames, so the
+            // trend rises with it and it passes untouched; a one-frame seam pop
+            // does not.  Disabled across long render gaps (large dt → small
+            // impliedVel) so it never fights a legitimate slow re-sync.
+            {
+                const Quat dOut = quat_mult(filtered[i], m_outPrevQ[i].inv()).normalized();
+                const double wo = std::min(1.0, std::abs(dOut.w));
+                const double stepDeg = 2.0 * std::acos(wo) * 180.0 / M_PI;
+                const double impliedVel = stepDeg / dt;            // deg/s this frame
+                constexpr double kMaxSegDegPerSec = 2200.0;        // > human wrist max
+                constexpr double kSpikeFactor     = 3.0;           // transient gate
+                if (impliedVel > kMaxSegDegPerSec
+                    && impliedVel > kSpikeFactor * prevAngVelLP
+                    && stepDeg > 1e-4) {
+                    const double maxStep = kMaxSegDegPerSec * dt;
+                    filtered[i] = nlerpQ(m_outPrevQ[i], filtered[i], maxStep / stepDeg);
                 }
             }
 
