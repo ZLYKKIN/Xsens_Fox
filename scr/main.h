@@ -1147,6 +1147,7 @@ public:
     void setActor(const ActorConfig& actor);
     ActorConfig actor() const { return m_actor; }
     void setLocoVerbose(bool v) { m_loco.setVerbose(v); }
+    void setCondVerbose(bool v) { m_condVerbose = v; }   // -test: [cond] лог
     // Bind the processing rate so the locomotion solver re-derives its
     // @90 Hz-tuned timings for the active suit cadence (Link 240 / Awinda 60),
     // and cap the GL repaint at the display rate (never above ~90 Hz).
@@ -1154,6 +1155,7 @@ public:
         m_loco.setProcRate(hz);
         const double cap = (hz > 90.0) ? 90.0 : (hz > 1.0 ? hz : 90.0);
         m_paintMinIntervalSec = 1.0 / cap;
+        m_nomDt = 1.0 / ((hz > 1.0) ? hz : 90.0);   // анти-рывок: номинальный кадр
     }
 
     // Reset: capture current pelvis world XY, apply offset so pelvis goes to
@@ -1289,6 +1291,15 @@ private:
     std::array<double, kXsensSegmentCount> m_stillTicks{};    // consecutive
     std::array<Quat, kXsensSegmentCount>   m_prevQ{};
     std::array<Quat, kXsensSegmentCount>   m_outPrevQ{};
+    // --- Финальный кондиционер выхода (анти-рывок); логика — в updatePose.
+    // m_condPrev — предыдущий КОНДИЦИОНИРОВАННЫЙ выход (не путать с m_outPrevQ,
+    // который хранит pre-conditioner lock-результат для unlock-blend).  m_nomDt
+    // — номинальная длительность кадра (set by setProcRate: 1/240 или 1/60),
+    // нужна для зажима dt первого кадра после провала тайминга.
+    std::array<Quat, kXsensSegmentCount>   m_condPrev{};
+    bool                                    m_haveCond    = false;
+    double                                  m_nomDt       = 1.0 / 90.0;
+    bool                                    m_condVerbose = false;   // -test: [cond]
     std::array<double, kXsensSegmentCount> m_unlockBlend{};
     // FIX (terminator smoothing): симметричный lock-in blend.  Раньше
     // m_locked[i]=true моментально подставлял m_lockQuat[i] в filtered[i],

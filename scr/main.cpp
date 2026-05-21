@@ -8176,14 +8176,16 @@ void MocapViewport::updatePose(const std::array<Quat, kXsensSegmentCount>& orien
                 // lock как раньше; <1 → linear-ish blend.
                 if (m_lockBlend[i] < 1.0) {
                     filtered[i] = nlerpQ(orient[i], m_lockQuat[i], m_lockBlend[i]);
-                    m_lockBlend[i] = std::min(1.0, m_lockBlend[i] + 0.15 * (dt * 90.0));
+                    // dt зажимаем ~2 номинальными кадрами @90Hz, чтобы провал
+                    // тайминга (dt 33-99мс в логе) не "защёлкнул" lock за 1 кадр.
+                    m_lockBlend[i] = std::min(1.0, m_lockBlend[i] + 0.15 * (std::min(dt, 2.0 / 90.0) * 90.0));
                 } else {
                     filtered[i] = m_lockQuat[i];
                 }
                 m_unlockBlend[i] = 0.30;
             } else if (m_unlockBlend[i] < 1.0) {
                 filtered[i] = nlerpQ(m_outPrevQ[i], orient[i], m_unlockBlend[i]);
-                m_unlockBlend[i] = std::min(1.0, m_unlockBlend[i] + 0.15 * (dt * 90.0));
+                m_unlockBlend[i] = std::min(1.0, m_unlockBlend[i] + 0.15 * (std::min(dt, 2.0 / 90.0) * 90.0));
             } else {
                 filtered[i] = orient[i];
             }
@@ -8403,6 +8405,72 @@ void MocapViewport::updatePose(const std::array<Quat, kXsensSegmentCount>& orien
 
     m_prevQ = orient;   // store RAW for next-frame angular-speed
     m_havePrevQ = true;
+
+    // === Финальный кондиционер выхода: анти-рывок ========================
+    // Единая точка сглаживания для вьюпорта, UDP-стрима и записи (все читают
+    // m_orient = filteredOrient()).  Идёт ПОСЛЕ drift-lock, поэтому на покое
+    // вход уже стабилен и обе ступени фактически passthrough.
+    //
+    //  Ступень B (One-Euro, Casiez 2012) идёт ПЕРВОЙ как near-passthrough
+    //  адаптивный low-pass: срез растёт со скоростью сегмента, поэтому реальное
+    //  движение проходит почти без задержки, а у покоя/медленного движения срез
+    //  низкий → гасит остаточный джиттер и "терминаторный" шим.
+    //
+    //  Ступень A (slew-limiter) идёт ПОСЛЕ как чистый ограничитель выбросов на
+    //  уже сглаженном сигнале: бюджет угла за кадр растёт со скоростью, поэтому
+    //  НАСТОЯЩЕЕ быстрое движение не режется, а скачок, СИЛЬНО превышающий
+    //  недавнюю скорость — догон после провала кадра (dt 33-99мс в логе) или
+    //  одно-кадровый сенсорный глитч — растягивается на несколько кадров.  Гейт
+    //  gyro-независимый, поэтому ловит рывки и во время движения, где jump-reject
+    //  в onRenderTick (gyroQuiet) бессилен.
+    //
+    //  Порядок B→A важен: A первым "обрезал бы морковку" перед low-pass'ом, и
+    //  на длительном движении выход не успевал бы за целью (накопление лага).
+    {
+        static constexpr double kSlewGain = 1.8;    // ×недавняя скорость до clamp
+        static constexpr double kBaseRate = 300.0;  // °/с — пол бюджета шага
+        static constexpr double kDtCapFac = 1.6;    // зажим dt 1-го кадра после заминки
+        static constexpr double kFcMin    = 2.0;    // Гц — срез One-Euro на покое
+        static constexpr double kOeBeta   = 1.5;    // рост среза со скоростью (на °/с)
+        const double dtCap = std::min(dt, kDtCapFac * m_nomDt);
+        for (int i = 0; i < kXsensSegmentCount; ++i) {
+            const Quat in = filtered[i];
+            if (!m_haveCond) { m_condPrev[i] = in; continue; }
+
+            // B: One-Euro adaptive low-pass.  Скорость = m_angVelLP (уже
+            // сглаженная производная) — отдельный фильтр производной не нужен.
+            const double fc    = kFcMin + kOeBeta * m_angVelLP[i];
+            const double tau   = 1.0 / (2.0 * M_PI * fc);
+            const double alpha = 1.0 / (1.0 + tau / dt);
+            Quat sm = nlerpQ(m_condPrev[i], in, alpha);
+
+            // A: slew-clamp выбросов/телепортов на уже сглаженном сигнале.
+            const double ang = quat_angle_deg(quat_mult(sm, m_condPrev[i].inv()));
+            const double budgetDeg =
+                std::max(kBaseRate * dtCap, kSlewGain * m_angVelLP[i] * dtCap);
+            if (ang > budgetDeg && ang > 1e-6) {
+                const double tSlew = budgetDeg / ang;
+                sm = slerp_quat(m_condPrev[i], sm, tSlew);
+                if (m_condVerbose) {
+                    static std::array<int, kXsensSegmentCount> s_condTick{};
+                    static int s_condGlobal = 0; ++s_condGlobal;
+                    if (s_condGlobal - s_condTick[i] > 60) {
+                        s_condTick[i] = s_condGlobal;
+                        std::cout << "[cond] seg[" << i << "] slew ang="
+                                  << std::fixed << std::setprecision(1) << ang
+                                  << "° budget=" << budgetDeg << "° t="
+                                  << std::setprecision(2) << tSlew << " |w|="
+                                  << std::setprecision(1) << m_angVelLP[i] << "°/s dt="
+                                  << std::setprecision(1) << (dt * 1000.0) << "ms\n";
+                    }
+                }
+            }
+
+            m_condPrev[i] = sm;
+            filtered[i]   = sm;
+        }
+        m_haveCond = true;
+    }
 
     m_orient = filtered;
     m_root   = root;
@@ -10753,6 +10821,7 @@ MainWindow::MainWindow(MocapReceiver* rx,
     m_viewport->setProcRate(m_procRateHz);
     m_skel     = std::make_unique<SkeletonXsens>(actor, m_setup.poseKind);
     if (m_test) m_viewport->setLocoVerbose(true);
+    if (m_test) m_viewport->setCondVerbose(true);
     logTest("[rate] processing rate = " + std::to_string(int(m_procRateHz)) + " Hz ("
             + (m_setup.suit == SuitType::Link ? "Xsens Link" : "Xsens Awinda") + ")");
 
