@@ -6786,9 +6786,85 @@ void NewSessionWizard::onCaptureTick()
                 }
                 return quat_mult(s2s, yawCorr).normalized();
             };
-            for (int seg : { SEG_RUpperLeg, SEG_LUpperLeg,
-                             SEG_RLowerLeg, SEG_LLowerLeg }) {
+            for (int seg : { SEG_RUpperLeg, SEG_LUpperLeg }) {
                 s2sNew[seg] = correctLegYaw(seg, s2sNew[seg]);
+            }
+
+            // FIX (right foot rolls instead of plantarflexing on a toe-stand):
+            // the foot — and a shin that stays vertical through T/N/K — never
+            // change their gravity vector, so their rotation-about-gravity
+            // (azimuth) is unobservable and the solver fell back to the foot's
+            // near-singular magnetometer, producing a GARBAGE body frame where a
+            // toe-stand renders as a sideways roll (log: right ankle axis 66° off
+            // the thigh, left only 13°).  The thigh IS gravity-solved (it goes
+            // horizontal in K-pose), so aT×aK gives the reliable medial-lateral
+            // (hip/knee/ankle) axis of that leg.  Borrow it: rotate each distal
+            // segment about its gravity axis so its body +Y lands on that shared
+            // leg axis — same idea as correctLegYaw, but the axis comes from the
+            // parent because the segment can't observe it itself.
+            auto thighLateralSensor = [&](int thighSeg) -> QVector3D {
+                const int cT = m_accumCountT[thighSeg];
+                const int cK = m_accumCountK[thighSeg];
+                if (cT < 10 || cK < 10) return QVector3D(0, 0, 0);
+                const QVector3D aT = m_accAccumT[thighSeg] / float(cT);
+                const QVector3D aK = m_accAccumK[thighSeg] / float(cK);
+                if (aT.length() < 1e-3f || aK.length() < 1e-3f) return QVector3D(0, 0, 0);
+                const QVector3D ax = QVector3D::crossProduct(aT.normalized(), aK.normalized());
+                if (ax.length() < 0.3f) return QVector3D(0, 0, 0);   // poses collinear
+                return ax.normalized();                              // in thigh SENSOR frame
+            };
+            const auto defAngNp = defaultSegAnglesFor("npose");
+            // How far a distal segment's pitch axis (body +Y) sits from the leg's
+            // true medial-lateral axis (carried from the gravity-solved thigh via
+            // the raw T-pose sensor orientations).  ~0° = correct; ~90° = the
+            // bad-magnetometer frame that ROLLS instead of plantarflexing.  −1 if
+            // not computable.
+            auto lateralMisalignRad = [&](int seg, int thighSeg) -> double {
+                const QVector3D latThighS = thighLateralSensor(thighSeg);
+                if (latThighS.length() < 0.5f) return -1.0;
+                const Quat refThigh = m_result.tposeReference[thighSeg];
+                const Quat refSeg   = m_result.tposeReference[seg];
+                if (refThigh.norm() < 0.5 || refSeg.norm() < 0.5) return -1.0;
+                const QVector3D latWorld = vec_rotate(latThighS, refThigh).normalized();
+                const QVector3D latSegS  = vec_rotate(latWorld, refSeg.inv()).normalized();
+                const QVector3D axisB    = vec_rotate(latSegS, s2sNew[seg].inv());
+                const QVector3D g = gravityInBodyFrame(defAngNp[seg]).normalized();
+                auto projp = [&](QVector3D v) {
+                    v -= g * float(QVector3D::dotProduct(v, g));
+                    const float l = v.length(); return (l > 1e-4f) ? v / l : QVector3D(0, 0, 0);
+                };
+                const QVector3D a = projp(axisB), y = projp(QVector3D(0, 1, 0));
+                if (a.length() < 0.5f || y.length() < 0.5f) return -1.0;
+                const double c = std::min(1.0, std::abs(double(QVector3D::dotProduct(a, y))));
+                return std::acos(c);                              // 0 = aligned with ±Y
+            };
+            // Pick the foot whose frame is correct (aligned with its own thigh) and
+            // make the OTHER foot+shank its mirror_y.  Mirroring a proven-correct
+            // frame can't flip the plantarflexion sense — unlike a per-foot azimuth
+            // turn, whose ±Y choice is ambiguous near a 90° error.  Left/right
+            // sensors are mirror-mounted (the gravity-solved thighs come out
+            // mirror-Y), so this is the right relationship.
+            const double misRF = lateralMisalignRad(SEG_RFoot, SEG_RUpperLeg);
+            const double misLF = lateralMisalignRad(SEG_LFoot, SEG_LUpperLeg);
+            if (misRF >= 0.0 && misLF >= 0.0) {
+                const double kGood = 20.0 * M_PI / 180.0;
+                const double kBad  = 35.0 * M_PI / 180.0;
+                auto mir = [](const Quat& q){ return mirror_y_quat(q).normalized(); };
+                if (misLF < kGood && misRF > kBad) {
+                    s2sNew[SEG_RFoot]     = mir(s2sNew[SEG_LFoot]);
+                    s2sNew[SEG_RLowerLeg] = mir(s2sNew[SEG_LLowerLeg]);
+                    if (m_test) std::cout << "[calib K] right foot+shank mirrored from good left (misalign R="
+                        << std::fixed << std::setprecision(1) << misRF*180/M_PI << "° L=" << misLF*180/M_PI << "°)\n";
+                } else if (misRF < kGood && misLF > kBad) {
+                    s2sNew[SEG_LFoot]     = mir(s2sNew[SEG_RFoot]);
+                    s2sNew[SEG_LLowerLeg] = mir(s2sNew[SEG_RLowerLeg]);
+                    if (m_test) std::cout << "[calib K] left foot+shank mirrored from good right (misalign R="
+                        << std::fixed << std::setprecision(1) << misRF*180/M_PI << "° L=" << misLF*180/M_PI << "°)\n";
+                } else if (m_test) {
+                    std::cout << "[calib K] foot frames left as solved (misalign R="
+                              << std::fixed << std::setprecision(1) << misRF*180/M_PI
+                              << "° L=" << misLF*180/M_PI << "°)\n";
+                }
             }
         }
 
