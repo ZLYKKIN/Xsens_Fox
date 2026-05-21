@@ -5949,7 +5949,11 @@ static void dumpS2sDiag(const char* tag,
                   << " s2sTilt=" << std::setw(7) << quat_angle_deg(tiltOf(s2s[i])) << "°\n";
     }
     double worstMirrorDev = 0.0;
-    auto pairLine = [&](int r, int l) {
+    // `enforced` = the gravity-observed pairs we force to exact mirrors; only
+    // those count toward PASS/FAIL.  Lower legs / feet are printed for info but
+    // are intentionally NOT symmetrized here (their heading is fixed live from
+    // the kinematic parent), so they may legitimately differ.
+    auto pairLine = [&](int r, int l, bool enforced) {
         if (mode[r] == 2 || mode[l] == 2) return;
         const Quat yawR  = yaw_only_quat(s2s[r]);
         const Quat lMir  = mirror_y_quat(s2s[l]);              // expected = R if mirror-symmetric
@@ -5958,22 +5962,23 @@ static void dumpS2sDiag(const char* tag,
         const Quat tiltR  = quat_mult(s2s[r], yawR.inv()).normalized();
         const Quat tiltLm = quat_mult(lMir,   yawLm.inv()).normalized();
         const double mTilt = quat_angle_deg(quat_mult(tiltR.inv(), tiltLm).normalized());
-        worstMirrorDev = std::max({worstMirrorDev, mYaw, mTilt});
+        if (enforced) worstMirrorDev = std::max({worstMirrorDev, mYaw, mTilt});
         std::cout << "  s2sPair " << std::left << std::setw(12) << kSegmentNames[r] << std::right
                   << " mirrorYawDev=" << std::setw(7) << mYaw << "°"
-                  << " mirrorTiltDev=" << std::setw(7) << mTilt << "°\n";
+                  << " mirrorTiltDev=" << std::setw(7) << mTilt << "°"
+                  << (enforced ? "" : "  (info; heading from kinematic parent live)") << "\n";
     };
-    pairLine(SEG_RShoulder, SEG_LShoulder);
-    pairLine(SEG_RUpperArm, SEG_LUpperArm);
-    pairLine(SEG_RForearm,  SEG_LForearm);
-    pairLine(SEG_RHand,     SEG_LHand);
-    pairLine(SEG_RUpperLeg, SEG_LUpperLeg);
-    pairLine(SEG_RLowerLeg, SEG_LLowerLeg);
-    pairLine(SEG_RFoot,     SEG_LFoot);
-    // After symmetrization every limb pair must be a near-exact mirror; a large
-    // residual here means a side is still drifting (the original right-side bug).
+    pairLine(SEG_RShoulder, SEG_LShoulder, true);
+    pairLine(SEG_RUpperArm, SEG_LUpperArm, true);
+    pairLine(SEG_RForearm,  SEG_LForearm,  true);
+    pairLine(SEG_RHand,     SEG_LHand,     true);
+    pairLine(SEG_RUpperLeg, SEG_LUpperLeg, true);
+    pairLine(SEG_RLowerLeg, SEG_LLowerLeg, false);
+    pairLine(SEG_RFoot,     SEG_LFoot,     false);
+    // The enforced (arm + upper-leg) pairs must be near-exact mirrors; a large
+    // residual here means a gravity-solved side is still drifting.
     std::cout << "  s2sSymmetry " << (worstMirrorDev <= 2.0 ? "PASS" : "FAIL")
-              << " (worst L/R mirror dev=" << worstMirrorDev << "°, tol 2.0°)\n";
+              << " (worst enforced L/R mirror dev=" << worstMirrorDev << "°, tol 2.0°)\n";
     std::cout.flush();
 }
 
@@ -6787,22 +6792,19 @@ void NewSessionWizard::onCaptureTick()
             }
         }
 
-        // ── Single source of left/right symmetry ─────────────────────────────
-        // The sensors are identical and mirror-mounted, so every limb pair must
-        // satisfy s2s_right == mirror_y(s2s_left).  symmetrizePairMirrorY() first
-        // strips the unobservable magnetometer heading from any ecompass side
-        // (foot, shank) — keeping the reliable gravity tilt — then makes the pair
-        // an exact mirror, driven by whichever side is better observed.  This is
-        // the root fix: it folds in the old "facing-invariant foot" pass AND
-        // covers the forearm (mis-detected as a parallel mount) and the
-        // both-ecompass shanks/feet (whose tilt the old code never symmetrized),
-        // so the right hand, foot and knee can no longer diverge from the left.
+        // ── Mirror-Y symmetry for the GRAVITY-OBSERVED limb pairs only ───────
+        // Arms and upper legs are gravity-solved, so left/right must be exact
+        // mirrors; this fixes the forearm (mis-detected as a parallel mount →
+        // right hand short of the knee).  The lower legs and feet are NOT forced
+        // symmetric here: their magnetometer is unusable so the static solve only
+        // pins their gravity TILT reliably, which is per-side correct — their
+        // unobservable HEADING is fixed live from the kinematic parent instead
+        // (see the foot/shank heading-inheritance pass in the render path).
         {
-            const std::pair<int,int> mirrorPairs[8] = {
+            const std::pair<int,int> mirrorPairs[] = {
                 { SEG_RShoulder, SEG_LShoulder }, { SEG_RUpperArm, SEG_LUpperArm },
                 { SEG_RForearm,  SEG_LForearm  }, { SEG_RHand,     SEG_LHand     },
-                { SEG_RUpperLeg, SEG_LUpperLeg }, { SEG_RLowerLeg, SEG_LLowerLeg },
-                { SEG_RFoot,     SEG_LFoot     }, { SEG_RToe,      SEG_LToe      },
+                { SEG_RUpperLeg, SEG_LUpperLeg },
             };
             for (const auto& pr : mirrorPairs) {
                 symmetrizePairMirrorY(s2sNew[pr.first], s2sNew[pr.second],
@@ -6810,7 +6812,7 @@ void NewSessionWizard::onCaptureTick()
                                       s2sResidual[pr.first], s2sResidual[pr.second]);
             }
             if (m_test)
-                std::cout << "[calib K] enforced mirror-Y L/R symmetry on all limb pairs\n";
+                std::cout << "[calib K] enforced mirror-Y L/R symmetry on arm + upper-leg pairs\n";
         }
 
         std::array<float, kXsensSegmentCount> segGain{};
@@ -7372,17 +7374,15 @@ void NewSessionWizard::onCaptureTick()
         (void)symYawS2S;
     }
 
-    // ── Single source of left/right symmetry (see K-path note for rationale) ──
-    // Strip the unobservable magnetometer heading from ecompass sides, then make
-    // every limb pair an exact mirror_y of its partner.  Folds in the old
-    // facing-invariant foot pass and also fixes the forearm and both-ecompass
-    // shanks/feet that the old mount-detect/symYaw passes left asymmetric.
+    // ── Mirror-Y symmetry for the GRAVITY-OBSERVED limb pairs only ───────────
+    // (see K-path note).  Arms + upper legs are forced to exact mirrors; the
+    // lower legs and feet keep their own per-side gravity tilt and get their
+    // unobservable heading from the kinematic parent live, not from here.
     {
-        const std::pair<int,int> mirrorPairs[8] = {
+        const std::pair<int,int> mirrorPairs[] = {
             { SEG_RShoulder, SEG_LShoulder }, { SEG_RUpperArm, SEG_LUpperArm },
             { SEG_RForearm,  SEG_LForearm  }, { SEG_RHand,     SEG_LHand     },
-            { SEG_RUpperLeg, SEG_LUpperLeg }, { SEG_RLowerLeg, SEG_LLowerLeg },
-            { SEG_RFoot,     SEG_LFoot     }, { SEG_RToe,      SEG_LToe      },
+            { SEG_RUpperLeg, SEG_LUpperLeg },
         };
         for (const auto& pr : mirrorPairs) {
             symmetrizePairMirrorY(s2s[pr.first], s2s[pr.second],
@@ -7390,7 +7390,7 @@ void NewSessionWizard::onCaptureTick()
                                   s2sResidualN[pr.first], s2sResidualN[pr.second]);
         }
         if (m_test)
-            std::cout << "[calib T+N] enforced mirror-Y L/R symmetry on all limb pairs\n";
+            std::cout << "[calib T+N] enforced mirror-Y L/R symmetry on arm + upper-leg pairs\n";
     }
 
     std::array<float, kXsensSegmentCount> segGainN{};
@@ -8399,12 +8399,15 @@ void MocapViewport::updatePose(const std::array<Quat, kXsensSegmentCount>& orien
                 }
             }
 
-            // FIX issue 7: foot yaw stabilization при перекрёстных позах.
-            // Аналогично wrist-блоку, но другая ось разложения — корректируем
-            // только yaw (вокруг world-Z), бюджет 15°, активируется только
-            // когда стопа + голень + таз спокойны >= 2 сек.  Носки (RToe/LToe)
-            // слейв стоп, поэтому их направление автоматически фиксится.
-            if (i == SEG_RFoot || i == SEG_LFoot) {
+            // FIX issue 7 (DISABLED): foot yaw stabilization toward a separate
+            // T-pose anchor.  The foot HEADING is now set every frame from the
+            // kinematic parent (shank ← thigh) upstream in onRenderTick, so this
+            // pass would fight it — slowly pulling a still foot back toward the
+            // stale T-pose anchor and re-introducing an independent (drifting)
+            // foot heading.  Kept compiled but gated off; the kinematic parent
+            // is the single owner of foot heading now.
+            constexpr bool kFootYawDriftCorrection = false;
+            if (kFootYawDriftCorrection && (i == SEG_RFoot || i == SEG_LFoot)) {
                 const int iLowerLeg = (i == SEG_RFoot) ? SEG_RLowerLeg : SEG_LLowerLeg;
                 const double llAngV  = m_angVelLP[iLowerLeg];
                 const bool calmFoot   = m_angVelLP[i] < 1.5;
@@ -11275,6 +11278,39 @@ void MainWindow::onRenderTick()
     s_lastOut[SEG_LToe] = q[SEG_LToe];
     s_haveOut[SEG_L5] = s_haveOut[SEG_L3] = s_haveOut[SEG_T12] =
     s_haveOut[SEG_Neck] = s_haveOut[SEG_RToe] = s_haveOut[SEG_LToe] = true;
+
+    // Kinematic heading for the mag-degenerate distal leg segments.
+    // The foot and lower-leg magnetometers sit near the floor / hardware and are
+    // unusable (compassCond ≈ 0.1-0.3), so each of those sensors' live world
+    // HEADING (yaw about +Z) is gyro-only and drifts independently — one side
+    // ends up rotated, so a forward knee bend renders sideways and a toe-stand
+    // is missed.  The thigh is reliably observed, so borrow the heading from the
+    // kinematic parent (knee/ankle are hinges) while keeping the segment's OWN
+    // gravity-observable tilt (knee/ankle flex, toe pitch).  Applied identically
+    // to both legs, so the right can no longer diverge from the left.  Runs on
+    // the single-source `q[]` before hinge-limits / render / loco / stream.
+    if (m_skel) {
+        auto inheritHeading = [&](int child, int parent) {
+            const Quat dC = m_skel->defAngFor(child);
+            const Quat dP = m_skel->defAngFor(parent);
+            const Quat Wc = quat_mult(q[child],  dC).normalized();   // child world bone
+            const Quat Wp = quat_mult(q[parent], dP).normalized();   // parent world bone
+            // Rotate the child about world +Z by (parentHeading − childHeading)
+            // so its heading matches the parent's while its tilt/flex is left
+            // untouched.  headingDelta is a pure world-vertical rotation applied
+            // on the left, so W2 = R_z(θp−θc)·Wc keeps the gravity-observable
+            // swing exactly and only re-aims the bend plane / foot pointing.
+            const Quat headingDelta =
+                quat_mult(yaw_only_quat(Wp), yaw_only_quat(Wc).inv()).normalized();
+            const Quat Wc2 = quat_mult(headingDelta, Wc).normalized();
+            q[child] = quat_mult(Wc2, dC.inv()).normalized();
+        };
+        // Shanks first (from thighs), then feet from the corrected shanks.
+        inheritHeading(SEG_RLowerLeg, SEG_RUpperLeg);
+        inheritHeading(SEG_LLowerLeg, SEG_LUpperLeg);
+        inheritHeading(SEG_RFoot,     SEG_RLowerLeg);
+        inheritHeading(SEG_LFoot,     SEG_LLowerLeg);
+    }
 
     // Anatomical joint-limit safety net — always on, no flag.  Caps gross
     // knee/elbow fold-through and unphysical long-axis spin so a mag/jump
