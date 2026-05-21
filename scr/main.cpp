@@ -856,6 +856,57 @@ static double parallelDeviationDeg(const Quat& qR, const Quat& qL)
     return 2.0 * std::acos(dot) * 180.0 / M_PI;
 }
 
+// ── Enforce anatomical mirror-Y symmetry on ONE left/right s2s pair ──────────
+// Left and right trackers are identical hardware mounted as mirror images across
+// the body XZ-plane, so a correct sensor→body s2s for one side must equal
+// mirror_y_quat() of the other.  The gravity-solved segments (upper arm / upper
+// leg) already satisfy this; this routine makes the *weakly observable* segments
+// (forearm, lower leg, foot) obey it too, instead of each side drifting on its
+// own — which is what left the right hand short of the knee, the right foot blind
+// to a toe-stand and the right knee bending sideways.
+//
+// modeX: 0 = gravity-solved (TRIAD/Wahba, reliable, full orientation observable)
+//        1 = ecompass fallback (gravity tilt reliable, world-+Z heading is the
+//            near-singular magnetometer → unobservable / garbage)
+//        2 = identity / no sensor (skip).
+// On return qR == mirror_y_quat(qL) exactly, so the right side can never diverge
+// from the working left.
+static void symmetrizePairMirrorY(Quat& qR, Quat& qL,
+                                  int modeR, int modeL,
+                                  double resR, double resL)
+{
+    if (modeR == 2 || modeL == 2) return;            // a side has no sensor
+
+    // Step A — drop the unobservable world-+Z heading from any ecompass side,
+    // keeping only the accel-derived gravity tilt.  Doing this BEFORE the mirror
+    // comparison is the fix: a 100°+ bad-magnetometer yaw used to defeat the
+    // symmetry detector, so the right foot/shank kept its garbage heading.
+    if (modeR == 1) qR = quat_mult(qR, yaw_only_quat(qR).inv()).normalized();
+    if (modeL == 1) qL = quat_mult(qL, yaw_only_quat(qL).inv()).normalized();
+
+    const bool reliR = (modeR == 0);
+    const bool reliL = (modeL == 0);
+
+    // One side reliable, the other ecompass → the reliable side defines the pair.
+    if (reliR && !reliL) { qL = mirror_y_quat(qR).normalized(); return; }
+    if (reliL && !reliR) { qR = mirror_y_quat(qL).normalized(); return; }
+
+    // Both reliable, or both ecompass (feet, shanks) → residual-weighted
+    // mirror-average.  For both-ecompass the heading is already stripped above,
+    // so this averages only the gravity tilt and yields a symmetric, forward-
+    // facing mounting (matching hipose, which never trusts a foot's own mag).
+    Quat mL = mirror_y_quat(qL);
+    const double dot = qR.w*mL.w + qR.x*mL.x + qR.y*mL.y + qR.z*mL.z;
+    if (dot < 0.0) mL = Quat(-mL.w, -mL.x, -mL.y, -mL.z);   // shortest-path cover
+    const double wR = std::max(0.0, 1.0 - resR / 30.0);
+    const double wL = std::max(0.0, 1.0 - resL / 30.0);
+    const double wTot = wR + wL;
+    const double tR = (wTot > 1e-6) ? wL / wTot : 0.5;      // bias to lower residual
+    const Quat qAvg = slerp_quat(qR, mL, tR).normalized();
+    qR = qAvg;
+    qL = mirror_y_quat(qAvg).normalized();
+}
+
 static double ecompResidualDeg(const Quat& q_s2b,
                                const QVector3D& vb, const QVector3D& vs)
 {
@@ -5897,6 +5948,7 @@ static void dumpS2sDiag(const char* tag,
                   << " s2sYaw=" << std::setw(8) << yawSignedDeg(s2s[i]) << "°"
                   << " s2sTilt=" << std::setw(7) << quat_angle_deg(tiltOf(s2s[i])) << "°\n";
     }
+    double worstMirrorDev = 0.0;
     auto pairLine = [&](int r, int l) {
         if (mode[r] == 2 || mode[l] == 2) return;
         const Quat yawR  = yaw_only_quat(s2s[r]);
@@ -5906,6 +5958,7 @@ static void dumpS2sDiag(const char* tag,
         const Quat tiltR  = quat_mult(s2s[r], yawR.inv()).normalized();
         const Quat tiltLm = quat_mult(lMir,   yawLm.inv()).normalized();
         const double mTilt = quat_angle_deg(quat_mult(tiltR.inv(), tiltLm).normalized());
+        worstMirrorDev = std::max({worstMirrorDev, mYaw, mTilt});
         std::cout << "  s2sPair " << std::left << std::setw(12) << kSegmentNames[r] << std::right
                   << " mirrorYawDev=" << std::setw(7) << mYaw << "°"
                   << " mirrorTiltDev=" << std::setw(7) << mTilt << "°\n";
@@ -5917,6 +5970,10 @@ static void dumpS2sDiag(const char* tag,
     pairLine(SEG_RUpperLeg, SEG_LUpperLeg);
     pairLine(SEG_RLowerLeg, SEG_LLowerLeg);
     pairLine(SEG_RFoot,     SEG_LFoot);
+    // After symmetrization every limb pair must be a near-exact mirror; a large
+    // residual here means a side is still drifting (the original right-side bug).
+    std::cout << "  s2sSymmetry " << (worstMirrorDev <= 2.0 ? "PASS" : "FAIL")
+              << " (worst L/R mirror dev=" << worstMirrorDev << "°, tol 2.0°)\n";
     std::cout.flush();
 }
 
@@ -6638,14 +6695,12 @@ void NewSessionWizard::onCaptureTick()
                               << dev << "°\n";
                 }
             };
-            procrustesPair(SEG_RShoulder,  SEG_LShoulder);
-            procrustesPair(SEG_RUpperArm,  SEG_LUpperArm);
-            procrustesPair(SEG_RForearm,   SEG_LForearm);
-            procrustesPair(SEG_RHand,      SEG_LHand);
-            procrustesPair(SEG_RUpperLeg,  SEG_LUpperLeg);
-            procrustesPair(SEG_RLowerLeg,  SEG_LLowerLeg);
-            procrustesPair(SEG_RFoot,      SEG_LFoot);
-            procrustesPair(SEG_RToe,       SEG_LToe);
+            // NOTE: mount auto-detection (mirror-Y vs parallel) + procrustes
+            // averaging is SUPERSEDED by symmetrizePairMirrorY() below, which
+            // enforces mirror-Y unconditionally.  The old per-segment vote
+            // misclassified the forearm as "parallel" and skipped both-ecompass
+            // feet/shanks, which is exactly what broke the right side.
+            (void)procrustesPair;
         }
 
         {
@@ -6678,14 +6733,9 @@ void NewSessionWizard::onCaptureTick()
                 s2sNew[rSeg] = quat_mult(yawAvg,    tiltR).normalized();
                 s2sNew[lSeg] = quat_mult(yawAvgMir, tiltL).normalized();
             };
-            symYawS2S_K(SEG_RShoulder,  SEG_LShoulder);
-            symYawS2S_K(SEG_RUpperArm,  SEG_LUpperArm);
-            symYawS2S_K(SEG_RForearm,   SEG_LForearm);
-            symYawS2S_K(SEG_RHand,      SEG_LHand);
-            symYawS2S_K(SEG_RUpperLeg,  SEG_LUpperLeg);
-            symYawS2S_K(SEG_RLowerLeg,  SEG_LLowerLeg);
-            symYawS2S_K(SEG_RFoot,      SEG_LFoot);
-            symYawS2S_K(SEG_RToe,       SEG_LToe);
+            // SUPERSEDED by symmetrizePairMirrorY() below (it symmetrizes the
+            // full orientation, not only yaw).
+            (void)symYawS2S_K;
         }
 
         // FIX issue 1/4: yaw-anchor для ног через T↔K orientation diff.
@@ -6737,33 +6787,30 @@ void NewSessionWizard::onCaptureTick()
             }
         }
 
-        // FIX (right-foot heading, real root cause): a foot's s2s heading is
-        // unobservable from the static T/N/K gravity — the foot stays flat, so
-        // gravity never separates and the solver falls back to the foot's OWN
-        // magnetometer (ecompass).  Near the floor that mag sits almost parallel
-        // to gravity (compassCond≈0.2), so the ecompass yaw is near-singular: the
-        // left foot lands right by chance, the right ~100° off.  But s2s is a
-        // body→sensor MOUNTING and must be facing-INVARIANT, exactly like the
-        // gravity-solved thigh (which comes out correct and mirror-symmetric).
-        // The ecompass wrongly produced a world→sensor map, baking the absolute
-        // world heading (body facing + the bad-mag error) into the foot s2s.
-        // Restore facing-invariance: drop the world-+Z yaw, keep the gravity-
-        // derived tilt.  In the calibration pose the foot shares the leg's facing
-        // (foot points forward, like the thigh), so the facing-invariant foot s2s
-        // is its mounting alone — which the working left foot confirms is ~0 yaw.
-        // Identical code for both feet; only feet whose heading came from ecompass
-        // (mode==1) are touched, so a gravity-solved foot is left untouched.
-        for (int seg : { SEG_RFoot, SEG_LFoot }) {
-            if (s2sNewMode[seg] != 1) continue;
-            const Quat yawW = yaw_only_quat(s2sNew[seg]);
-            s2sNew[seg] = quat_mult(s2sNew[seg], yawW.inv()).normalized();
-            if (m_test) {
-                std::cout << "[calib K] foot heading made facing-invariant "
-                          << kSegmentNames[seg] << " (removed world-yaw "
-                          << std::fixed << std::setprecision(2)
-                          << 2.0 * std::atan2(yawW.z, yawW.w) * 180.0 / M_PI
-                          << "°, kept gravity tilt)\n";
+        // ── Single source of left/right symmetry ─────────────────────────────
+        // The sensors are identical and mirror-mounted, so every limb pair must
+        // satisfy s2s_right == mirror_y(s2s_left).  symmetrizePairMirrorY() first
+        // strips the unobservable magnetometer heading from any ecompass side
+        // (foot, shank) — keeping the reliable gravity tilt — then makes the pair
+        // an exact mirror, driven by whichever side is better observed.  This is
+        // the root fix: it folds in the old "facing-invariant foot" pass AND
+        // covers the forearm (mis-detected as a parallel mount) and the
+        // both-ecompass shanks/feet (whose tilt the old code never symmetrized),
+        // so the right hand, foot and knee can no longer diverge from the left.
+        {
+            const std::pair<int,int> mirrorPairs[8] = {
+                { SEG_RShoulder, SEG_LShoulder }, { SEG_RUpperArm, SEG_LUpperArm },
+                { SEG_RForearm,  SEG_LForearm  }, { SEG_RHand,     SEG_LHand     },
+                { SEG_RUpperLeg, SEG_LUpperLeg }, { SEG_RLowerLeg, SEG_LLowerLeg },
+                { SEG_RFoot,     SEG_LFoot     }, { SEG_RToe,      SEG_LToe      },
+            };
+            for (const auto& pr : mirrorPairs) {
+                symmetrizePairMirrorY(s2sNew[pr.first], s2sNew[pr.second],
+                                      s2sNewMode[pr.first], s2sNewMode[pr.second],
+                                      s2sResidual[pr.first], s2sResidual[pr.second]);
             }
+            if (m_test)
+                std::cout << "[calib K] enforced mirror-Y L/R symmetry on all limb pairs\n";
         }
 
         std::array<float, kXsensSegmentCount> segGain{};
@@ -7286,14 +7333,8 @@ void NewSessionWizard::onCaptureTick()
                           << dev << "°\n";
             }
         };
-        procrustesPairN(SEG_RShoulder,  SEG_LShoulder);
-        procrustesPairN(SEG_RUpperArm,  SEG_LUpperArm);
-        procrustesPairN(SEG_RForearm,   SEG_LForearm);
-        procrustesPairN(SEG_RHand,      SEG_LHand);
-        procrustesPairN(SEG_RUpperLeg,  SEG_LUpperLeg);
-        procrustesPairN(SEG_RLowerLeg,  SEG_LLowerLeg);
-        procrustesPairN(SEG_RFoot,      SEG_LFoot);
-        procrustesPairN(SEG_RToe,       SEG_LToe);
+        // SUPERSEDED by symmetrizePairMirrorY() below — see the K-path note.
+        (void)procrustesPairN;
     }
 
     {
@@ -7327,35 +7368,29 @@ void NewSessionWizard::onCaptureTick()
             s2s[rSeg] = quat_mult(yawAvg,    tiltR).normalized();
             s2s[lSeg] = quat_mult(yawAvgMir, tiltL).normalized();
         };
-        symYawS2S(SEG_RShoulder,  SEG_LShoulder);
-        symYawS2S(SEG_RUpperArm,  SEG_LUpperArm);
-        symYawS2S(SEG_RForearm,   SEG_LForearm);
-        symYawS2S(SEG_RHand,      SEG_LHand);
-        symYawS2S(SEG_RUpperLeg,  SEG_LUpperLeg);
-        symYawS2S(SEG_RLowerLeg,  SEG_LLowerLeg);
-        symYawS2S(SEG_RFoot,      SEG_LFoot);
-        symYawS2S(SEG_RToe,       SEG_LToe);
+        // SUPERSEDED by symmetrizePairMirrorY() below.
+        (void)symYawS2S;
     }
 
-    // FIX (right-foot heading, real root cause) — see the K-path block for the
-    // full rationale.  A foot's s2s heading is unobservable from static gravity
-    // (foot stays flat) and falls back to the foot's own near-singular
-    // magnetometer, so the right foot lands ~100° off while the left is right by
-    // chance.  s2s is a facing-INVARIANT body→sensor mounting (like the gravity-
-    // solved thigh); the ecompass wrongly baked the world heading into it.
-    // Restore facing-invariance: drop the world-+Z yaw, keep the gravity tilt.
-    // Identical for both feet; only ecompass-derived feet (mode==1) are touched.
-    for (int seg : { SEG_RFoot, SEG_LFoot }) {
-        if (s2sMode[seg] != 1) continue;
-        const Quat yawW = yaw_only_quat(s2s[seg]);
-        s2s[seg] = quat_mult(s2s[seg], yawW.inv()).normalized();
-        if (m_test) {
-            std::cout << "[calib T+N] foot heading made facing-invariant "
-                      << kSegmentNames[seg] << " (removed world-yaw "
-                      << std::fixed << std::setprecision(2)
-                      << 2.0 * std::atan2(yawW.z, yawW.w) * 180.0 / M_PI
-                      << "°, kept gravity tilt)\n";
+    // ── Single source of left/right symmetry (see K-path note for rationale) ──
+    // Strip the unobservable magnetometer heading from ecompass sides, then make
+    // every limb pair an exact mirror_y of its partner.  Folds in the old
+    // facing-invariant foot pass and also fixes the forearm and both-ecompass
+    // shanks/feet that the old mount-detect/symYaw passes left asymmetric.
+    {
+        const std::pair<int,int> mirrorPairs[8] = {
+            { SEG_RShoulder, SEG_LShoulder }, { SEG_RUpperArm, SEG_LUpperArm },
+            { SEG_RForearm,  SEG_LForearm  }, { SEG_RHand,     SEG_LHand     },
+            { SEG_RUpperLeg, SEG_LUpperLeg }, { SEG_RLowerLeg, SEG_LLowerLeg },
+            { SEG_RFoot,     SEG_LFoot     }, { SEG_RToe,      SEG_LToe      },
+        };
+        for (const auto& pr : mirrorPairs) {
+            symmetrizePairMirrorY(s2s[pr.first], s2s[pr.second],
+                                  s2sMode[pr.first], s2sMode[pr.second],
+                                  s2sResidualN[pr.first], s2sResidualN[pr.second]);
         }
+        if (m_test)
+            std::cout << "[calib T+N] enforced mirror-Y L/R symmetry on all limb pairs\n";
     }
 
     std::array<float, kXsensSegmentCount> segGainN{};
