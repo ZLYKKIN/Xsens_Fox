@@ -678,10 +678,11 @@ public:
     // Safe to call any time — used by the wizard's "Connect suit" button.
     void restart();
 
-    // Try to bring up Manus gloves (loads manus.dll + CoreSdk_Initialize).
-    // Returns true if initialisation succeeded.  Currently a soft-stub: the
-    // full Manus integration is a separate layer; this just verifies the
-    // SDK is present so the UI can tell the user.
+    // Bring up Manus gloves: loads ManusSDK.dll, resolves the CoreSdk exports,
+    // connects to a running ManusCore host and registers the ergonomics /
+    // skeleton / system stream callbacks.  Returns true once CoreSdk reports a
+    // live connection.  Idempotent — safe to call repeatedly (the DLL load and
+    // handshake are guarded).
     bool connectGloves();
     bool glovesReady()     const;       // physical glove(s) visible to Core
     bool glovesCoreReady() const;       // ManusCore responded to handshake
@@ -1536,6 +1537,7 @@ private:
     RecordSettings             m_recCfg{};
     std::vector<RecordedFrame> m_recBuffer;
     bool                       m_recOverflowWarned = false;  // warn once if take outgrows reserve
+    bool                       m_recHardCapped     = false;  // buffer frozen at the ~60 min hard cap
     qint64                     m_recStartMs = 0;
     qint64                     m_streamStartMs = 0;
     // HUD overlay in top-left of viewport showing REC/STREAM mode + seconds.

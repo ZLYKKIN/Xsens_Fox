@@ -4435,8 +4435,6 @@ static const Tr kTr[] = {
     {"motion_hint",        "Движение:",                         "Motion:"},
     {"tab_live",           "\xF0\x9F\x93\xA1  Live",             "\xF0\x9F\x93\xA1  Live"},
     {"tab_record",         "\xF0\x9F\x94\xB4  Запись",            "\xF0\x9F\x94\xB4  Record"},
-    {"record_placeholder", "Запись будет доступна в следующей версии.",
-                           "Recording will arrive in the next release."},
     {"menu_start_stream",  "Начать трансляцию",                 "Start streaming"},
     {"menu_camera",        "Камера",                            "Camera"},
     {"menu_view_opts",     "Параметры отображения",             "View options"},
@@ -11196,33 +11194,52 @@ void MainWindow::onRenderTick()
     // processing has the richest possible input.
     if (m_recording && qint64(f.sampleCounter) != m_recLastSample) {
         m_recLastSample = qint64(f.sampleCounter);
-        RecordedFrame rf;
-        rf.t         = double(QDateTime::currentMSecsSinceEpoch() - m_recStartMs)
-                       / 1000.0;
-        rf.segQuat   = qOut;
-        // Real world-space pelvis: locomotion-aware travel + floor clamp,
-        // mirroring the live streamer but WITHOUT the view-only yaw/shift/
-        // freeze, which would inject discontinuities the HD root filter rings
-        // on.  Without this the recording has no root motion (walks in place)
-        // and the HD root low-pass / foot-lock passes are no-ops.
-        QVector3D pelvisM(0.0f, 0.0f, 0.0f);
-        if (m_skel)
-            pelvisM = worldPelvisWithLoco(*m_skel, qOut, m_viewport->lastLocoOffset());
-        rf.pelvisPos = pelvisM;
-        rf.hasGloves = f.hasGloves && m_setup.useGloves;
-        if (rf.hasGloves) {
-            rf.rightGloveQ = f.rightGloveQ;
-            rf.leftGloveQ  = f.leftGloveQ;
+        const double tNow =
+            double(QDateTime::currentMSecsSinceEpoch() - m_recStartMs) / 1000.0;
+
+        // Hard cap (~60 min at the suit rate).  The soft warning below fires at
+        // ~10 min; if capture still hasn't been stopped we FREEZE the buffer
+        // here so a runaway take can't grow until the process is OOM-killed.
+        // The already-captured frames are kept and stay saveable; we only stop
+        // appending.  The save dialog must not be opened from the render tick,
+        // so this is intentionally a passive cap (stop + warn once), not an
+        // auto-stop.
+        const size_t kHardCapFrames = size_t(m_procRateHz * 60.0 * 60.0);
+        if (m_recBuffer.size() >= kHardCapFrames) {
+            if (!m_recHardCapped) {
+                m_recHardCapped = true;
+                std::cerr << "[record] ERROR: take hit the ~60 min hard cap ("
+                          << m_recBuffer.size() << " frames); further frames are "
+                             "dropped to protect memory - stop and save now.\n";
+            }
+        } else {
+            RecordedFrame rf;
+            rf.t         = tNow;
+            rf.segQuat   = qOut;
+            // Real world-space pelvis: locomotion-aware travel + floor clamp,
+            // mirroring the live streamer but WITHOUT the view-only yaw/shift/
+            // freeze, which would inject discontinuities the HD root filter rings
+            // on.  Without this the recording has no root motion (walks in place)
+            // and the HD root low-pass / foot-lock passes are no-ops.
+            QVector3D pelvisM(0.0f, 0.0f, 0.0f);
+            if (m_skel)
+                pelvisM = worldPelvisWithLoco(*m_skel, qOut, m_viewport->lastLocoOffset());
+            rf.pelvisPos = pelvisM;
+            rf.hasGloves = f.hasGloves && m_setup.useGloves;
+            if (rf.hasGloves) {
+                rf.rightGloveQ = f.rightGloveQ;
+                rf.leftGloveQ  = f.leftGloveQ;
+            }
+            m_recBuffer.push_back(std::move(rf));
+            if (!m_recOverflowWarned &&
+                m_recBuffer.size() > size_t(m_procRateHz * 60 * 10)) {
+                m_recOverflowWarned = true;
+                std::cerr << "[record] WARNING: take exceeded ~10 min ("
+                          << m_recBuffer.size() << " frames); the capture buffer "
+                             "keeps growing in RAM - stop and save soon.\n";
+            }
         }
-        m_recBuffer.push_back(std::move(rf));
-        if (!m_recOverflowWarned &&
-            m_recBuffer.size() > size_t(m_procRateHz * 60 * 10)) {
-            m_recOverflowWarned = true;
-            std::cerr << "[record] WARNING: take exceeded ~10 min ("
-                      << m_recBuffer.size() << " frames); the capture buffer "
-                         "keeps growing in RAM - stop and save soon.\n";
-        }
-        if (m_hud) m_hud->updateStats(qint64(m_recBuffer.size()), rf.t);
+        if (m_hud) m_hud->updateStats(qint64(m_recBuffer.size()), tNow);
     }
 
     if (m_test) {
@@ -11931,6 +11948,7 @@ void MainWindow::startRecording(const RecordSettings& cfg)
     m_recBuffer.clear();
     m_recBuffer.reserve(size_t(m_procRateHz * 60 * 10)); // ~10 min at the suit rate (one frame per unique sample)
     m_recOverflowWarned = false;
+    m_recHardCapped     = false;
     m_recLastSample = -1;
     m_recStartMs = QDateTime::currentMSecsSinceEpoch();
     m_recording = true;
