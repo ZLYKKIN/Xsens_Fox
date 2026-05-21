@@ -732,15 +732,13 @@ public:
     // prepare window doubles as a fusion warm-up.
     void resetFusion();
 
-    // Connection transport preference. COM = scan USB serial ports (Awinda
-    // dongle / MT-Link). Network = use XsScanner_enumerateNetworkDevices
-    // (WiFi Awinda station / Body Pack V2 on ethernet).
+    // Connection transport preference.  ComPort = scan USB serial ports (Awinda
+    // dongle / Link over USB).  Network = XsScanner_enumerateNetworkDevices
+    // (Link / Awinda discovered over WiFi or Ethernet).  The PC must already be
+    // on the same network as the suit — XDA does device discovery, not the
+    // Wi-Fi association itself (that is done at the OS level).
     enum class Transport { ComPort, Network };
     void setTransport(Transport t);
-    // User-supplied WiFi credentials. Purely informational for now — actual
-    // Windows WLAN handshake is outside the XDA surface. The app stores them
-    // so future WiFi-auto-connect can reuse them without re-asking.
-    void setWifiCredentials(const QString& ssid, const QString& password);
 
     // Expected native update rate (Hz) implied by the chosen suit (Link 240 /
     // Awinda 60).  Seeds freqHz before the device is queried so the IMU/AHRS
@@ -914,9 +912,7 @@ private:
     class QLabel*        m_modeHint   = nullptr;
     class QComboBox*     m_cbxSuit      = nullptr;   // Xsens Link 240 / Awinda 60
     class QComboBox*     m_cbxTransport = nullptr;   // COM / WiFi
-    class QLineEdit*     m_edSsid     = nullptr;
-    class QLineEdit*     m_edPassword = nullptr;
-    class QWidget*       m_wifiRow    = nullptr;
+    class QLabel*        m_wifiHint   = nullptr;     // WiFi: "join same network" hint
 
     // Page 3 (dims)
     class QLabel*          m_dimsTitle = nullptr;

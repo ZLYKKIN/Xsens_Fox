@@ -2353,8 +2353,6 @@ struct MocapReceiver::Impl {
     // enumerateNetworkDevices first (skip serial scan for faster WiFi boot).
     std::atomic<int> transport{0};              // 0 = ComPort, 1 = Network
     std::atomic<double> expectedRateHz{240.0};  // suit-implied rate (Link 240 / Awinda 60)
-    QString          wifiSsid;
-    QString          wifiPassword;
 
     explicit Impl(bool t) : test(t) {}
 
@@ -2390,13 +2388,6 @@ void MocapReceiver::stop() { m_impl->stop.store(true); }
 void MocapReceiver::setTransport(Transport t)
 {
     m_impl->transport.store(static_cast<int>(t));
-}
-
-void MocapReceiver::setWifiCredentials(const QString& ssid, const QString& password)
-{
-    QMutexLocker lk(&m_impl->lock);
-    m_impl->wifiSsid = ssid;
-    m_impl->wifiPassword = password;
 }
 
 void MocapReceiver::setExpectedRate(double hz)
@@ -3464,8 +3455,8 @@ void MocapReceiver::run()
     if (!sehCall([&]() { control = api.controlConstruct(); }) || !control) {
         unloadApi(api);
         I.setStatus(ConnStatus::Failed,
-                    "Не удалось инициализировать XDA. "
-                    "Проверьте драйвер Xsens и подключите dongle.",
+                    "Не удалось инициализировать XDA. Проверьте драйвер Xsens "
+                    "(Awinda dongle / USB-Link / сеть).",
                     this);
         return;
     }
@@ -3499,17 +3490,46 @@ void MocapReceiver::run()
     }
     const bool preferNet = (I.transport.load() == 1);
     std::size_t portCount = 0;
-    if (preferNet && api.enumerateNetworkDevices) {
+
+    // Network discovery is ASYNCHRONOUS.  xdaEnableNetworkScanning() (called
+    // above) starts a background listener; a Link/Awinda on the same WiFi or
+    // Ethernet network announces itself over the next few seconds.  A single
+    // enumerateNetworkDevices() right after enabling almost always returns
+    // empty — that was the root cause of "WiFi doesn't work".  Poll it instead,
+    // rebuilding the port array each pass so repeated scans don't accumulate
+    // stale entries; bail out early on stop or on the first device that answers.
+    auto pollNetworkDevices = [&](int maxAttempts) -> std::size_t {
+        if (!api.enumerateNetworkDevices) return 0;
+        for (int attempt = 1; attempt <= maxAttempts && !I.stop.load(); ++attempt) {
+            sehCall([&]() { api.arrayDestruct(ports); });
+            sehCall([&]() { api.portInfoArrayConstruct(ports, 0, nullptr); });
+            sehCall([&]() { api.enumerateNetworkDevices(ports); });
+            const std::size_t n =
+                *reinterpret_cast<std::size_t*>(portsStorage + sizeof(void*));
+            testLog("[xda] enumerateNetworkDevices attempt "
+                    + std::to_string(attempt) + "/" + std::to_string(maxAttempts)
+                    + " found " + std::to_string(n) + " device(s)", I.test);
+            if (n > 0) return n;
+            if (attempt < maxAttempts) {
+                I.setStatus(ConnStatus::Scanning,
+                            QString("Поиск Xsens в сети (WiFi/Ethernet)… %1/%2")
+                                .arg(attempt).arg(maxAttempts), this);
+                QThread::msleep(700);
+            }
+        }
+        return 0;
+    };
+
+    if (preferNet) {
         I.setStatus(ConnStatus::Scanning,
                     "Поиск Xsens в сети (WiFi/Ethernet)…", this);
-        sehCall([&]() { api.enumerateNetworkDevices(ports); });
-        portCount = *reinterpret_cast<std::size_t*>(portsStorage + sizeof(void*));
-        testLog("[xda] enumerateNetworkDevices found "
-                + std::to_string(portCount) + " device(s)", I.test);
-        // Fallback to COM scan if nothing found on network.
-        if (portCount == 0) {
+        portCount = pollNetworkDevices(17);          // ~12 s of async discovery
+        // Fallback to a serial COM scan if nothing answered on the network.
+        if (portCount == 0 && !I.stop.load()) {
             I.setStatus(ConnStatus::Scanning,
                         "Сеть пуста — пробуем COM порты…", this);
+            sehCall([&]() { api.arrayDestruct(ports); });
+            sehCall([&]() { api.portInfoArrayConstruct(ports, 0, nullptr); });
             sehCall([&]() { api.scanPorts(ports, 0, 1000, 1, 1); });
             portCount =
                 *reinterpret_cast<std::size_t*>(portsStorage + sizeof(void*));
@@ -3521,14 +3541,12 @@ void MocapReceiver::run()
             *reinterpret_cast<std::size_t*>(portsStorage + sizeof(void*));
         testLog("[xda] scanPorts found " + std::to_string(portCount) + " port(s)",
                 I.test);
-        // Fallback: USB-NCM / Ethernet enumeration (Body Pack V2 / WiFi path).
-        if (portCount == 0 && api.enumerateNetworkDevices) {
+        // Fallback: network discovery (Link/Awinda over WiFi/Ethernet, Body
+        // Pack V2 on USB-NCM).  Same async poll as the WiFi path, shorter budget.
+        if (portCount == 0 && !I.stop.load()) {
             I.setStatus(ConnStatus::Scanning,
                         "Поиск Xsens в сети (WiFi/Ethernet)…", this);
-            sehCall([&]() { api.enumerateNetworkDevices(ports); });
-            portCount = *reinterpret_cast<std::size_t*>(portsStorage + sizeof(void*));
-            testLog("[xda] enumerateNetworkDevices found "
-                    + std::to_string(portCount) + " device(s)", I.test);
+            portCount = pollNetworkDevices(11);      // ~7 s
         }
     }
 
@@ -3537,10 +3555,14 @@ void MocapReceiver::run()
         api.controlClose(control);
         if (api.controlDestruct) api.controlDestruct(control);
         unloadApi(api);
-        I.setStatus(ConnStatus::NoDevice,
-                    "XsScanner_scanPorts found no Xsens hardware. "
-                    "Is the dongle plugged in?",
-                    this);
+        const QString noDevMsg = preferNet
+            ? QStringLiteral(
+                "Костюм не найден в сети. Убедитесь, что этот ПК и костюм "
+                "подключены к ОДНОЙ Wi-Fi сети (проверьте Wi-Fi в Windows).")
+            : QStringLiteral(
+                "Xsens не найден. Подключите Awinda dongle или USB-кабель Link "
+                "и проверьте драйвер Xsens.");
+        I.setStatus(ConnStatus::NoDevice, noDevMsg, this);
         return;
     }
 
@@ -4396,8 +4418,8 @@ struct Tr { const char* key; const char* ru; const char* en; };
 static const Tr kTr[] = {
     {"app_title",          "Fox-Mocap — Beta 0.1",              "Fox-Mocap — Beta 0.1"},
     {"start_new_session",  "Начать новую сессию",               "Start new session"},
-    {"welcome_sub",        "Интерактивная mocap-студия для костюма Xsens Link",
-                           "Interactive mocap studio for the Xsens Link suit"},
+    {"welcome_sub",        "Интерактивная mocap-студия для костюмов Xsens Link и Awinda",
+                           "Interactive mocap studio for the Xsens Link and Awinda suits"},
     {"language",           "Язык",                              "Language"},
     {"back",               "Назад",                             "Back"},
     {"continue",           "Продолжить",                        "Continue"},
@@ -4575,18 +4597,20 @@ static const Tr kTr[] = {
     {"sns_l_foot",         "левая стопа",                       "l foot"},
 
     // Transport / suit selectors (combo items keep the leading emoji).
-    {"transport_com",      "\xF0\x9F\x94\x8C  COM порт — Awinda / MT-Link",
-                           "\xF0\x9F\x94\x8C  COM port — Awinda / MT-Link"},
-    {"transport_wifi",     "\xF0\x9F\x93\xA1  WiFi — Awinda / Link station",
-                           "\xF0\x9F\x93\xA1  WiFi — Awinda / Link station"},
+    {"transport_com",      "\xF0\x9F\x94\x8C  COM-порт — USB / Awinda dongle",
+                           "\xF0\x9F\x94\x8C  COM port — USB / Awinda dongle"},
+    {"transport_wifi",     "\xF0\x9F\x93\xA1  WiFi / Ethernet — по сети (Link / Awinda)",
+                           "\xF0\x9F\x93\xA1  WiFi / Ethernet — network (Link / Awinda)"},
     {"suit_awinda",        "\xF0\x9F\x9F\xA0  Xsens Awinda — 60 Гц",
                            "\xF0\x9F\x9F\xA0  Xsens Awinda — 60 Hz"},
     {"suit_link",          "\xF0\x9F\x9F\xA3  Xsens Link — 240 Гц",
                            "\xF0\x9F\x9F\xA3  Xsens Link — 240 Hz"},
 
-    // WiFi credential placeholders.
-    {"wifi_ssid_ph",       "\xF0\x9F\x93\xB6  SSID сети",        "\xF0\x9F\x93\xB6  Network SSID"},
-    {"wifi_pass_ph",       "\xF0\x9F\x94\x91  Пароль",           "\xF0\x9F\x94\x91  Password"},
+    // WiFi connection hint (the PC must already be on the suit's network).
+    {"wifi_hint",          "Подключите этот ПК к той же Wi-Fi сети, что и костюм "
+                           "(через настройки Wi-Fi Windows), затем нажмите «Подключить».",
+                           "Connect this PC to the same Wi-Fi network as the suit "
+                           "(via Windows Wi-Fi settings), then press Connect."},
 
     // K-pose seated calibration hint.
     {"kpose_hint",         "K-поза: сядьте на стул (бёдра горизонтально, колени 90°) + руки прямо вперёд горизонтально",
@@ -4896,55 +4920,24 @@ void NewSessionWizard::buildPages()
             if (m_cbxTransport) m_cbxTransport->setCurrentIndex(s == SuitType::Link ? 1 : 0);
         });
 
-        // WiFi credentials row (hidden unless WiFi mode is chosen).
-        m_wifiRow = new QWidget(p);
-        {
-            auto* wl = new QHBoxLayout(m_wifiRow);
-            wl->setContentsMargins(0, 0, 0, 0);
-            wl->setSpacing(10);
-            m_edSsid = new QLineEdit(m_wifiRow);
-            m_edSsid->setPlaceholderText(Lang::t("wifi_ssid_ph"));
-            m_edSsid->setMinimumHeight(34);
-            m_edSsid->setMinimumWidth(200);
-            m_edPassword = new QLineEdit(m_wifiRow);
-            m_edPassword->setPlaceholderText(Lang::t("wifi_pass_ph"));
-            m_edPassword->setEchoMode(QLineEdit::Password);
-            m_edPassword->setMinimumHeight(34);
-            m_edPassword->setMinimumWidth(200);
-            const QString wifiStyle =
-                "QLineEdit { background:#1b1b1b; color:#eee;"
-                " border:1px solid #3a3a3a; border-radius:8px;"
-                " padding:4px 10px; font-weight:600; }"
-                "QLineEdit:focus { border:1px solid #FF7A1A; }";
-            m_edSsid->setStyleSheet(wifiStyle);
-            m_edPassword->setStyleSheet(wifiStyle);
-            wl->addWidget(m_edSsid, 1);
-            wl->addWidget(m_edPassword, 1);
-        }
-        m_wifiRow->hide();
+        // WiFi hint (shown only in WiFi mode).  XDA discovers the suit over the
+        // network — it does NOT join Wi-Fi — so the PC must already be on the
+        // same access point as the suit (joined via Windows).  No SSID/password.
+        m_wifiHint = new QLabel(p);
+        m_wifiHint->setWordWrap(true);
+        m_wifiHint->setAlignment(Qt::AlignCenter);
+        m_wifiHint->setObjectName("subtle");
+        m_wifiHint->setText(Lang::t("wifi_hint"));
+        m_wifiHint->hide();
 
         connect(m_cbxTransport, QOverload<int>::of(&QComboBox::currentIndexChanged),
                 this, [this](int idx) {
             const bool wifi = (idx == 1);
-            if (m_wifiRow) m_wifiRow->setVisible(wifi);
-            if (m_rx) {
+            if (m_wifiHint) m_wifiHint->setVisible(wifi);
+            if (m_rx)
                 m_rx->setTransport(wifi
                     ? MocapReceiver::Transport::Network
                     : MocapReceiver::Transport::ComPort);
-                if (wifi && m_edSsid && m_edPassword)
-                    m_rx->setWifiCredentials(m_edSsid->text(),
-                                              m_edPassword->text());
-            }
-        });
-        connect(m_edSsid, &QLineEdit::editingFinished, this, [this]() {
-            if (m_rx && m_edSsid && m_edPassword)
-                m_rx->setWifiCredentials(m_edSsid->text(),
-                                          m_edPassword->text());
-        });
-        connect(m_edPassword, &QLineEdit::editingFinished, this, [this]() {
-            if (m_rx && m_edSsid && m_edPassword)
-                m_rx->setWifiCredentials(m_edSsid->text(),
-                                          m_edPassword->text());
         });
 
         // Suit connect row
@@ -5004,7 +4997,7 @@ void NewSessionWizard::buildPages()
         lay->addSpacing(8);
         lay->addWidget(m_cbxTransport, 0, Qt::AlignHCenter);
         lay->addSpacing(8);
-        lay->addWidget(m_wifiRow, 0, Qt::AlignHCenter);
+        lay->addWidget(m_wifiHint, 0, Qt::AlignHCenter);
         lay->addSpacing(16);
         lay->addLayout(suitRow);
         lay->addSpacing(10);
@@ -5435,8 +5428,7 @@ void NewSessionWizard::retranslate()
         m_cbxSuit->setItemText(0, Lang::t("suit_awinda"));
         m_cbxSuit->setItemText(1, Lang::t("suit_link"));
     }
-    if (m_edSsid)         m_edSsid->setPlaceholderText(Lang::t("wifi_ssid_ph"));
-    if (m_edPassword)     m_edPassword->setPlaceholderText(Lang::t("wifi_pass_ph"));
+    if (m_wifiHint)       m_wifiHint->setText(Lang::t("wifi_hint"));
     if (m_btnConnectSuit) m_btnConnectSuit->setText(Lang::t(
         (m_rx && m_rx->isStreaming()) ? "suit_connected" : "connect_suit"));
     if (m_btnConnectGloves) m_btnConnectGloves->setText(Lang::t("connect_gloves"));
