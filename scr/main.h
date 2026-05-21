@@ -1560,6 +1560,7 @@ private:
     bool                       m_takePending = false;  // a recorded take is held unsaved
     RecordSettings             m_recCfg{};
     std::vector<RecordedFrame> m_recBuffer;
+    bool                       m_recOverflowWarned = false;  // warn once if take outgrows reserve
     qint64                     m_recStartMs = 0;
     qint64                     m_streamStartMs = 0;
     // HUD overlay in top-left of viewport showing REC/STREAM mode + seconds.
