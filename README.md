@@ -5,6 +5,9 @@
 [![Release](https://img.shields.io/github/v/release/ZLYKKIN/Xsens_Fox?include_prereleases&sort=semver&label=release)](https://github.com/ZLYKKIN/Xsens_Fox/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/ZLYKKIN/Xsens_Fox/total.svg)](https://github.com/ZLYKKIN/Xsens_Fox/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Telegram](https://img.shields.io/badge/Telegram-%40ZLYKKIN__FOX-26A5E4?logo=telegram&logoColor=white)](https://t.me/ZLYKKIN_FOX)
+
+📨 **Contact / Контакт:** [**@ZLYKKIN_FOX** on Telegram](https://t.me/ZLYKKIN_FOX) — questions, bug reports, mocap-rig advice.
 
 ---
 
