@@ -11188,10 +11188,14 @@ void MainWindow::onRenderTick()
             // f.rightGloveQ[i] / f.leftGloveQ[i] — это cumulative-rotation
             // в hand-local frame.  qOut[SEG_RHand] / qOut[SEG_LHand] —
             // мировые ротации запястий (NWU).
-            const Quat qRWristWorld = quat_mult(qStream[SEG_RHand],
-                                                m_skel->defAngFor(SEG_RHand));
-            const Quat qLWristWorld = quat_mult(qStream[SEG_LHand],
-                                                m_skel->defAngFor(SEG_LHand));
+            // Compose fingers on the hand SEGMENT frame (qOut, no defAng).  The
+            // body wire now ships qOut without defAng and the carpus follows it,
+            // so composing here on the world wrist (qOut*defAng) double-applied
+            // defAng[Hand] onto every finger in Blender's carpus^-1*finger
+            // (Rot_Z ±90° splay / twisted palms).  No-defAng wrist => finger
+            // local resolves to gloveQ*finger90 (clean).
+            const Quat qRWristWire = qStream[SEG_RHand];
+            const Quat qLWristWire = qStream[SEG_LHand];
 
             // Y-flip для левой руки (отражение Manus → Xsens body frame
             // для пальцев).
@@ -11202,10 +11206,10 @@ void MainWindow::onRenderTick()
             for (int i = 0; i < kFingerSegmentsHand; ++i) {
                 const Quat rQ = quat_mult(f.rightGloveQ[i], finger90);
                 const Quat lQ = quat_mult(f.leftGloveQ[i],  finger90);
-                rGloveWorld[i] = quat_mult(qRWristWorld, rQ);
-                lGloveWorld[i] = quat_mult(qLWristWorld, mirror_y_quat(lQ));
-                rGloveWorldP[i] = vec_rotate(f.rightGloveP[i],              qRWristWorld);
-                lGloveWorldP[i] = vec_rotate(mirrorManusL(f.leftGloveP[i]), qLWristWorld);
+                rGloveWorld[i] = quat_mult(qRWristWire, rQ);
+                lGloveWorld[i] = quat_mult(qLWristWire, mirror_y_quat(lQ));
+                rGloveWorldP[i] = vec_rotate(f.rightGloveP[i],              qRWristWire);
+                lGloveWorldP[i] = vec_rotate(mirrorManusL(f.leftGloveP[i]), qLWristWire);
             }
 
             m_streamer->pushFrameWithGloves(
