@@ -1186,6 +1186,40 @@ QVector3D LocomotionSolver::update(const Quat& qR,
         // div-by-zero).
         const double dt = m_haveLast ? std::clamp(t - m_lastT, 1e-3, 0.1) : 0.01;
 
+        // One-shot dump of EVERY locomotion tunable (named members only — no
+        // literal duplication) so a captured -test log is self-describing: the
+        // thresholds/rates that drive commit/release, ZUPT, pose classification
+        // and the airborne gates are recorded once, already rate-adjusted for
+        // the active suit cadence (Link 240 / Awinda 60).
+        if (m_verbose && !m_dbgConfigLogged) {
+            m_dbgConfigLogged = true;
+            std::ostringstream cs;
+            cs << std::fixed << std::setprecision(3)
+               << "\n========== [LOCO CONFIG] tunables @ " << m_procRateHz << " Hz ==========\n"
+               << "  actorHeight=" << m_actorHeightM << "m footLen=" << m_footLengthM << "m\n"
+               << "  stillRad=" << m_stillRad << " pelvisStillRad=" << m_pelvisStillRad
+               << " heightMargin=" << m_heightMargin << " heightMarginSlow=" << m_heightMarginSlow
+               << " switchMargin=" << m_switchMargin << " latchTicks=" << m_latchTicks << "\n"
+               << "  fkxyStableRange=" << m_fkxyStableRange << "m fkxyWindow=" << m_fkxyWindow
+               << " conf[commit=" << m_confCommit << " release=" << m_confRelease
+               << " hystBand=" << m_confHystBand
+               << " rise=" << m_confRiseRate << " fall=" << m_confFallRate << "]\n"
+               << "  offsetRate[primary=" << m_offsetRatePrimary << " double=" << m_offsetRateDouble
+               << "] zRate[moving=" << m_zRatePelvisMoving << " still=" << m_zRatePelvisStill
+               << " drive=" << m_zDriveRate << "]\n"
+               << "  pose[stableTicks=" << m_poseStableTicks << " zuptTicks=" << m_zuptTicksThresh
+               << " lieTiltCos=" << m_lieTiltCosThresh << " squatKnee=" << m_squatKneeThresh
+               << " sitKnee=" << m_sitKneeThresh << "]\n"
+               << "  squat[lowZTicks=" << m_lowZTicksRequired << " lowZBand=" << m_lowZBandM
+               << "m zSnapFrames=" << m_zSnapBlendFrames << "]\n"
+               << "  roll[angVThresh=" << m_rollAngVThresh << " xyRangeMax=" << m_rollXYRangeMax << "m]"
+               << " airborne[stableTicks=" << m_airborneStableTicks
+               << " landedRamp=" << m_landedRampTicks << " commitFade=" << m_commitFadeTicks << "]\n"
+               << "============================================================\n";
+            std::cout << cs.str();
+            std::cout.flush();
+        }
+
         // Rate-adjusted first-order blend coefficients.  The inline EMAs below
         // were tuned at 90 Hz; rateAdjustAlpha re-expresses them for the actual
         // step dt so smoothing time-constants are preserved at 60 / 240 Hz.
@@ -1323,6 +1357,9 @@ QVector3D LocomotionSolver::update(const Quat& qR,
                 smoothstep01((stableHi - double(xyL)) / stableDen));
         const bool rFKXYStable = (rFKXYStableW > 0.5);
         const bool lFKXYStable = (lFKXYStableW > 0.5);
+        m_dbgFkxyRangeR = double(xyR);    m_dbgFkxyRangeL = double(xyL);
+        m_dbgFkxyStableWR = rFKXYStableW; m_dbgFkxyStableWL = lFKXYStableW;
+        m_dbgYawFreezeW = yawFreezeW;
 
         // 4. Classify pose.
         double tiltCos = 1.0;
@@ -1391,6 +1428,7 @@ QVector3D LocomotionSolver::update(const Quat& qR,
         const double rollingWL = angFastL * xyTightL;
         const bool rollingR = (rollingWR > 0.5);
         const bool rollingL = (rollingWL > 0.5);
+        m_dbgRollingWR = rollingWR;  m_dbgRollingWL = rollingWL;
 
         // 5. Initialisation on first frame.
         if (!m_initialised) {
@@ -1438,6 +1476,7 @@ QVector3D LocomotionSolver::update(const Quat& qR,
         // вместо bool — плавный переход в погранзоне stable/non-stable.
         const double rawCR = std::max(sStill(m_rAngV), rFKXYStableW) * sLow(fkR);
         const double rawCL = std::max(sStill(m_lAngV), lFKXYStableW) * sLow(fkL);
+        m_dbgRawCR = rawCR;  m_dbgRawCL = rawCL;
         auto smooth = [](double prev, double raw, double rise, double fall) {
             const double r = (raw > prev) ? rise : fall;
             return (1.0 - r) * prev + r * raw;
@@ -1467,6 +1506,7 @@ QVector3D LocomotionSolver::update(const Quat& qR,
 
         const double pelvisRotKill = std::max(0.0, std::min(1.0, (m_pelvisAngV - 0.6) / 0.8));
         const bool pelvisRotating = pelvisRotKill > 0.5;
+        m_dbgPelvisRotKill = pelvisRotKill;
 
         // FIX (airborne phase): отдельная PoseAirborne фаза для прыжков.
         // Оценка vertical velocity таза по изменению m_offsetLast.z за dt.
@@ -1495,6 +1535,8 @@ QVector3D LocomotionSolver::update(const Quat& qR,
             const bool ballistic  = feetLifted && (m_pelvisZVel > 0.50);
             const bool driftAir   = feetLifted && (!m_committedR) && (!m_committedL)
                                   && (m_airborneTicks > 0 || m_pelvisZVel > 0.15);
+            m_dbgFeetLifted = feetLifted;  m_dbgBallistic = ballistic;
+            m_dbgDriftAir   = driftAir;
 
             if (ballistic || driftAir) {
                 m_airborneTicks = std::min(m_airborneTicks + 1, 4096);
@@ -1704,6 +1746,7 @@ QVector3D LocomotionSolver::update(const Quat& qR,
         // 11. Apply adaptive LP rates.  XY gets the imbalance-weighted rate;
         //     Z gets the pelvis-motion-dependent rate.
         const double imbalance = (total > 1e-3) ? std::abs(effR - effL) / total : 0.0;
+        m_dbgImbalance = imbalance;  m_dbgEffR = effR;  m_dbgEffL = effL;
         const double xyRate = m_offsetRateDouble
                             + (m_offsetRatePrimary - m_offsetRateDouble) * imbalance;
         const double effXyRate = xyRate * (1.0 - pelvisRotKill);
@@ -1758,6 +1801,7 @@ QVector3D LocomotionSolver::update(const Quat& qR,
             const float dx = newOff.x() - m_offsetLast.x();
             const float dy = newOff.y() - m_offsetLast.y();
             const float dl = std::sqrt(dx*dx + dy*dy);
+            m_dbgMaxStepXY = double(maxStepXY);  m_dbgStepClampedXY = (dl > maxStepXY);
             if (dl > maxStepXY) {
                 const float k = maxStepXY / dl;
                 newOff.setX(m_offsetLast.x() + dx * k);
@@ -11580,6 +11624,20 @@ void MainWindow::onRenderTick()
                    << " anchor=" << fmtV3(L.anchorL) << "\n";
                 ss << "  pelvisAngV=" << L.pelvisAngV << " yawAngV=" << L.pelvisYawAngV
                    << " locoOffset=" << fmtV3(L.offset) << "\n";
+                // Decision internals — why the offset/anchors moved (single source).
+                ss << "  [decide] rawC R=" << L.rawCR << " L=" << L.rawCL
+                   << " eff R=" << L.effR << " L=" << L.effL
+                   << " imbalance=" << L.imbalance
+                   << " stepCapXY=" << L.maxStepXY << "m"
+                   << (L.stepClampedXY ? " *CLAMPED*" : "") << "\n";
+                ss << "  [decide] fkXYrange R=" << L.fkxyRangeR << " L=" << L.fkxyRangeL
+                   << " fkXYstableW R=" << L.fkxyStableWR << " L=" << L.fkxyStableWL
+                   << " yawFreezeW=" << L.yawFreezeW
+                   << " pelvisRotKill=" << L.pelvisRotKill
+                   << " rollW R=" << L.rollingWR << " L=" << L.rollingWL << "\n";
+                ss << "  [decide] airborne: feetLifted=" << (L.feetLifted ? 1 : 0)
+                   << " ballistic=" << (L.ballistic ? 1 : 0)
+                   << " driftAir=" << (L.driftAir ? 1 : 0) << "\n";
                 // Foot roll (single-source fk.kp, body frame, root@origin):
                 // heel=SEG_*Foot, ball=SEG_*Toe, tip=26/27.  Lowest Z = ground
                 // contact; footPitchZ sign says heel-down(+) vs toe-down(-).  Lets
