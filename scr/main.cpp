@@ -10622,7 +10622,7 @@ void JointOffsetsDialog::buildUi()
 
                 auto* spin = new QDoubleSpinBox(card);
                 spin->setRange(-180.0, 180.0);
-                spin->setSingleStep(0.5);
+                spin->setSingleStep(0.1);
                 spin->setDecimals(1);
                 spin->setSuffix(QString::fromUtf8("°"));
                 spin->setMinimumWidth(96);
