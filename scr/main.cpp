@@ -5851,6 +5851,75 @@ void NewSessionWizard::onCountdownTick()
     }
 }
 
+// Diagnostic-only (-test) dump of the sensor-to-segment solve, used to pin down
+// WHY one side calibrates wrong.  Splits each s2s into heading (yaw about world
+// +Z) vs tilt, reports the magnetometer conditioning (how observable the heading
+// is for that sensor), and the L/R mirror deviation of yaw vs tilt SEPARATELY.
+// Feet/lower legs cannot separate gravity in T/N/K, so their yaw is magnetometer-
+// derived; if a foot's mirror-TILT deviation is small but its mirror-YAW
+// deviation is large, that proves the error is in the (mag-derived) heading, not
+// the gravity tilt.  Pure logging — no behaviour change.
+static void dumpS2sDiag(const char* tag,
+                        const std::array<Quat, kXsensSegmentCount>& s2s,
+                        const std::array<int,  kXsensSegmentCount>& mode,
+                        const std::array<QVector3D, kXsensSegmentCount>& accAccumN,
+                        const std::array<QVector3D, kXsensSegmentCount>& magAccumN,
+                        const std::array<int, kXsensSegmentCount>& countN)
+{
+    auto yawSignedDeg = [](const Quat& q) {
+        const Quat y = yaw_only_quat(q);
+        return 2.0 * std::atan2(y.z, y.w) * 180.0 / M_PI;     // about world +Z
+    };
+    auto tiltOf = [](const Quat& q) {
+        return quat_mult(q, yaw_only_quat(q).inv()).normalized();
+    };
+    std::cout << std::fixed << std::setprecision(3);
+    std::cout << "[calib] s2sDiag (" << tag << ") — per-segment heading source + yaw/tilt split\n";
+    for (int i = 0; i < kXsensSegmentCount; ++i) {
+        if (mode[i] == 2) continue;                            // identity (no sensor)
+        const int c = countN[i];
+        QVector3D aDir(0, 0, 0), mDir(0, 0, 0);
+        double cond = 0.0;                                     // |cross(accDir,magDir)| = sin(angle)
+        if (c > 0) {
+            aDir = (accAccumN[i] / float(c)).normalized();
+            mDir = (magAccumN[i] / float(c)).normalized();
+            cond = double(QVector3D::crossProduct(aDir, mDir).length());
+        }
+        const char* ms = (mode[i] == 0 ? "triad" : (mode[i] == 1 ? "ecomp" : "ident"));
+        std::cout << "  s2sDiag[" << std::setw(2) << i << "] " << std::left << std::setw(12)
+                  << kSegmentNames[i] << std::right << " mode=" << ms
+                  << " accDir=(" << std::setw(6) << aDir.x() << "," << std::setw(6) << aDir.y()
+                  << "," << std::setw(6) << aDir.z() << ")"
+                  << " magDir=(" << std::setw(6) << mDir.x() << "," << std::setw(6) << mDir.y()
+                  << "," << std::setw(6) << mDir.z() << ")"
+                  << " compassCond=" << std::setw(5) << cond
+                  << " s2sTot=" << std::setw(7) << quat_angle_deg(s2s[i]) << "°"
+                  << " s2sYaw=" << std::setw(8) << yawSignedDeg(s2s[i]) << "°"
+                  << " s2sTilt=" << std::setw(7) << quat_angle_deg(tiltOf(s2s[i])) << "°\n";
+    }
+    auto pairLine = [&](int r, int l) {
+        if (mode[r] == 2 || mode[l] == 2) return;
+        const Quat yawR  = yaw_only_quat(s2s[r]);
+        const Quat lMir  = mirror_y_quat(s2s[l]);              // expected = R if mirror-symmetric
+        const Quat yawLm = yaw_only_quat(lMir);
+        const double mYaw  = quat_angle_deg(quat_mult(yawR.inv(), yawLm).normalized());
+        const Quat tiltR  = quat_mult(s2s[r], yawR.inv()).normalized();
+        const Quat tiltLm = quat_mult(lMir,   yawLm.inv()).normalized();
+        const double mTilt = quat_angle_deg(quat_mult(tiltR.inv(), tiltLm).normalized());
+        std::cout << "  s2sPair " << std::left << std::setw(12) << kSegmentNames[r] << std::right
+                  << " mirrorYawDev=" << std::setw(7) << mYaw << "°"
+                  << " mirrorTiltDev=" << std::setw(7) << mTilt << "°\n";
+    };
+    pairLine(SEG_RShoulder, SEG_LShoulder);
+    pairLine(SEG_RUpperArm, SEG_LUpperArm);
+    pairLine(SEG_RForearm,  SEG_LForearm);
+    pairLine(SEG_RHand,     SEG_LHand);
+    pairLine(SEG_RUpperLeg, SEG_LUpperLeg);
+    pairLine(SEG_RLowerLeg, SEG_LLowerLeg);
+    pairLine(SEG_RFoot,     SEG_LFoot);
+    std::cout.flush();
+}
+
 void NewSessionWizard::onCaptureTick()
 {
     const SuitPose fr = m_rx->snapshot();
@@ -6668,44 +6737,6 @@ void NewSessionWizard::onCaptureTick()
             }
         }
 
-        // FIX (right-foot s2s magnetometer fragility): the feet have identical
-        // T- and N-pose default angles, so |cross(gT_b,gN_b)|≈0 → TRIAD cannot
-        // run → the foot s2s ALWAYS comes from ecompass, i.e. its yaw is fixed by
-        // the magnetometer.  A foot sensor tucked in a sock near the floor reads a
-        // distorted field → a large yaw error (the log's r_foot s2s = 124°),
-        // while a cleaner foot stays correct; symYawS2S_K then BAILS because the
-        // two feet disagree (|d| < guard), leaving the bad foot uncorrected.  The
-        // foot TILT (pitch/roll) from gravity is reliable (ecompass residual≈0);
-        // only the YAW is bad.  In the calibration pose the foot and its shank
-        // share the same heading and both sensors sit roughly limb-aligned, so a
-        // correct foot yaw is CLOSE to the (now K-pose-corrected, magnetometer-
-        // FREE) shank yaw.  If a foot's yaw deviates far from its shank's, the
-        // magnetometer is the cause → snap that foot's yaw to the shank's, keeping
-        // its gravity tilt.  Per-foot and threshold-gated, so a clean foot (small
-        // deviation) — e.g. the working left foot — is left exactly as-is.
-        {
-            auto rescueFootYaw = [&](int footSeg, int shankSeg) {
-                if (s2sNewMode[footSeg] == 2 || s2sNewMode[shankSeg] == 2) return;
-                if (m_accumCountT[shankSeg] < 10 || m_accumCountK[shankSeg] < 10) return;
-                const Quat yawFoot  = yaw_only_quat(s2sNew[footSeg]);
-                const Quat yawShank = yaw_only_quat(s2sNew[shankSeg]);
-                const double dev = quat_angle_deg(
-                    quat_mult(yawShank.inv(), yawFoot).normalized());   // 0..180°
-                constexpr double kFootYawTolDeg = 50.0;
-                if (dev <= kFootYawTolDeg) return;     // foot heading already sane
-                const Quat tiltFoot = quat_mult(s2sNew[footSeg], yawFoot.inv()).normalized();
-                s2sNew[footSeg] = quat_mult(yawShank, tiltFoot).normalized();
-                if (m_test) {
-                    std::cout << "[calib K] foot yaw rescued " << kSegmentNames[footSeg]
-                              << " (was " << std::fixed << std::setprecision(1) << dev
-                              << "° off " << kSegmentNames[shankSeg]
-                              << " — magnetometer suspected, inherited shank yaw)\n";
-                }
-            };
-            rescueFootYaw(SEG_RFoot, SEG_RLowerLeg);
-            rescueFootYaw(SEG_LFoot, SEG_LLowerLeg);
-        }
-
         std::array<float, kXsensSegmentCount> segGain{};
         for (int i = 0; i < kXsensSegmentCount; ++i) {
             const float noise = std::sqrt(float(gyrStdDev[i].lengthSquared() / 3.0f));
@@ -6736,6 +6767,8 @@ void NewSessionWizard::onCaptureTick()
             }
         }
         m_rx->setSegmentGain(segGain);
+        if (m_test) dumpS2sDiag("K-pose", s2sNew, s2sNewMode,
+                                m_accAccumN, m_magAccumN, m_accumCountN);
         m_rx->setS2sAlignment(s2sNew);
 
         for (int i = 0; i < kXsensSegmentCount; ++i) {
@@ -7306,6 +7339,8 @@ void NewSessionWizard::onCaptureTick()
     }
     m_rx->setSegmentGain(segGainN);
 
+    if (m_test) dumpS2sDiag("T+N", s2s, s2sMode,
+                            m_accAccumN, m_magAccumN, m_accumCountN);
     m_rx->setS2sAlignment(s2s);
 
     if (m_test) {
