@@ -253,6 +253,16 @@ static inline Quat mirror_y_quat(const Quat& q) {
     return Quat(q.w, -q.x, q.y, -q.z);
 }
 
+// Return `q` expressed in the same hemisphere as `prev`.  A quaternion and its
+// negation encode the *same* rotation, so this never changes what a frame
+// represents — but it stops the sign from flipping between consecutive frames,
+// which would otherwise make a receiver that interpolates (UE LiveLink /
+// Blender) SLERP the long way around and visibly pop ("terminator-line" jitter).
+static inline Quat hemisphereContinuous(const Quat& q, const Quat& prev) {
+    const double dot = q.w*prev.w + q.x*prev.x + q.y*prev.y + q.z*prev.z;
+    return (dot < 0.0) ? Quat(-q.w, -q.x, -q.y, -q.z) : q;
+}
+
 // ============================================================================
 //  SkeletonXsens — topology, lengths, default angles, FK.
 // ============================================================================
@@ -573,7 +583,18 @@ static Quat ecompassNED(const QVector3D& a, const QVector3D& m)
 {
     // Build rotation matrix whose rows are sensor-axes expressed in NED.
     QVector3D down = -a.normalized();                 // gravity points up in sensor
-    QVector3D east = QVector3D::crossProduct(down, m).normalized();
+    // Degenerate guard: when the magnetic vector is (nearly) parallel to
+    // gravity, cross(down, m) collapses to ~0 and the basis is undefined.
+    // Fall back to any axis perpendicular to `down` so the matrix stays
+    // orthonormal and finite — yaw is then arbitrary, but the caller's
+    // residual check rejects such a pose anyway.
+    QVector3D east = QVector3D::crossProduct(down, m);
+    if (east.lengthSquared() < 1e-12f) {
+        east = QVector3D::crossProduct(down, QVector3D(1, 0, 0));
+        if (east.lengthSquared() < 1e-12f)
+            east = QVector3D::crossProduct(down, QVector3D(0, 1, 0));
+    }
+    east.normalize();
     QVector3D north = QVector3D::crossProduct(east, down).normalized();
     // R: rows = north, east, down  (NED) — world basis in sensor frame.
     const double m00 = north.x(), m01 = north.y(), m02 = north.z();
@@ -906,6 +927,38 @@ static double triadResidualDeg(const Quat& q_s2b,
     const QVector3D r2 = vec_rotate(v2s.normalized(), q_s2b);
     return std::max(angBetweenDeg(r1, v1b.normalized()),
                     angBetweenDeg(r2, v2b.normalized()));
+}
+
+// One candidate observation pair for the double-pose TRIAD solver.
+struct TriadPairCand {
+    float sep;                       // |cross(b1,b2)| — pose separation
+    QVector3D b1, b2, s1, s2;        // body- and sensor-frame observations
+    const char* name;
+};
+
+// Pick the lowest-residual TRIAD solution among candidate pairs (skipping pairs
+// whose separation is too small to be well-conditioned).  Shared by the K-pose
+// calibration's Wahba-fallback and TRIAD-only branches so the selection logic
+// lives in exactly one place.
+static void bestTriadOfPairs(const TriadPairCand (&cands)[3],
+                             Quat& outQ, double& outResidualDeg,
+                             const char*& outName, float& outSep)
+{
+    outQ = Quat(1, 0, 0, 0);
+    outResidualDeg = 999.0;
+    outName = "none";
+    outSep = 0.0f;
+    for (const auto& c : cands) {
+        if (c.sep <= 0.3f) continue;
+        const Quat q = triadSolve(c.b1, c.b2, c.s1, c.s2);
+        const double r = triadResidualDeg(q, c.b1, c.b2, c.s1, c.s2);
+        if (r < outResidualDeg) {
+            outResidualDeg = r;
+            outQ = q;
+            outName = c.name;
+            outSep = c.sep;
+        }
+    }
 }
 
 static double mirrorYDeviationDeg(const Quat& qR, const Quat& qL)
@@ -6263,25 +6316,12 @@ void NewSessionWizard::onCaptureTick()
                 Quat triadFallbackQ(1, 0, 0, 0);
                 const char* fbPair = "none";
                 float fbSep = 0.0f;
-                struct PairCand {
-                    float sep; QVector3D b1, b2, s1, s2; const char* name;
-                };
-                const PairCand cands[3] = {
+                const TriadPairCand cands[3] = {
                     { sepTN, gT_b, gN_b, aT_s, aN_s, "TN" },
                     { sepTK, gT_b, gK_b, aT_s, aK_s, "TK" },
                     { sepNK, gN_b, gK_b, aN_s, aK_s, "NK" },
                 };
-                for (const auto& c : cands) {
-                    if (c.sep <= 0.3f) continue;
-                    const Quat q = triadSolve(c.b1, c.b2, c.s1, c.s2);
-                    const double r = triadResidualDeg(q, c.b1, c.b2, c.s1, c.s2);
-                    if (r < triadFallbackRes) {
-                        triadFallbackRes = r;
-                        triadFallbackQ = q;
-                        fbPair = c.name;
-                        fbSep = c.sep;
-                    }
-                }
+                bestTriadOfPairs(cands, triadFallbackQ, triadFallbackRes, fbPair, fbSep);
 
                 if (wahbaRes <= 15.0 || wahbaRes <= triadFallbackRes + 2.0) {
                     s2sNew[i] = q_s2b.inv().normalized();
@@ -6311,25 +6351,12 @@ void NewSessionWizard::onCaptureTick()
                 Quat bestQ2(1, 0, 0, 0);
                 const char* bestPair2 = "none";
                 float bestSep2_ = 0.0f;
-                struct PairCand2 {
-                    float sep; QVector3D b1, b2, s1, s2; const char* name;
-                };
-                const PairCand2 cands2[3] = {
+                const TriadPairCand cands2[3] = {
                     { sepTN, gT_b, gN_b, aT_s, aN_s, "TN" },
                     { sepTK, gT_b, gK_b, aT_s, aK_s, "TK" },
                     { sepNK, gN_b, gK_b, aN_s, aK_s, "NK" },
                 };
-                for (const auto& c : cands2) {
-                    if (c.sep <= 0.3f) continue;
-                    const Quat q = triadSolve(c.b1, c.b2, c.s1, c.s2);
-                    const double r = triadResidualDeg(q, c.b1, c.b2, c.s1, c.s2);
-                    if (r < bestRes2) {
-                        bestRes2 = r;
-                        bestQ2 = q;
-                        bestPair2 = c.name;
-                        bestSep2_ = c.sep;
-                    }
-                }
+                bestTriadOfPairs(cands2, bestQ2, bestRes2, bestPair2, bestSep2_);
                 s2sNew[i] = bestQ2.inv().normalized();
                 s2sNewMode[i] = 0;
                 s2sResidual[i] = bestRes2;
@@ -8903,6 +8930,35 @@ struct LiveStreamSender::Impl {
     int          fingerBaselineSamples = 0;
     static constexpr int kFingerBaselineWindow = 30;
 
+    // Hemisphere-continuity state for the wire delta-quaternion stream — the
+    // last quaternion actually sent on each wire slot (23 body + 20 per hand).
+    // The next frame is forced into the same hemisphere so the stream never
+    // sign-flips between frames (see hemisphereContinuous()).
+    std::array<Quat, kXsensSegmentCount>  prevWireBodyQ{};
+    std::array<Quat, kFingerSegmentsHand> prevWireLeftQ{};
+    std::array<Quat, kFingerSegmentsHand> prevWireRightQ{};
+    void resetWireContinuity() {
+        prevWireBodyQ.fill(Quat(1, 0, 0, 0));
+        prevWireLeftQ.fill(Quat(1, 0, 0, 0));
+        prevWireRightQ.fill(Quat(1, 0, 0, 0));
+    }
+
+    // Throttled checked UDP send.  A failed writeDatagram (no route, send
+    // buffer full, interface down) was previously ignored silently; warn at
+    // most once per second so a mid-session dropout is visible without flooding.
+    qint64 lastSendWarnMs = -1;
+    void sendChecked(const QByteArray& pkt) {
+        if (sock.writeDatagram(pkt, host, port) >= 0) return;
+        const qint64 now = timer.elapsed();
+        if (lastSendWarnMs < 0 || (now - lastSendWarnMs) >= 1000) {
+            lastSendWarnMs = now;
+            std::cerr << "[stream] WARNING: UDP send failed ("
+                      << sock.errorString().toStdString() << ") to "
+                      << host.toString().toStdString() << ':' << port
+                      << " - frame dropped\n";
+        }
+    }
+
     // Re-send the MXTP12 (metadata) + MXTP13 (scale/T-pose) handshake on a
     // wall-clock interval so a Blender/UE instance opened long after the
     // stream started still acquires the actor name and rebuilds the T-pose
@@ -8914,9 +8970,9 @@ struct LiveStreamSender::Impl {
             return;
         lastHandshakeMs = now;
         if (!metaPkt.isEmpty())
-            sock.writeDatagram(metaPkt, host, port);
+            sendChecked(metaPkt);
         if (!scalePkt.isEmpty())
-            sock.writeDatagram(scalePkt, host, port);
+            sendChecked(scalePkt);
     }
 };
 
@@ -8940,6 +8996,7 @@ bool LiveStreamSender::start(const LiveSettings& cfg, QString* err)
     }
     m_impl->timer.start();
     m_impl->lastEmitMs = -1;
+    m_impl->resetWireContinuity();
 
     {
         QByteArray text = QByteArray(
@@ -9048,6 +9105,7 @@ void LiveStreamSender::recalibrate()
 {
     m_impl->baselineCaptured = false;
     m_impl->fingerBaselineSamples = 0;
+    m_impl->resetWireContinuity();
 }
 
 void LiveStreamSender::setTposeBaseline(
@@ -9057,6 +9115,7 @@ void LiveStreamSender::setTposeBaseline(
     m_impl->baselineBodyQ = tposeQ;
     m_impl->baselinePelvisPos = tposePelvis;
     m_impl->baselineCaptured = true;
+    m_impl->resetWireContinuity();
 }
 
 void LiveStreamSender::pushFrame(quint32 sample,
@@ -9104,7 +9163,9 @@ void LiveStreamSender::pushFrame(quint32 sample,
         appendFloatBE(body, p.x());
         appendFloatBE(body, p.y());
         appendFloatBE(body, p.z());
-        const Quat qDelta = quat_mult(segQuat[i], m_impl->baselineBodyQ[i].inv()).normalized();
+        Quat qDelta = quat_mult(segQuat[i], m_impl->baselineBodyQ[i].inv()).normalized();
+        qDelta = hemisphereContinuous(qDelta, m_impl->prevWireBodyQ[i]);
+        m_impl->prevWireBodyQ[i] = qDelta;
         const Quat q = qDelta;  // MVN wire = NWU (Z-up RH); no conversion.
         appendFloatBE(body, float(q.w));
         appendFloatBE(body, float(q.x));
@@ -9127,7 +9188,7 @@ void LiveStreamSender::pushFrame(quint32 sample,
         dumpFirstFrameHex("MXTP02 body-only", pkt);
         m_impl->firstFrameDumped = true;
     }
-    m_impl->sock.writeDatagram(pkt, m_impl->host, m_impl->port);
+    m_impl->sendChecked(pkt);
     if (wireDue) {
         wireSS << "  pelvis(world,m)=(" << pelvisPos.x() << "," << pelvisPos.y()
                << "," << pelvisPos.z() << ")  packetBytes=" << pkt.size() << "\n"
@@ -9228,7 +9289,9 @@ void LiveStreamSender::pushFrameWithGloves(quint32 sample,
         appendFloatBE(body, p.x());
         appendFloatBE(body, p.y());
         appendFloatBE(body, p.z());
-        const Quat qDelta = quat_mult(segQuat[i], m_impl->baselineBodyQ[i].inv()).normalized();
+        Quat qDelta = quat_mult(segQuat[i], m_impl->baselineBodyQ[i].inv()).normalized();
+        qDelta = hemisphereContinuous(qDelta, m_impl->prevWireBodyQ[i]);
+        m_impl->prevWireBodyQ[i] = qDelta;
         const Quat q = qDelta;  // MVN wire = NWU (Z-up RH); no conversion.
         appendFloatBE(body, float(q.w));
         appendFloatBE(body, float(q.x));
@@ -9254,12 +9317,15 @@ void LiveStreamSender::pushFrameWithGloves(quint32 sample,
     auto emitFinger = [&](int slot, int segmentIdBase, int handSeg,
                           const std::array<Quat, kFingerSegmentsHand>& qArr,
                           const std::array<QVector3D, kFingerSegmentsHand>& pArr,
-                          const std::array<Quat, kFingerSegmentsHand>& baseArr) {
+                          const std::array<Quat, kFingerSegmentsHand>& baseArr,
+                          std::array<Quat, kFingerSegmentsHand>& prevArr) {
         appendInt32BE(body, segmentIdBase + slot);
         const int mIdx = kXsensSlotToManus[slot];
         if (mIdx < 0) {
             appendFloatBE(body, 0.f); appendFloatBE(body, 0.f); appendFloatBE(body, 0.f);
-            const Quat qDelta = quat_mult(segQuat[handSeg], m_impl->baselineBodyQ[handSeg].inv()).normalized();
+            Quat qDelta = quat_mult(segQuat[handSeg], m_impl->baselineBodyQ[handSeg].inv()).normalized();
+            qDelta = hemisphereContinuous(qDelta, prevArr[slot]);
+            prevArr[slot] = qDelta;
             const Quat q = qDelta;  // MVN wire = NWU (Z-up RH); no conversion.
             appendFloatBE(body, float(q.w));
             appendFloatBE(body, float(q.x));
@@ -9273,7 +9339,9 @@ void LiveStreamSender::pushFrameWithGloves(quint32 sample,
         } else {
             const QVector3D p = pArr[mIdx];  // MVN wire = NWU (Z-up RH); no conversion.
             appendFloatBE(body, p.x()); appendFloatBE(body, p.y()); appendFloatBE(body, p.z());
-            const Quat qDelta = quat_mult(qArr[mIdx], baseArr[mIdx].inv()).normalized();
+            Quat qDelta = quat_mult(qArr[mIdx], baseArr[mIdx].inv()).normalized();
+            qDelta = hemisphereContinuous(qDelta, prevArr[slot]);
+            prevArr[slot] = qDelta;
             const Quat q = qDelta;  // MVN wire = NWU (Z-up RH); no conversion.
             appendFloatBE(body, float(q.w));
             appendFloatBE(body, float(q.x));
@@ -9292,9 +9360,11 @@ void LiveStreamSender::pushFrameWithGloves(quint32 sample,
     // finger-часть.
     const int bodyOnlyBytes = body.size();
     for (int slot = 0; slot < kFingerSegmentsHand; ++slot)
-        emitFinger(slot, 24, SEG_LHand, leftGloveQ, leftGloveP, m_impl->baselineLeftGloveQ);
+        emitFinger(slot, 24, SEG_LHand, leftGloveQ, leftGloveP,
+                   m_impl->baselineLeftGloveQ, m_impl->prevWireLeftQ);
     for (int slot = 0; slot < kFingerSegmentsHand; ++slot)
-        emitFinger(slot, 44, SEG_RHand, rightGloveQ, rightGloveP, m_impl->baselineRightGloveQ);
+        emitFinger(slot, 44, SEG_RHand, rightGloveQ, rightGloveP,
+                   m_impl->baselineRightGloveQ, m_impl->prevWireRightQ);
 
     // FIX (stream polish): split-mode шлёт body и fingers как два UDP
     // datagram'а через MXTP dgCounter splitting (bit 0..6 = index, bit 7 =
@@ -9310,7 +9380,7 @@ void LiveStreamSender::pushFrameWithGloves(quint32 sample,
         if (m_cfg.debugDumpFirstFrame && !m_impl->firstFrameDumped) {
             dumpFirstFrameHex("MXTP02 split body (1/2)", pkt1);
         }
-        m_impl->sock.writeDatagram(pkt1, m_impl->host, m_impl->port);
+        m_impl->sendChecked(pkt1);
         QByteArray hdrFingers = buildMxtpHeader("02", sample, 0x81,
                                                 quint8(fingerCount),
                                                 ft, bodyCount, fingerCount);
@@ -9319,7 +9389,7 @@ void LiveStreamSender::pushFrameWithGloves(quint32 sample,
             dumpFirstFrameHex("MXTP02 split fingers (2/2)", pkt2);
             m_impl->firstFrameDumped = true;
         }
-        m_impl->sock.writeDatagram(pkt2, m_impl->host, m_impl->port);
+        m_impl->sendChecked(pkt2);
     } else {
         QByteArray hdr = buildMxtpHeader("02", sample, 0x80,
                                          quint8(bodyCount + fingerCount),
@@ -9329,7 +9399,7 @@ void LiveStreamSender::pushFrameWithGloves(quint32 sample,
             dumpFirstFrameHex("MXTP02 combined", pkt);
             m_impl->firstFrameDumped = true;
         }
-        m_impl->sock.writeDatagram(pkt, m_impl->host, m_impl->port);
+        m_impl->sendChecked(pkt);
     }
     if (wireDue) {
         wireSS << "  pelvis(world,m)=(" << pelvisPos.x() << "," << pelvisPos.y()
@@ -11301,6 +11371,13 @@ void MainWindow::onRenderTick()
             rf.leftGloveQ  = f.leftGloveQ;
         }
         m_recBuffer.push_back(std::move(rf));
+        if (!m_recOverflowWarned &&
+            m_recBuffer.size() > size_t(m_procRateHz * 60 * 10)) {
+            m_recOverflowWarned = true;
+            std::cerr << "[record] WARNING: take exceeded ~10 min ("
+                      << m_recBuffer.size() << " frames); the capture buffer "
+                         "keeps growing in RAM - stop and save soon.\n";
+        }
         if (m_hud) m_hud->updateStats(qint64(m_recBuffer.size()), rf.t);
     }
 
@@ -12009,6 +12086,7 @@ void MainWindow::startRecording(const RecordSettings& cfg)
     m_recCfg = cfg;
     m_recBuffer.clear();
     m_recBuffer.reserve(size_t(m_procRateHz * 60 * 10)); // ~10 min at the suit rate (one frame per unique sample)
+    m_recOverflowWarned = false;
     m_recLastSample = -1;
     m_recStartMs = QDateTime::currentMSecsSinceEpoch();
     m_recording = true;
