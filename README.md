@@ -8,6 +8,26 @@
 
 ---
 
+> ⚠️ **Work in progress — not stable yet, needs a lot of work.**
+> This version still has rough edges and known bugs across calibration,
+> tracking, streaming and recording. It is usable for experimentation,
+> but it is **not production-ready** and needs serious further development.
+>
+> **I'd be very glad for help.** If you can contribute — bug fixes,
+> calibration/streaming improvements, testing, ideas — please open an
+> issue or a pull request. Any help moving the project forward is welcome.
+>
+> ⚠️ **В разработке — пока не стабильна, требует больших доработок.**
+> В этой версии остаются шероховатости и известные баги в калибровке,
+> трекинге, стриминге и записи. Ею можно пользоваться для экспериментов,
+> но она **не готова для продакшена** и требует серьёзной доработки.
+>
+> **Буду очень рад помощи.** Если можете помочь с доработкой — исправления
+> багов, улучшения калибровки/стриминга, тестирование, идеи — открывайте
+> issue или pull request. Любая помощь в развитии проекта приветствуется.
+
+---
+
 ## 🇬🇧 About the project
 
 **Fox Mocap** is a free Windows application for full-body motion capture with an
