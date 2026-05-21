@@ -235,6 +235,22 @@ struct LocoDiag {
     double    tiltCos       = 1.0;  // pelvis tilt cosine (lie detector)
     QVector3D offset        {0, 0, 0};
     QVector3D anchorR       {0, 0, 0}, anchorL {0, 0, 0};
+
+    // Decision internals — WHY the offset / anchors moved this frame.  These are
+    // the update() locals that drive commit/release, the dual-anchor blend and
+    // the per-frame step cap; logging them is what lets a captured jump /
+    // acrobatics / glitch be diagnosed after the fact (the smoothed confR/L and
+    // final offset above only show the result, not the cause).
+    double    rawCR         = 0.0,  rawCL        = 0.0; // pre-smoothing contact confidence
+    double    fkxyStableWR  = 0.0,  fkxyStableWL = 0.0; // planted-despite-rotating weight
+    double    fkxyRangeR    = 0.0,  fkxyRangeL   = 0.0; // FK-XY spread over window (m)
+    double    yawFreezeW    = 0.0,  pelvisRotKill = 0.0;
+    double    rollingWR     = 0.0,  rollingWL    = 0.0; // toe-roll hysteresis weight
+    double    imbalance     = 0.0;                      // |effR-effL|/total (R/L anchor skew)
+    double    effR          = 0.0,  effL         = 0.0; // effective dual-anchor weights
+    double    maxStepXY     = 0.0;                      // per-frame XY step cap (m)
+    bool      stepClampedXY = false;                    // the step cap actually clamped
+    bool      feetLifted    = false, ballistic   = false, driftAir = false; // airborne gates
 };
 
 // Human-readable name of a LocomotionSolver::PoseKind value (for the log).
@@ -467,6 +483,19 @@ private:
         // setActorHeight() before the first update() call.
         double    m_actorHeightM      = 1.75;
 
+        // --- Diagnostic-only captures of update() locals (-test [LOCO]) -------
+        // Written each frame for the log; never read back into the solver math.
+        double m_dbgRawCR = 0.0,        m_dbgRawCL = 0.0;
+        double m_dbgFkxyStableWR = 0.0, m_dbgFkxyStableWL = 0.0;
+        double m_dbgFkxyRangeR = 0.0,   m_dbgFkxyRangeL = 0.0;
+        double m_dbgYawFreezeW = 0.0,   m_dbgPelvisRotKill = 0.0;
+        double m_dbgRollingWR = 0.0,    m_dbgRollingWL = 0.0;
+        double m_dbgImbalance = 0.0,    m_dbgEffR = 0.0, m_dbgEffL = 0.0;
+        double m_dbgMaxStepXY = 0.0;
+        bool   m_dbgStepClampedXY = false;
+        bool   m_dbgFeetLifted = false, m_dbgBallistic = false, m_dbgDriftAir = false;
+        bool   m_dbgConfigLogged = false;   // one-shot [LOCO CONFIG] guard
+
         // === v3 additions END ===
 
       public:
@@ -498,6 +527,16 @@ private:
             d.tiltCos       = m_lastTiltCos;
             d.offset        = m_offsetLast;
             d.anchorR       = m_anchorR;        d.anchorL = m_anchorL;
+            d.rawCR         = m_dbgRawCR;       d.rawCL = m_dbgRawCL;
+            d.fkxyStableWR  = m_dbgFkxyStableWR; d.fkxyStableWL = m_dbgFkxyStableWL;
+            d.fkxyRangeR    = m_dbgFkxyRangeR;  d.fkxyRangeL = m_dbgFkxyRangeL;
+            d.yawFreezeW    = m_dbgYawFreezeW;  d.pelvisRotKill = m_dbgPelvisRotKill;
+            d.rollingWR     = m_dbgRollingWR;   d.rollingWL = m_dbgRollingWL;
+            d.imbalance     = m_dbgImbalance;
+            d.effR          = m_dbgEffR;        d.effL = m_dbgEffL;
+            d.maxStepXY     = m_dbgMaxStepXY;   d.stepClampedXY = m_dbgStepClampedXY;
+            d.feetLifted    = m_dbgFeetLifted;  d.ballistic = m_dbgBallistic;
+            d.driftAir      = m_dbgDriftAir;
             return d;
         }
 
@@ -1167,6 +1206,8 @@ public:
     bool   segLocked(int i)      const { return m_locked[i]; }
     bool   segAnchorValid(int i) const { return m_anchorValid[i]; }
     double segAngVelLP(int i)    const { return m_angVelLP[i]; }      // smoothed |ω| deg/s
+    double segAngAcc(int i)      const { return m_dbgAngAcc[i]; }     // |Δω|/dt deg/s² (lock gate)
+    double segStillTicks(int i)  const { return m_stillTicks[i]; }    // seconds held still
     Quat   segDriftLocal(int i)  const { return m_driftLocal[i]; }    // accumulated drift
 
     // Last on-screen pelvis position (post-locomotion + scene shift). Used by
@@ -1243,6 +1284,7 @@ private:
     std::array<bool, kXsensSegmentCount>   m_locked{};
     std::array<double, kXsensSegmentCount> m_angVelPrev{};    // last |ω|
     std::array<double, kXsensSegmentCount> m_angVelLP{};      // smoothed |ω|
+    std::array<double, kXsensSegmentCount> m_dbgAngAcc{};     // |Δω|/dt deg/s² (-test lock gate)
     std::array<double, kXsensSegmentCount> m_stillTicks{};    // consecutive
     std::array<Quat, kXsensSegmentCount>   m_prevQ{};
     std::array<Quat, kXsensSegmentCount>   m_outPrevQ{};
