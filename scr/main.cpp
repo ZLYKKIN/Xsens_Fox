@@ -5348,7 +5348,9 @@ void NewSessionWizard::buildPages()
         imgFrame->setObjectName("poseFrame");
         m_poseImage = new QLabel(imgFrame);
         m_poseImage->setAlignment(Qt::AlignCenter);
-        m_poseImage->setMinimumHeight(320);
+        // Smaller min so the whole calibration column fits on a 760×640 dialog;
+        // refreshPoseImage() still scales the bitmap up to 420×420 if room allows.
+        m_poseImage->setMinimumHeight(180);
         m_poseImage->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
         auto* frameLay = new QVBoxLayout(imgFrame);
         frameLay->setContentsMargins(10, 10, 10, 10);
@@ -5404,28 +5406,57 @@ void NewSessionWizard::buildPages()
         connect(m_btnCalibBegin, &QPushButton::clicked,
                 this, &NewSessionWizard::onCalibrationBegin);
 
+        // Wrap the calibration column in a QScrollArea so the Start button
+        // never falls off the bottom on the minimum 760×640 dialog size,
+        // regardless of locale / status-line wrap. Title stays pinned.
+        auto* scrollHost = new QWidget(p);
+        auto* hostLay    = new QVBoxLayout(scrollHost);
+        hostLay->setContentsMargins(0, 0, 0, 0);
+        hostLay->setSpacing(0);
+        hostLay->addWidget(imgFrame, 1);
+        hostLay->addSpacing(10);
+        hostLay->addWidget(m_poseHint);
+        hostLay->addSpacing(6);
+        hostLay->addWidget(m_connBadge, 0, Qt::AlignHCenter);
+        hostLay->addSpacing(10);
+        hostLay->addWidget(m_countLabel);
+        hostLay->addSpacing(4);
+        hostLay->addWidget(m_countdownBar);
+        hostLay->addSpacing(4);
+        hostLay->addWidget(m_readyBar);
+        hostLay->addSpacing(6);
+        hostLay->addWidget(m_stillLabel);
+        hostLay->addWidget(m_calibStatus);
+        hostLay->addWidget(m_calibQuality);
+        hostLay->addSpacing(12);
+        hostLay->addWidget(m_btnCalibBegin, 0, Qt::AlignHCenter);
+
+        auto* scroll = new QScrollArea(p);
+        scroll->setWidget(scrollHost);
+        scroll->setWidgetResizable(true);
+        scroll->setFrameShape(QFrame::NoFrame);
+        scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        scroll->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+        scroll->setStyleSheet(
+            "QScrollArea { background:transparent; }"
+            "QScrollArea > QWidget > QWidget { background:transparent; }"
+            "QScrollBar:vertical {"
+            "  background:#1a1a1a; width:10px; margin:0; border-radius:4px; }"
+            "QScrollBar::handle:vertical {"
+            "  background:#FF7A1A; min-height:24px; border-radius:4px; }"
+            "QScrollBar::handle:vertical:hover { background:#FF8A2A; }"
+            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {"
+            "  height:0; }"
+            "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {"
+            "  background:transparent; }"
+        );
+
         auto* lay = new QVBoxLayout(p);
         lay->setContentsMargins(28, 10, 28, 14);
         lay->setSpacing(0);
         lay->addWidget(m_calibTitle);
         lay->addSpacing(10);
-        lay->addWidget(imgFrame, 1);
-        lay->addSpacing(10);
-        lay->addWidget(m_poseHint);
-        lay->addSpacing(6);
-        lay->addWidget(m_connBadge, 0, Qt::AlignHCenter);
-        lay->addSpacing(10);
-        lay->addWidget(m_countLabel);
-        lay->addSpacing(4);
-        lay->addWidget(m_countdownBar);
-        lay->addSpacing(4);
-        lay->addWidget(m_readyBar);
-        lay->addSpacing(6);
-        lay->addWidget(m_stillLabel);
-        lay->addWidget(m_calibStatus);
-        lay->addWidget(m_calibQuality);
-        lay->addSpacing(12);
-        lay->addWidget(m_btnCalibBegin, 0, Qt::AlignHCenter);
+        lay->addWidget(scroll, 1);
 
         m_pages->addWidget(p);
     }
@@ -7787,7 +7818,13 @@ SensorIndicatorsPanel::SensorIndicatorsPanel(bool useGloves, QWidget* parent)
     // чтобы пользователь видел что блок не пропал, а перенесён.
     m_bodyBox->setVisible(false);  // полностью убираем из вьюпорта
 
-    auto* lay = new QVBoxLayout(this);
+    // The full panel can exceed viewport height when gloves expand the
+    // fingers grid (17 sensors + 10 fingers + status + buttons ≈ 850px).
+    // Wrap the whole column in a QScrollArea so 720p / minimum-size
+    // windows can still reach the Reset / Freeze buttons.
+    auto* inner = new QWidget(this);
+    inner->setObjectName("sidePanelInner");
+    auto* lay = new QVBoxLayout(inner);
     lay->setContentsMargins(14, 14, 14, 14);
     lay->setSpacing(0);
     lay->addWidget(headerMode);
@@ -7811,6 +7848,30 @@ SensorIndicatorsPanel::SensorIndicatorsPanel(bool useGloves, QWidget* parent)
     lay->addSpacing(10);
     lay->addWidget(m_fingersBox);
     lay->addStretch(1);
+
+    auto* scroll = new QScrollArea(this);
+    scroll->setWidget(inner);
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    scroll->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    scroll->setStyleSheet(
+        "QScrollArea { background:transparent; border:none; }"
+        "QScrollArea > QWidget > QWidget { background:transparent; }"
+        "QScrollBar:vertical {"
+        "  background:#1a1a1a; width:10px; margin:0; border-radius:4px; }"
+        "QScrollBar::handle:vertical {"
+        "  background:#FF7A1A; min-height:24px; border-radius:4px; }"
+        "QScrollBar::handle:vertical:hover { background:#FF8A2A; }"
+        "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {"
+        "  height:0; }"
+        "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {"
+        "  background:transparent; }"
+    );
+    auto* outer = new QVBoxLayout(this);
+    outer->setContentsMargins(0, 0, 0, 0);
+    outer->setSpacing(0);
+    outer->addWidget(scroll);
 
     connect(&Lang::instance(), &Lang::changed, this, &SensorIndicatorsPanel::retranslate);
     setSuitLive(false, Lang::t("suit_scanning"));
@@ -9508,7 +9569,7 @@ RecordWizard::RecordWizard(SuitType suit, QWidget* parent) : QDialog(parent), m_
 {
     setModal(true);
     setWindowTitle(Lang::t("rec_wiz_title"));
-    setMinimumSize(520, 360);
+    setMinimumSize(560, 400);
     setStyleSheet(kStyleSheet);
     buildPages();
 }
@@ -9666,7 +9727,7 @@ LiveStreamWizard::LiveStreamWizard(SuitType suit, QWidget* parent) : QDialog(par
 {
     setModal(true);
     setWindowTitle(Lang::t("live_wiz_title"));
-    setMinimumSize(460, 300);
+    setMinimumSize(500, 400);
     setStyleSheet(kStyleSheet);
 
     auto* title = new QLabel(Lang::t("live_wiz_title"), this);
@@ -10800,6 +10861,9 @@ MainWindow::MainWindow(MocapReceiver* rx,
 {
     setWindowTitle(Lang::t("app_title"));
     resize(1360, 820);
+    // Panel m_panel is fixed at 340px, viewport must keep room for both HUDs
+    // (mode top-left ~310px in RU locale + record top-right 220px + margins).
+    setMinimumSize(1100, 720);
 
     // Actor config derived from wizard result.
     ActorConfig actor;
@@ -12665,7 +12729,13 @@ void MainWindow::layoutHud()
     if (m_hud) {
         const QPoint tl = m_viewport->mapTo(centralWidget(), QPoint(0, 0));
         const int x = tl.x() + m_viewport->width() - m_hud->width() - 16;
-        const int y = tl.y() + 16;
+        int y = tl.y() + 16;
+        // If ModeHud (top-left) is up and viewport is narrow, drop RecordHud
+        // beneath it so the two plates never overlap (RU "REC+STREAM" ≈ 310px).
+        if (m_modeHud && m_modeHud->isVisible()
+            && x < m_modeHud->x() + m_modeHud->width() + 8) {
+            y = std::max(y, m_modeHud->y() + m_modeHud->height() + 8);
+        }
         m_hud->move(std::max(0, x), std::max(0, y));
     }
     // Mode HUD (REC/STREAM + seconds) in top-LEFT, created on demand.
@@ -12745,6 +12815,16 @@ void MainWindow::layoutHud()
         const QPoint tl = m_viewport->mapTo(centralWidget(), QPoint(0, 0));
         m_modeHud->move(tl.x() + 16, tl.y() + 16);
         m_modeHud->raise();
+        // Re-check RecordHud overlap after ModeHud just resized/repositioned.
+        if (m_hud && m_hud->isVisible()) {
+            const int x = tl.x() + m_viewport->width() - m_hud->width() - 16;
+            int y = tl.y() + 16;
+            if (x < m_modeHud->x() + m_modeHud->width() + 8) {
+                y = std::max(y, m_modeHud->y() + m_modeHud->height() + 8);
+            }
+            m_hud->move(std::max(0, x), std::max(0, y));
+            m_hud->raise();
+        }
     }
 }
 
@@ -12796,6 +12876,11 @@ const char* kStyleSheet = R"(
   /* Suit-status summary card (top of the side panel). */
   QWidget#statusCard { background: #181818; border: 1px solid #242424;
                        border-radius: 10px; }
+
+  /* Record HUD overlay — translucent backdrop so the labels stay legible
+     against the 3D viewport (matches ModeHud styling). */
+  QWidget#recordHud  { background: rgba(20, 20, 20, 220);
+                       border: 1px solid #3a3a3a; border-radius: 10px; }
 
   /* Calibration pose illustration — framed so the heading and hint never
      crash into the image edge. */
