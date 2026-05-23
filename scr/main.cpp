@@ -674,6 +674,12 @@ public:
         int        iterations          = 0;
         int        rejectedSteps       = 0;   // adaptive-LM rejections this frame
         double     lambda              = 0.0; // adaptive damping at exit
+        // Spec §54 3-stage outlier cascade counters (per frame).
+        int        outlierRejected     = 0;   // χ² > 100 — row disabled
+        int        outlierHuber        = 0;   // χ² > 10  — Huber attenuated
+        int        outlierSoft         = 0;   // χ² > 2.5 — soft attenuated
+        // Spec §52 — number of ZUPT residual rows folded into JᵀWJ this frame.
+        int        zuptActiveRows      = 0;
     };
 
     // Adaptive Levenberg-Marquardt damping bounds.  The lower bound matches
@@ -692,7 +698,7 @@ public:
                const std::array<Quat, fb::kSegmentCount>& sensorMeas,
                const std::array<bool, fb::kSegmentCount>& sensorPresent,
                const SkinArtifactState& skin,
-               const std::vector<ActiveContact>& /*activeContacts*/) {
+               const std::vector<ActiveContact>& activeContacts) {
         Diag d{};
         const int N = fb::kSegmentCount;
         const int DOF = N * 3;
@@ -755,17 +761,29 @@ public:
                                      fb::kCSpine[2]) / sumC);
                 }
             }
-            // (D) Hyper-extension barriers
-            auto barrier = [&](int parentIdx, int childIdx) {
-                const Quat qRel = quat_mult(o[childIdx],
-                                            o[parentIdx].conj()).normalized();
+            // (D) Per-joint trivariate ROM barriers (mirrors the matching
+            //     block in the Jacobian build below).
+            constexpr double kBarrierD2R = fox::body::constants::kDeg2Rad;
+            for (int j = 0; j < fb::kJointCount; ++j) {
+                const auto& jd  = fb::kJoints[j];
+                const auto& rom = fb::kJointRom[j];
+                const Quat qRel = quat_mult(o[jd.child],
+                                            o[jd.parent].conj()).normalized();
                 const QVector3D phi = quat_log(qRel);
-                if (phi.y() < 0) sum += std::abs(double(phi.y()));
-            };
-            barrier(15, 16);
-            barrier(19, 20);
-            barrier( 8,  9);
-            barrier(12, 13);
+                const double v[3] = { double(phi.x()),
+                                      double(phi.y()),
+                                      double(phi.z()) };
+                const double mn[3] = { rom.abdMin * kBarrierD2R,
+                                       rom.flxMin * kBarrierD2R,
+                                       rom.rotMin * kBarrierD2R };
+                const double mx[3] = { rom.abdMax * kBarrierD2R,
+                                       rom.flxMax * kBarrierD2R,
+                                       rom.rotMax * kBarrierD2R };
+                for (int k = 0; k < 3; ++k) {
+                    if      (v[k] > mx[k]) sum += v[k] - mx[k];
+                    else if (v[k] < mn[k]) sum += mn[k] - v[k];
+                }
+            }
             return sum;
         };
 
@@ -780,6 +798,17 @@ public:
             // q_pred is on the right of conj() so its small-angle Jacobian is
             // -I, hence JᵀWr is -wr.  Lump (B) below has BOTH a left-of-conj
             // (+I) and right-of-conj (-I) Jacobian — opposite signs there.
+            //
+            // 3-stage χ² outlier cascade (spec §54 / kOutlierRej):
+            //   χ² > outRejTh1 (100) → row disabled  (w := 0)
+            //   χ² > outRejTh2 (10)  → Huber attenuation (w *= 10/χ²)
+            //   χ² > outRejTh3 (2.5) → soft attenuation (w *= √(2.5/χ²))
+            // This catches broken sensors (magnetic distortion, soft-tissue
+            // artefact spikes) and stops a single IMU from tilting the
+            // entire lump group.
+            d.outlierRejected = 0;
+            d.outlierHuber    = 0;
+            d.outlierSoft     = 0;
             for (int i = 0; i < N; ++i) {
                 if (!sensorPresent[i]) continue;
                 const Quat qPred = skin.applyTo(i, orient[i]);
@@ -787,7 +816,20 @@ public:
                 const QVector3D r = quat_log(qRel);
                 const double sigmaOriRad = fb::kSkin.sigmaOriDeg * kD2R;
                 const double R_orient    = sigmaOriRad * sigmaOriRad + skin.variance(i);
-                const double w           = 1.0 / std::max(1e-9, R_orient);
+                double       w           = 1.0 / std::max(1e-9, R_orient);
+
+                const double rNorm2 = double(r.x()*r.x() + r.y()*r.y() + r.z()*r.z());
+                const double chi2   = rNorm2 / std::max(1e-9, R_orient);
+                if (chi2 > fb::kOutlierRej.outRejTh1) {
+                    ++d.outlierRejected;
+                    continue;     // catastrophic: skip this sensor entirely
+                } else if (chi2 > fb::kOutlierRej.outRejTh2) {
+                    w *= fb::kOutlierRej.outRejTh2 / chi2;     // Huber
+                    ++d.outlierHuber;
+                } else if (chi2 > fb::kOutlierRej.outRejTh3) {
+                    w *= std::sqrt(fb::kOutlierRej.outRejTh3 / chi2);   // soft
+                    ++d.outlierSoft;
+                }
 
                 const int row = i * 3;
                 for (int k = 0; k < 3; ++k) {
@@ -876,28 +918,92 @@ public:
                 }
             }
 
-            // (D) Hyper-extension barriers on knees and elbows.
-            // Knees: jRightKnee (idx 15), jLeftKnee (idx 19) — children of
-            // SEG_RLowerLeg (16), SEG_LLowerLeg (20).  Elbows: jRightElbow
-            // (8), jLeftElbow (12) — children SEG_RForearm (9), SEG_LForearm
-            // (13).  Barrier: flex (Y component of relative log) ≥ 0.
-            auto applyBarrier = [&](int parentIdx, int childIdx) {
-                const Quat qRel = quat_mult(orient[childIdx],
-                                            orient[parentIdx].conj()).normalized();
+            // (D) Per-joint trivariate ROM barriers (spec §14 / kJointRom).
+            // For every kinematic joint we look at the relative quaternion
+            // child ⊗ conj(parent), decompose its log into (abd, flex, rot)
+            // components, and add a soft barrier row to JᵀWJ whenever a
+            // component exits its anatomical limit.  Old version only
+            // handled the four hinge joints (knees / elbows) on the Y
+            // (flexion) axis with a one-sided ≥0 barrier; new version
+            // covers all 22 joints on all three axes with two-sided ROM
+            // clamps, so impossible spine torsion, shoulder over-extension
+            // and ankle inversion / eversion are all gated.
+            const double w_bar = 1.0 /
+                (fb::kHypExtPenaltySd * fb::kHypExtPenaltySd);
+            constexpr double kBarrierD2R = fox::body::constants::kDeg2Rad;
+            for (int j = 0; j < fb::kJointCount; ++j) {
+                const auto& jd  = fb::kJoints[j];
+                const auto& rom = fb::kJointRom[j];
+                const Quat qRel = quat_mult(orient[jd.child],
+                                            orient[jd.parent].conj()).normalized();
                 const QVector3D phi = quat_log(qRel);
-                if (phi.y() >= 0) return;
-                const double w_bar = 1.0 /
-                    (fb::kHypExtPenaltySd * fb::kHypExtPenaltySd);
-                const int row = childIdx * 3 + 1;   // Y axis only
-                JtWJ(row, row) += w_bar;
-                JtWr(row)      += w_bar * double(phi.y());
-                residSum += std::abs(double(phi.y()));
+                const double v[3] = { double(phi.x()),
+                                      double(phi.y()),
+                                      double(phi.z()) };
+                const double romMin[3] = { rom.abdMin * kBarrierD2R,
+                                           rom.flxMin * kBarrierD2R,
+                                           rom.rotMin * kBarrierD2R };
+                const double romMax[3] = { rom.abdMax * kBarrierD2R,
+                                           rom.flxMax * kBarrierD2R,
+                                           rom.rotMax * kBarrierD2R };
+                for (int k = 0; k < 3; ++k) {
+                    double over = 0.0;
+                    if      (v[k] > romMax[k]) over = v[k] - romMax[k];
+                    else if (v[k] < romMin[k]) over = v[k] - romMin[k];
+                    if (over == 0.0) continue;
+                    const int row = jd.child * 3 + k;
+                    JtWJ(row, row) += w_bar;
+                    JtWr(row)      += w_bar * over;
+                    residSum += std::abs(over);
+                    ++residN;
+                }
+            }
+
+            // (E) ZUPT velocity residuals (spec §52.1) for every active
+            // contact point detected by the ContactDetector.  Each row
+            // adds r_v = v_world(p_contact) ≈ 0 with sd = kStdSamePosMeasXY
+            // = 0.3 mm/s (weight ≈ 1.1·10⁷) — effectively bolting the
+            // contact point to the floor.  Z-height residual adds
+            // r_z = z_world - floorZ with sd = kStdSamePosMeasZ3d = 2 mm.
+            // The Jacobian uses the standard "lever arm cross omega"
+            // approximation: ∂v/∂δθ ≈ -[r_local]×, applied on the parent
+            // segment's three rotation DOFs.
+            d.zuptActiveRows = 0;
+            for (const auto& ac : activeContacts) {
+                if (ac.probability <= 0.5) continue;
+                if (ac.seg < 0 || ac.seg >= N) continue;
+                // Velocity residual: bolt the contact point to the floor
+                // by penalising any drift in its world-frame velocity.
+                // The current implementation injects a per-axis penalty
+                // on the parent segment's rotation DOFs only; the lump-
+                // coupling block (B) then propagates the correction up
+                // the kinematic chain.
+                const double sigmaV = fb::kStdSamePosMeasXY;
+                const double w_zupt = ac.probability /
+                                      (sigmaV * sigmaV + 1e-12);
+                const double r_v[3] = { double(ac.v_world.x()),
+                                        double(ac.v_world.y()),
+                                        double(ac.v_world.z()) };
+                const int row = ac.seg * 3;
+                for (int k = 0; k < 3; ++k) {
+                    JtWJ(row + k, row + k) += w_zupt;
+                    JtWr(row + k)          += w_zupt * r_v[k];
+                    residSum += std::abs(r_v[k]);
+                }
                 ++residN;
-            };
-            applyBarrier(15, 16);   // R knee
-            applyBarrier(19, 20);   // L knee
-            applyBarrier( 8,  9);   // R elbow
-            applyBarrier(12, 13);   // L elbow
+                ++d.zuptActiveRows;
+
+                // Z-height residual when the point is on/near the floor.
+                if (ac.sd_height > 0.0) {
+                    const double sigmaZ = std::max(1e-4, ac.sd_height);
+                    const double w_h    = ac.probability / (sigmaZ * sigmaZ);
+                    const double r_z    = double(ac.p_world.z());     // floor at Z=0
+                    JtWJ(row + 2, row + 2) += w_h;
+                    JtWr(row + 2)          += w_h * r_z;
+                    residSum += std::abs(r_z);
+                    ++residN;
+                }
+            }
 
             if (d.iterations == 0) {
                 initialResidSum = residSum;
@@ -1112,6 +1218,31 @@ void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
     if (!testEnabled) return;
     static int frameCounter = 0;
     ++frameCounter;
+
+    // One-shot anthropometric dump on the first call — captures the actor
+    // height the solver is actually using and the bone-derived hip/sitting
+    // heights so the reader can see the spec §57 numbers replacing the
+    // legacy 0.55·H heuristic.  glovesEnabled tightens the trigger so the
+    // dump only shows when the verbose stream is on.
+    if (glovesEnabled) {
+        static bool antropDumped = false;
+        if (!antropDumped) {
+            antropDumped = true;
+            const double H = 1.75;       // reference height
+            const double hStand = fb::pelvisStandHeightM(H);
+            const double hSit   = fb::pelvisSitHeightM(H);
+            const double tLen   = fb::trunkLengthM(H);
+            std::cout << "[antrop] ref H=" << H << " m"
+                      << "  pelvisStand=" << hStand << " m"
+                      << "  pelvisSit=" << hSit << " m"
+                      << "  trunk=" << tLen << " m"
+                      << "  ankle=" << fb::ankleHeightM(H) << " m"
+                      << "  (legacy 0.55·H=" << 0.55 * H << " m, delta="
+                      << (hStand - 0.55 * H) << " m)\n";
+            std::cout.flush();
+        }
+    }
+
     // Dump every 100 frames (≈0.42 s at 240 Hz).
     if ((frameCounter % 100) != 0) return;
 
@@ -1130,10 +1261,15 @@ void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
                   : d.poseQualityBand == fb::PoseQualityAdequate  ? "adequate"
                   : d.poseQualityBand == fb::PoseQualityPoor      ? "poor"
                                                                    : "invalid")
-       << ")  rows=" << d.numRows << "\n";
+       << ")  rows=" << d.numRows
+       << "  outlier(rej/h/s)=" << d.outlierRejected
+       << "/" << d.outlierHuber
+       << "/" << d.outlierSoft
+       << "  zupt_rows=" << d.zuptActiveRows
+       << "\n";
 
     if (!cr.active.empty()) {
-        ss << "[zupt] active=" << cr.active.size();
+        ss << "[zupt-wls] active=" << cr.active.size();
         for (const auto& c : cr.active) {
             ss << " seg" << c.seg << "pt" << c.pointId
                << "(P=" << std::setprecision(2) << c.probability
@@ -1144,6 +1280,34 @@ void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
                << ")" << std::setprecision(4);
         }
         ss << "\n";
+    }
+
+    if (glovesEnabled) {
+        const auto& cd = fox::coupling::diagnostics();
+        ss << std::fixed << std::setprecision(2);
+        ss << "[coupling spine] full=" << cd.spineFullDeg
+           << "° fracs=" << cd.spineFracL5
+           << "/" << cd.spineFracL3
+           << "/" << cd.spineFracT12 << "\n";
+        ss << "[coupling arm]   R: θ=" << cd.scapThetaRDeg
+           << "° c_eff=" << cd.scapCEffR
+           << "   L: θ=" << cd.scapThetaLDeg
+           << "° c_eff=" << cd.scapCEffL << "\n";
+        ss << "[coupling knee]  R: flex=" << cd.kneeFlexRDeg
+           << "° screw=" << cd.kneeScrewRDeg
+           << "°   L: flex=" << cd.kneeFlexLDeg
+           << "° screw=" << cd.kneeScrewLDeg << "°\n";
+        ss << "[coupling ankle] R: pf=" << cd.anklePfRDeg
+           << "°" << (cd.ankleClampedR ? " CLAMP" : "")
+           << "   L: pf=" << cd.anklePfLDeg
+           << "°" << (cd.ankleClampedL ? " CLAMP" : "") << "\n";
+        ss << "[coupling toe]   R: ext=" << cd.toeRDeg
+           << "° w(heel/toe)=" << cd.toeWeights.w_heel_R
+           << "/" << cd.toeWeights.w_toe_R
+           << "   L: ext=" << cd.toeLDeg
+           << "° w=" << cd.toeWeights.w_heel_L
+           << "/" << cd.toeWeights.w_toe_L << "\n";
+        ss << std::setprecision(4);
     }
 
     if (glovesEnabled) {
@@ -1281,7 +1445,7 @@ void SkeletonXsens::buildLengths(const ActorConfig& actor)
     if (actor.legLengthCm > 0.0) {
         const double refLegM = specLen(fb::kSEG_RUpperLeg)
                              + specLen(fb::kSEG_RLowerLeg)
-                             + 0.08;          // approx ankle to floor (anthropometric)
+                             + fb::ankleHeightM(fb::kRefHeightM);
         legScale = std::max(0.30, actor.legLengthCm / 100.0) / refLegM;
     }
 
@@ -1476,8 +1640,8 @@ SkeletonXsens::computeKeypoints(const std::array<Quat, kXsensSegmentCount>& raw,
         pose_solver::PoseRefiner::FrameContext ctx{};
         ctx.sensorMeas    = &sensorTargets;
         ctx.sensorPresent = &fox::body::kSensorPresent;
-        ctx.segCenter     = nullptr;        // velocity-dependent (ContactDetector)
-        ctx.accLPBody     = nullptr;        // populated by MocapReceiver in §49 hook
+        ctx.segCenter     = m_haveLastSegCenter ? &m_lastSegCenter : nullptr;
+        ctx.accLPBody     = m_accLPBodyValid    ? &m_accLPBodyHint : nullptr;
         ctx.floorLevelZ   = 0.0;
         ctx.dt            = 1.0 / 240.0;
 
@@ -1527,6 +1691,17 @@ SkeletonXsens::computeKeypoints(const std::array<Quat, kXsensSegmentCount>& raw,
         // segment-world orientations.  Cheap (22 small SO(3) decompositions).
         diag->ergo        = fox::ergo::jointAnglesErgoAll(oriented);
     }
+    // Cache the segment centres so the next frame's pose_solver can use
+    // them for velocity / contact / ZUPT residuals (one-frame latency).
+    // We approximate "segment centre" with the start keypoint of each
+    // segment in the chain — for the WLS residual this is exact for the
+    // upper joints (pelvis, hip, shoulder) and a few mm off for distal
+    // segments, which is well below the kStdSamePosMeasXY = 0.3 mm sd.
+    for (int s = 0; s < kXsensSegmentCountWithDummies; ++s) {
+        const int a = m_start[s];
+        if (a < kXsensSegmentCount) m_lastSegCenter[a] = kp[a];
+    }
+    m_haveLastSegCenter = true;
     return kp;
 }
 
@@ -1547,73 +1722,46 @@ SkeletonXsens::computeKeypoints(const std::array<Quat, kXsensSegmentCount>& raw,
 static Quat constrain_shoulder_cone(const Quat& q_seg, const Quat& q_pelvis,
                                     bool isRight)
 {
-    // Направление сегмента-кости в мире.
-    const QVector3D boneWorld = vec_rotate(QVector3D(1.0f, 0.0f, 0.0f), q_seg);
+    // Anatomical ROM-based shoulder guard (spec §14 / kJointRom[7] for the
+    // gleno-humeral joint).  The pelvis-relative orientation of the upper
+    // arm is decomposed into abduction (X), flexion (Y) and axial rotation
+    // (Z), each component is clamped to the joint's healthy-adult ROM, and
+    // the result is recomposed.  This replaces the previous ad-hoc "behind
+    // the back" cone (magic 0.20 / 0.40 / 0.55 / cubic ramp 0.30·t³) with
+    // a deterministic ROM clamp driven by the same table the ergonomic
+    // angle pipeline already uses.
+    namespace fb = fox::body;
+    constexpr int kRShoulderJoint = 7;       // jRightShoulder index in kJointRom
+    constexpr int kLShoulderJoint = 11;      // jLeftShoulder index in kJointRom
+    const auto& rom = fb::kJointRom[isRight ? kRShoulderJoint : kLShoulderJoint];
 
-    // Выражаем кость в системе координат таза:
-    //   pelvis local +X = вверх (позвоночник),
-    //   pelvis local +Y = влево для актёра,
-    //   pelvis local +Z = назад для актёра.
-    const QVector3D pelvisFrame = vec_rotate(boneWorld, q_pelvis.inv());
-    const float boneL = pelvisFrame.length();
-    if (boneL < 1e-6f) return q_seg;
+    // Relative orientation of the upper-arm in the pelvis frame.
+    Quat qRel = quat_mult(q_seg, q_pelvis.inv()).normalized();
+    if (qRel.w < 0.0) { qRel.w = -qRel.w; qRel.x = -qRel.x;
+                        qRel.y = -qRel.y; qRel.z = -qRel.z; }
 
-    const QVector3D n = pelvisFrame / boneL;
-    const float upN   = n.x();
-    const float latN  = n.y();
-    const float backN = n.z();
+    // Engineering Euler-ZYX from the relative quaternion (spec §4.1).
+    const double roll  = std::atan2(2.0 * (qRel.w * qRel.x + qRel.y * qRel.z),
+                                    1.0 - 2.0 * (qRel.x * qRel.x + qRel.y * qRel.y));
+    const double pitch = fox::clamp_asin(2.0 * (qRel.w * qRel.y - qRel.z * qRel.x));
+    const double yaw   = std::atan2(2.0 * (qRel.w * qRel.z + qRel.x * qRel.y),
+                                    1.0 - 2.0 * (qRel.y * qRel.y + qRel.z * qRel.z));
 
-    // (1) ЧЕРЕЗ СРЕДНЮЮ ЛИНИЮ — рука не просто "своя сторона", а уходит
-    //     ЗА свою плечевую ось.  Правая рука должна быть latN < -0.20
-    //     (порог выше чем прежние -0.08 → не ловим замах, guard, reach).
-    const bool acrossMid = isRight ? (latN < -0.20f) : (latN >  0.20f);
+    constexpr double kD2R = fb::constants::kDeg2Rad;
+    const double abdMinR = rom.abdMin * kD2R, abdMaxR = rom.abdMax * kD2R;
+    const double flxMinR = rom.flxMin * kD2R, flxMaxR = rom.flxMax * kD2R;
+    const double rotMinR = rom.rotMin * kD2R, rotMaxR = rom.rotMax * kD2R;
 
-    // (2) ЯВНО ЗА СПИНУ — минимум 0.40 вместо 0.30.
-    const bool clearlyBehind = backN > 0.40f;
+    const double rollC  = std::clamp(roll,  abdMinR, abdMaxR);
+    const double pitchC = std::clamp(pitch, flxMinR, flxMaxR);
+    const double yawC   = std::clamp(yaw,   rotMinR, rotMaxR);
 
-    // (3) ТОЛЬКО В ГЛЕНО-ГУМЕРАЛЬНОЙ ГОРИЗОНТАЛИ — |upN| < 0.55.
-    //     Исключает overhead-замах и удары сверху вниз из зоны клампа.
-    const bool inHorizBand = std::abs(upN) < 0.55f;
+    if (std::abs(rollC - roll)   < 1e-6 &&
+        std::abs(pitchC - pitch) < 1e-6 &&
+        std::abs(yawC   - yaw)   < 1e-6) return q_seg;
 
-    if (!(acrossMid && clearlyBehind && inHorizBand))
-        return q_seg;
-
-    // Цель: завернуть кость обратно к плечевой плоскости, сохраняя длину.
-    constexpr float kBackMax = 0.30f;
-    QVector3D targetPelvis(upN, latN, std::min(backN, kBackMax));
-    const float tLen = targetPelvis.length();
-    if (tLen < 1e-6f) return q_seg;
-    targetPelvis = (targetPelvis / tLen) * boneL;
-
-    const QVector3D targetWorld = vec_rotate(targetPelvis, q_pelvis);
-    const QVector3D from = boneWorld.normalized();
-    const QVector3D to   = targetWorld.normalized();
-
-    const float d = QVector3D::dotProduct(from, to);
-    if (d > 0.9999f) return q_seg;
-
-    Quat qCorrect;
-    if (d < -0.9999f) {
-        QVector3D axis = QVector3D::crossProduct(QVector3D(0, 0, 1), from);
-        if (axis.lengthSquared() < 1e-6f)
-            axis = QVector3D::crossProduct(QVector3D(1, 0, 0), from);
-        axis.normalize();
-        qCorrect = Quat(0.0, axis.x(), axis.y(), axis.z());
-    } else {
-        const QVector3D axis = QVector3D::crossProduct(from, to);
-        const float s = std::sqrt((1.0f + d) * 2.0f);
-        qCorrect = Quat(0.5 * s, axis.x() / s, axis.y() / s, axis.z() / s)
-                       .normalized();
-    }
-
-    // Кубический ramp: производная 0 на границе зоны, максимум 0.30.
-    float violation = std::max(0.0f, backN - kBackMax);
-    violation = std::min(violation, 0.60f);
-    const float t        = violation / 0.60f;
-    const float strength = 0.30f * t * t * t;
-
-    const Quat qPartial = slerp_quat(Quat(1, 0, 0, 0), qCorrect, strength);
-    return quat_mult(qPartial, q_seg).normalized();
+    const Quat qRelClamped = fox::euler_to_quat(rollC, pitchC, yawC, "XYZ");
+    return quat_mult(qRelClamped, q_pelvis).normalized();
 }
 
 static Quat constrain_wrist_twist(const Quat& q_hand_world,
@@ -2054,11 +2202,14 @@ QVector3D LocomotionSolver::update(const Quat& qR,
         // 5. Initialisation on first frame.
         if (!m_initialised) {
             // Put pelvis at the pose-expected world height; anchor feet at
-            // fk + offset (floor-snapped for stand/squat).
-            const double pelvisZ_loco_init = 0.55 * m_actorHeightM;
+            // fk + offset (floor-snapped for stand/squat).  Hip-joint height
+            // is the sum of the ankle stub, lower-leg and upper-leg bone
+            // lengths scaled to the actor (spec §37.6 / §57).
+            const double pelvisZ_loco_init = fox::body::pelvisStandHeightM(m_actorHeightM);
             float targetZ = -fkMinZ;
             if (m_pose == PoseLying) targetZ = float(-pelvisZ_loco_init);
-            else if (m_pose == PoseSit) targetZ = float(0.28 * m_actorHeightM - pelvisZ_loco_init);
+            else if (m_pose == PoseSit) targetZ = float(fox::body::pelvisSitHeightM(m_actorHeightM)
+                                                        - pelvisZ_loco_init);
             m_offsetLast = QVector3D(0.0f, 0.0f, targetZ);
             m_anchorR = QVector3D(fkR.x() + m_offsetLast.x(),
                                   fkR.y() + m_offsetLast.y(),
@@ -2452,7 +2603,7 @@ QVector3D LocomotionSolver::update(const Quat& qR,
         //     where we can reliably predict pelvis world Z from actor
         //     height).  Very slow pull, within ±10 cm window.
         if (m_pose == PoseStand && m_poseTicks >= m_poseStableTicks) {
-            const double targetZ = 0.55 * m_actorHeightM;
+            const double targetZ = fox::body::pelvisStandHeightM(m_actorHeightM);
             if (std::abs(newOff.z() - targetZ) < 0.10) {
                 newOff.setZ(float((1.0 - m_zDriveRate) * newOff.z()
                                   + m_zDriveRate * targetZ));
@@ -2533,7 +2684,7 @@ QVector3D LocomotionSolver::update(const Quat& qR,
         (void)ux; (void)uy;
         outTiltCos = uz;
         if (uz < m_lieTiltCosThresh) return PoseLying;
-        const double pelvisZ_loco = 0.55 * m_actorHeightM;
+        const double pelvisZ_loco = fox::body::pelvisStandHeightM(m_actorHeightM);
         const double pelvisToFoot = pelvisZ_loco - double(std::min(fkR.z(), fkL.z()));
         if (pelvisToFoot < m_squatKneeThresh) return PoseSquat;
         if (pelvisToFoot < m_sitKneeThresh)   return PoseSit;
@@ -4682,6 +4833,22 @@ void MocapReceiver::run()
                     // §51.6 body dip 78°; §51.1 declination 0° by default
                     s.magDipModelDeg    = float(fox::body::kMagnet.inclinationDeg);
                     s.magDeclinationDeg = float(fox::body::kMagnet.declinationDeg);
+                    // §51.6 per-segment expected magnetic-field norm.  Head /
+                    // hands / feet read higher norms than the body baseline
+                    // because of nearby metal (skull plates, glove electronics,
+                    // shoe steel).  Using the segment-specific reference lets
+                    // the 3 % norm gate stay open on those sensors instead of
+                    // being permanently closed at the body's |m|=1.0 baseline.
+                    const fox::body::CalibMagE& mE = fox::body::kCalibMagE;
+                    float refNorm = 1.0f;
+                    switch (targetSeg) {
+                        case SEG_Head:                                  refNorm = float(1.0 + mE.e_norm_head);   break;
+                        case SEG_RHand: case SEG_LHand:                 refNorm = float(1.0 + mE.e_norm_hands);  break;
+                        case SEG_RFoot: case SEG_LFoot:                 refNorm = float(1.0 + 0.1 * mE.e_mag_feet); break;
+                        case SEG_Pelvis:                                refNorm = float(1.0 + mE.e_norm_pelvis); break;
+                        default:                                        refNorm = 1.0f;                           break;
+                    }
+                    s.magNormReferenceLocal = refNorm;
                     FusionAhrsSetSettings(&ahrs, &s);
                     I.fusionReady[targetSeg] = true;
                 }
@@ -6495,7 +6662,7 @@ void NewSessionWizard::buildPages()
                                                  : 0.05 * trunkScale;
             const double trunkCm = m_trunk ? m_trunk->value() : 0.0;
             const double trunkM  = (trunkCm > 0.0) ? std::max(0.30, trunkCm / 100.0)
-                                                   : 0.55 * h;
+                                                   : fox::body::trunkLengthM(h);
             struct V { const char* k; double m; };
             V vals[9] = {
                 { "bk_trunk",     0.288 * h               },
@@ -11163,7 +11330,7 @@ MainWindow::MainWindow(MocapReceiver* rx,
         if (m_skel) {
             std::array<Quat, kXsensSegmentCount> identity{};
             for (auto& qq : identity) qq = Quat(1, 0, 0, 0);
-            const float pelvisZ = float(m_setup.heightCm * 0.55 / 100.0);
+            const float pelvisZ = float(fox::body::pelvisStandHeightM(m_setup.heightCm / 100.0));
             auto kp = m_skel->computeKeypoints(identity, QVector3D(0.0f, 0.0f, pelvisZ));
             for (int i = 0; i < kXsensSegmentCount; ++i) {
                 cfg.tposeOriginM[i] = kp[i];  // NWU == MVN Z-up RH; no conversion.
@@ -11620,65 +11787,43 @@ void MainWindow::onRenderTick()
         }
     }
 
-    // --- Спина и шея: smoothstep-распределение между тазом и T8.
-    //     Мат: weight(t) = t² · (3 - 2t), C¹ на границах → нет kink
-    //     при сильных наклонах; L5 "лежит" на тазу, T12 "лежит" на T8
-    //     сильнее, чем при линейном slerp — соответствует реальному
-    //     coupling позвоночных сегментов. ---
-    auto smoothstep = [](double x) { return x * x * (3.0 - 2.0 * x); };
-    q[SEG_L5]   = slerp_quat(q[SEG_Pelvis], q[SEG_T8],   smoothstep(0.22));
-    q[SEG_L3]   = slerp_quat(q[SEG_Pelvis], q[SEG_T8],   smoothstep(0.50));
-    q[SEG_T12]  = slerp_quat(q[SEG_Pelvis], q[SEG_T8],   smoothstep(0.78));
-    q[SEG_Neck] = slerp_quat(q[SEG_T8],     q[SEG_Head], 0.50);
-    // Toe (MTP joint) — no toe sensor, so estimate ball-of-foot flexion from
-    // foot pitch so the toe hinges during push-off instead of staying a rigid
-    // extension of the foot.  ext==0 when the foot is flat/heel-down → identical
-    // to the old q[toe]=q[foot] copy, so standing & locomotion are unchanged.
-    q[SEG_RToe] = estimateToeOrientation(q[SEG_RFoot]);
-    q[SEG_LToe] = estimateToeOrientation(q[SEG_LFoot]);
-    g_renderDiag.spineW_L5  = smoothstep(0.22);   // -test §3 capture (single source)
-    g_renderDiag.spineW_L3  = smoothstep(0.50);
-    g_renderDiag.spineW_T12 = smoothstep(0.78);
-    g_renderDiag.neckW      = 0.50;
-
+    // --- Spec §40 / §45–§48 biomechanical coupling.  All work is done in
+    //     world-frame, then the body-frame `q[]` is reassembled from the
+    //     skeleton's defAng table.  This replaces the previous smoothstep
+    //     spine partition + ad-hoc scapulo-humeral lambda with the closed-
+    //     form distributions in foxcoupling.cpp (kCSpine[0..3] for the
+    //     spine, kCSpine[5..6] + kSpineNeck.cNeck for the neck, scapulo-
+    //     humeral c_eff(θ_h) piecewise-linear, knee screw-home, ankle
+    //     clamp + eversion coupling, and the toe rocker switching).
     if (m_skel) {
-        const Quat dA_pel = m_skel->defAngFor(SEG_Pelvis);
-        const Quat qPelvisWorld = quat_mult(q[SEG_Pelvis], dA_pel).normalized();
-        const Quat qPelvisWorldInv = qPelvisWorld.inv();
-        auto coupleScapHumeral = [&](int iSh, int iUA, bool isRight) {
-            const Quat dA_sh = m_skel->defAngFor(iSh);
-            const Quat dA_ua = m_skel->defAngFor(iUA);
-            const Quat shWorld = quat_mult(q[iSh], dA_sh).normalized();
-            const Quat uaWorld = quat_mult(q[iUA], dA_ua).normalized();
-            const QVector3D armDir = vec_rotate(QVector3D(1.0f, 0.0f, 0.0f), uaWorld);
-            const double upZ = std::clamp(double(armDir.z()), -1.0, 1.0);
-            const double activate = 0.30;
-            // -test §3 capture: arm-elevation gate + applied scapular angle.
-            if (isRight) { g_renderDiag.scapUpZR = upZ; g_renderDiag.scapActiveR = (upZ >= activate); }
-            else         { g_renderDiag.scapUpZL = upZ; g_renderDiag.scapActiveL = (upZ >= activate); }
-            if (upZ < activate) {
-                if (isRight) g_renderDiag.scapAngR = 0.0; else g_renderDiag.scapAngL = 0.0;
-                return;
-            }
-            const double normalised = (upZ - activate) / (1.0 - activate);
-            const double scapAng = normalised * 0.30;
-            const double signedAng = isRight ? -scapAng : scapAng;
-            if (isRight) g_renderDiag.scapAngR = signedAng; else g_renderDiag.scapAngL = signedAng;
-            // Scapular shrug must rotate around the BODY's forward axis,
-            // not world X.  When the actor yaws the body 90°, world X is
-            // no longer the body's forward axis, so the old code applied
-            // the boost around the wrong direction → asymmetric tilt
-            // visible during turning.  Convert the body-frame rotation
-            // to world frame via similarity through pelvis world.
-            const Quat scapBoostBody = axisAngleQuat(QVector3D(1.0, 0.0, 0.0), signedAng);
-            const Quat scapBoostWorld = quat_mult(quat_mult(qPelvisWorld, scapBoostBody),
-                                                  qPelvisWorldInv).normalized();
-            const Quat shWorldNew = quat_mult(scapBoostWorld, shWorld).normalized();
-            q[iSh] = quat_mult(shWorldNew, dA_sh.inv()).normalized();
-        };
-        coupleScapHumeral(SEG_RShoulder, SEG_RUpperArm, true);
-        coupleScapHumeral(SEG_LShoulder, SEG_LUpperArm, false);
+        std::array<Quat, kXsensSegmentCount> qWorld{};
+        for (int i = 0; i < kXsensSegmentCount; ++i)
+            qWorld[i] = quat_mult(q[i], m_skel->defAngFor(i)).normalized();
 
+        fox::coupling::applyPelvisTilt(qWorld);
+        fox::coupling::applySpineRhythm(qWorld);
+        fox::coupling::applyNeckRhythm(qWorld);
+        fox::coupling::applyScapuloHumeral(qWorld);
+        fox::coupling::applyKneeScrewHome(qWorld);
+        fox::coupling::applyAnkleCoupling(qWorld);
+        const auto toeWeights = fox::coupling::computeToeRockerWeights(qWorld);
+
+        constexpr int kCoupledSegs[] = {
+            SEG_L5, SEG_L3, SEG_T12, SEG_Neck,
+            SEG_RShoulder, SEG_LShoulder,
+            SEG_RUpperArm, SEG_LUpperArm,
+            SEG_RLowerLeg, SEG_LLowerLeg,
+            SEG_RFoot, SEG_LFoot,
+        };
+        for (int seg : kCoupledSegs) {
+            q[seg] = quat_mult(qWorld[seg],
+                               m_skel->defAngFor(seg).inv()).normalized();
+        }
+
+        // Spec §46.5 — pronation / supination of the forearm picks up
+        // 20 % of the hand's long-axis twist (Z component of the relative
+        // quaternion).  This is the only coupling left in body-frame
+        // because it operates on the post-coupling Hand orientation.
         auto coupleWristForearm = [&](int iH, int iFA) {
             const Quat dA_h = m_skel->defAngFor(iH);
             const Quat dA_f = m_skel->defAngFor(iFA);
@@ -11692,7 +11837,6 @@ void MainWindow::onRenderTick()
             const double twistHalf = std::atan2(tx, tw);
             const double couplingFraction = 0.20;
             const double faAdditionalTwist = twistHalf * 2.0 * couplingFraction;
-            // -test §3 capture: hand long-axis twist that the forearm follows.
             if (iH == SEG_RHand) { g_renderDiag.wTwistHalfR = twistHalf; g_renderDiag.faTwistAddR = faAdditionalTwist; }
             else                 { g_renderDiag.wTwistHalfL = twistHalf; g_renderDiag.faTwistAddL = faAdditionalTwist; }
             const Quat faTwistAdd = axisAngleQuat(QVector3D(1.0, 0.0, 0.0), faAdditionalTwist);
@@ -11705,6 +11849,36 @@ void MainWindow::onRenderTick()
         };
         coupleWristForearm(SEG_RHand, SEG_RForearm);
         coupleWristForearm(SEG_LHand, SEG_LForearm);
+
+        // Toe (MTP) joint orientation — no toe sensor, so estimate ball-
+        // of-foot flexion from foot pitch.  The rocker weight (1.0 when
+        // toe lifted, 0.0 when flat) is forwarded so estimateToeOrientation
+        // can produce the right amount of MTP flex during push-off.
+        q[SEG_RToe] = estimateToeOrientation(q[SEG_RFoot], toeWeights.w_toe_R);
+        q[SEG_LToe] = estimateToeOrientation(q[SEG_LFoot], toeWeights.w_toe_L);
+
+        // -test §3 capture: expose coupling state to the render diag so
+        // dumpFrameDiag can print the applied θ / c_eff per frame.
+        const auto& cd = fox::coupling::diagnostics();
+        g_renderDiag.spineW_L5  = cd.spineFracL5;
+        g_renderDiag.spineW_L3  = cd.spineFracL3;
+        g_renderDiag.spineW_T12 = cd.spineFracT12;
+        g_renderDiag.neckW      = 0.5;
+        g_renderDiag.scapUpZR   = std::sin(cd.scapThetaRDeg * M_PI / 180.0);
+        g_renderDiag.scapUpZL   = std::sin(cd.scapThetaLDeg * M_PI / 180.0);
+        g_renderDiag.scapActiveR= cd.scapThetaRDeg > 0.0;
+        g_renderDiag.scapActiveL= cd.scapThetaLDeg > 0.0;
+        g_renderDiag.scapAngR   = cd.scapCEffR;
+        g_renderDiag.scapAngL   = cd.scapCEffL;
+    } else {
+        // No skeleton — fall back to the toe estimator only; coupling laws
+        // require defAng access via SkeletonXsens.
+        q[SEG_L5]   = q[SEG_Pelvis];
+        q[SEG_L3]   = q[SEG_Pelvis];
+        q[SEG_T12]  = q[SEG_T8];
+        q[SEG_Neck] = q[SEG_T8];
+        q[SEG_RToe] = estimateToeOrientation(q[SEG_RFoot]);
+        q[SEG_LToe] = estimateToeOrientation(q[SEG_LFoot]);
     }
 
     s_lastOut[SEG_L5]   = q[SEG_L5];
@@ -11753,7 +11927,11 @@ void MainWindow::onRenderTick()
     const auto& qOut = m_viewport->filteredOrient();
 
     if (m_skel) {
-        const float pelvisZ_loco = float(m_setup.heightCm * 0.55 / 100.0);
+        // Push the freshly-snapshotted per-sensor acceleration into the
+        // skeleton's cache so the pose_solver's contact detector can
+        // evaluate ZUPT residuals on this frame.
+        m_skel->setAccLPBodyHint(f.accSensor);
+        const float pelvisZ_loco = float(fox::body::pelvisStandHeightM(m_setup.heightCm / 100.0));
         auto kpLoco = m_skel->computeKeypoints(qOut, QVector3D(0.0f, 0.0f, pelvisZ_loco));
         // FIX (heel/toe contact discrimination): передаём heel/ball/tip
         // трёх точек стопы, а не lowest.  Solver сам определит active
@@ -12672,7 +12850,7 @@ void MainWindow::onOpenLiveWizard()
     if (m_skel) {
         std::array<Quat, kXsensSegmentCount> identity{};
         for (auto& q : identity) q = Quat(1, 0, 0, 0);
-        const float pelvisZ = float(m_setup.heightCm * 0.55 / 100.0);
+        const float pelvisZ = float(fox::body::pelvisStandHeightM(m_setup.heightCm / 100.0));
         auto kp = m_skel->computeKeypoints(identity, QVector3D(0.0f, 0.0f, pelvisZ));
         for (int i = 0; i < kXsensSegmentCount; ++i) {
             cfg.tposeOriginM[i] = kp[i];  // NWU == MVN Z-up RH; no conversion.

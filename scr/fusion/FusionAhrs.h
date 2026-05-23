@@ -52,6 +52,11 @@ typedef struct {
     float            sampleRateHz;      // 60 (Awinda) or 240 (Link); used to scale Q
     float            magDipModelDeg;    // §51.1 m0defDipAngleRad — +78° body / −67.328° generic
     float            magDeclinationDeg; // §51.1 m0defDeclinationAngleRad — 0° default
+    // Spec §51.6 — per-segment expected magnetic-field norm.  Body is the
+    // reference at 1.0; pelvis ≈ 1.0, head ≈ 1.3 (skull metal),
+    // hands ≈ 1.35 (glove electronics), feet ≈ 1.22 (sole metal).  When
+    // 0 (default) the legacy single-norm gate at 1.0 is used.
+    float            magNormReferenceLocal;
 } FusionAhrsSettings;
 
 // ----------------------------------------------------------------------------

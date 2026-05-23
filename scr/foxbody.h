@@ -1200,6 +1200,42 @@ inline double scaleFor(double subjectHeightM) {
     return (subjectHeightM > 1e-3) ? (subjectHeightM / kRefHeightM) : 1.0;
 }
 
+// Ankle-joint world height for a foot resting on the floor.  Equal to the
+// vertical offset of the foot origin above the heel/ball points (=0.080 m
+// at reference height), then scaled to the subject.
+inline double ankleHeightM(double subjectHeightM) {
+    return scaleFor(subjectHeightM) *
+           std::abs(double(kFootPointsRight[0].r_local.z()));
+}
+
+// Hip-joint world height in a relaxed standing pose: ankle-to-floor offset
+// + lower-leg + upper-leg bone lengths.  Pelvis origin in the skeleton tree
+// sits at this Z above the floor when both feet are planted.
+inline double pelvisStandHeightM(double subjectHeightM) {
+    return scaleFor(subjectHeightM) * (
+        std::abs(double(kFootPointsRight[0].r_local.z())) +
+        std::abs(double(kSensorToBone[16].L_bone.z())) +     // RLowerLeg
+        std::abs(double(kSensorToBone[15].L_bone.z())));     // RUpperLeg
+}
+
+// Hip-joint world height in a seated pose: thigh roughly horizontal, only
+// the shin contributes a vertical component.  Used as the per-frame target
+// for the "sitting" locomotion classification.
+inline double pelvisSitHeightM(double subjectHeightM) {
+    return scaleFor(subjectHeightM) * (
+        std::abs(double(kFootPointsRight[0].r_local.z())) +
+        std::abs(double(kSensorToBone[16].L_bone.z())));
+}
+
+// Sum of spine bone lengths Pelvis → Head (six segments).  Used as the
+// "trunk length" anthropometric default when the user has not measured it.
+inline double trunkLengthM(double subjectHeightM) {
+    double s = 0.0;
+    for (int i = 0; i <= 5; ++i)
+        s += std::abs(double(kSensorToBone[i].L_bone.z()));
+    return scaleFor(subjectHeightM) * s;
+}
+
 // Spec §12.1 — whole-body centre of mass:  r_cm = Σ m_i·r_i / Σ m_i.
 // `segCenters[i]` is the world-frame centre of segment i.  Returns the
 // mass-weighted mean using kMassRatio[] as the m_i weights (the absolute
