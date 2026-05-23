@@ -86,6 +86,53 @@ Quat slerp_quat(const Quat& a, const Quat& b, double t);
 // Rotation magnitude of q in degrees (0..360).
 double quat_angle_deg(const Quat& q);
 
+// ============================================================================
+//  Spec primitives — exact formulas from the FOX_KFA Motion Engine reference.
+// ============================================================================
+
+// Spec §15.2 — «safe» asin/acos with built-in argument clamp to [-1, +1].
+// Round-off in earlier products can push the argument just past the domain;
+// without the clamp asin/acos return NaN.  Both forms are inline because they
+// land in tight inner loops (SLERP, Euler decomposition, ω-from-Δq).
+inline double clamp_asin(double x) {
+    if (x <= -1.0) return -M_PI_2;
+    if (x >=  1.0) return  M_PI_2;
+    return std::asin(x);
+}
+inline double clamp_acos(double x) {
+    if (x <= -1.0) return  M_PI;
+    if (x >=  1.0) return  0.0;
+    return std::acos(x);
+}
+
+// Spec §5.1 — exp-map: rotation vector φ = θ·n  →  unit quaternion.
+// q.w = cos(θ/2), q.xyz = sin(θ/2)·n with the small-angle limit handled.
+Quat quat_exp_rotvec(double phix, double phiy, double phiz);
+
+// Spec §5.2 — log-map: unit quaternion → rotation vector φ = θ·n.
+// θ = 2·atan2(‖xyz‖, w); n = xyz / ‖xyz‖.  Returns (0,0,0) for q ≈ identity.
+QVector3D quat_log(const Quat& q);
+
+// Spec §3.1 — quaternion → 3×3 rotation matrix.  Row-major: [r0,r1,r2,r3,...,r8].
+// Uses the Kayley form on the diagonal (w²±x²±y²±z²) which is correct even
+// for slightly non-unit q.
+struct Matrix3 { double m[9]; };
+Matrix3 quat_to_matrix(const Quat& q);
+
+// Spec §4.3 — matrix → Euler-XYZ (variant A) and Euler-YXZ-like (variant B),
+// used by jointAnglesErgo for per-joint anatomical decomposition.
+// Both return roll/pitch/yaw in RADIANS; callers multiply by 180/π if needed.
+struct Euler3 { double e0, e1, e2; };
+Euler3 matrix_to_euler_A(const Matrix3& R);  // (atan2(m21,m11), asin(-m01), atan2(m02,m00))
+Euler3 matrix_to_euler_B(const Matrix3& R);  // (atan2(-m20,m22), asin(m21), atan2(-m01,m11))
+
+// Spec §12.2 — angular velocity from a relative quaternion Δq over Δt.
+//     v = Δq.xyz,  ‖v‖ = sin(θ/2);
+//     ω = (2·asin(‖v‖) / (‖v‖·Δt)) · v          (‖v‖ ≠ 0)
+//     ω = (2 / Δt) · v                          (small-angle limit)
+// This is the *exact* formula extracted from fox_types_engine.dll.
+QVector3D angular_velocity_from_quat(const Quat& dq, double dtSec);
+
 // Mirror a rotation across the body XZ-plane (Y-flip).  j·q·j⁻¹ = (w,-x,y,-z);
 // a homomorphism, so it composes correctly with quat_mult.
 inline Quat mirror_y_quat(const Quat& q) {

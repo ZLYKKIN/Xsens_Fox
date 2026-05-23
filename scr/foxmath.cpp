@@ -110,4 +110,86 @@ double quat_angle_deg(const Quat& q)
     return 2.0 * std::acos(w) * 180.0 / 3.14159265358979323846;
 }
 
+// ============================================================================
+//  Spec primitives — see header for spec section references.
+// ============================================================================
+
+Quat quat_exp_rotvec(double phix, double phiy, double phiz)
+{
+    // Spec §5.1: θ = ‖φ‖; q.xyz = (φ/θ)·sin(θ/2); q.w = cos(θ/2).  Limit at
+    // θ→0 falls out of the Taylor series sin(θ/2)/θ ≈ 1/2, so the «small-angle»
+    // branch is just the limit value 0.5 with no division.
+    const double th2 = phix*phix + phiy*phiy + phiz*phiz;
+    if (th2 < 1e-24) return Quat(1, 0, 0, 0);
+    const double th = std::sqrt(th2);
+    const double half = 0.5 * th;
+    const double s = std::sin(half) / th;   // = sin(θ/2) / θ
+    return Quat(std::cos(half), s * phix, s * phiy, s * phiz);
+}
+
+QVector3D quat_log(const Quat& q)
+{
+    // Spec §5.2: θ = 2·atan2(‖v‖, w), n = v/‖v‖, φ = θ·n.  For q close to
+    // identity ‖v‖ ≈ 0 and the limit is φ = 2·v (Taylor: atan2(x,1) ≈ x).
+    const double vn2 = q.x*q.x + q.y*q.y + q.z*q.z;
+    if (vn2 < 1e-24) {
+        // Small-angle: φ = 2·v (sign of w handled by upstream hemisphere fix).
+        const double s = (q.w >= 0.0) ? 2.0 : -2.0;
+        return QVector3D(float(s*q.x), float(s*q.y), float(s*q.z));
+    }
+    const double vn = std::sqrt(vn2);
+    const double th = 2.0 * std::atan2(vn, q.w);
+    const double k  = th / vn;
+    return QVector3D(float(k*q.x), float(k*q.y), float(k*q.z));
+}
+
+Matrix3 quat_to_matrix(const Quat& q)
+{
+    // Spec §3.1 / fox_types_engine §34.6 — full Kayley form on the diagonal.
+    const double w = q.w, x = q.x, y = q.y, z = q.z;
+    const double ww=w*w, xx=x*x, yy=y*y, zz=z*z;
+    const double xy=x*y, xz=x*z, yz=y*z;
+    const double wx=w*x, wy=w*y, wz=w*z;
+    Matrix3 R;
+    R.m[0] = ww + xx - yy - zz;   R.m[1] = 2.0 * (xy - wz);     R.m[2] = 2.0 * (xz + wy);
+    R.m[3] = 2.0 * (xy + wz);     R.m[4] = ww - xx + yy - zz;   R.m[5] = 2.0 * (yz - wx);
+    R.m[6] = 2.0 * (xz - wy);     R.m[7] = 2.0 * (yz + wx);     R.m[8] = ww - xx - yy + zz;
+    return R;
+}
+
+Euler3 matrix_to_euler_A(const Matrix3& R)
+{
+    // Spec §4.3 variant A: middle = asin(-m01), first = atan2(m21,m11), second = atan2(m02,m00).
+    Euler3 e;
+    e.e0 = std::atan2( R.m[7], R.m[4] );        // atan2(m21, m11)
+    e.e1 = clamp_asin( -R.m[1] );               // asin(-m01)
+    e.e2 = std::atan2( R.m[2], R.m[0] );        // atan2(m02, m00)
+    return e;
+}
+
+Euler3 matrix_to_euler_B(const Matrix3& R)
+{
+    // Spec §4.3 variant B: middle = asin(m21), first = atan2(-m20,m22), second = atan2(-m01,m11).
+    Euler3 e;
+    e.e0 = std::atan2( -R.m[6], R.m[8] );       // atan2(-m20, m22)
+    e.e1 = clamp_asin( R.m[7] );                // asin(m21)
+    e.e2 = std::atan2( -R.m[1], R.m[4] );       // atan2(-m01, m11)
+    return e;
+}
+
+QVector3D angular_velocity_from_quat(const Quat& dq, double dtSec)
+{
+    // Spec §12.2 / fox_types_engine §34.5: ω = (2·asin(‖v‖) / (‖v‖·Δt)) · v.
+    if (dtSec <= 0.0) return QVector3D(0, 0, 0);
+    const double vn2 = dq.x*dq.x + dq.y*dq.y + dq.z*dq.z;
+    if (vn2 < 1e-24) {
+        // Small-angle limit: ω = (2/Δt)·v.
+        const double k = 2.0 / dtSec;
+        return QVector3D(float(k*dq.x), float(k*dq.y), float(k*dq.z));
+    }
+    const double vn = std::sqrt(vn2);
+    const double k  = 2.0 * clamp_asin(vn) / (vn * dtSec);
+    return QVector3D(float(k*dq.x), float(k*dq.y), float(k*dq.z));
+}
+
 }  // namespace fox
