@@ -101,6 +101,120 @@ inline constexpr std::array<QVector3D, kSegmentCount> kBoneVec = {{
     {  0.064f, 0.0f,  -0.015f },  // 22 LToe
 }};
 
+// ---------------------------------------------------------------------------
+//  §39 — per-bone sensor→bone factory transform, sensor position on the bone,
+//  and the local-frame bone vector L_bone (origin → next joint).
+//  Numbers reproduced verbatim from the spec table at lines 3196–3304
+//  (fox_definitions.xsb XOR-101 decrypted).  Indexing is 0-based (matches
+//  main.h SEG_*); the spec lists 1-based, the offset is applied here.
+//
+//  q_bs is the orientation of the sensor in the bone frame at factory
+//  defaults (before subject calibration §24).  Segments without a physical
+//  IMU (L5, L3, T12, Neck, RToe, LToe — see kSensorPresent) get an identity
+//  q_bs as a placeholder; the runtime never reads them anyway because no
+//  sensor sample maps to those segments.
+// ---------------------------------------------------------------------------
+struct SensorToBone {
+    Quat       q_bs;     // sensor → bone factory rotation (|q|=1)
+    QVector3D  r_bs;     // sensor position on the bone, metres
+    QVector3D  L_bone;   // bone vector (origin → next joint), metres, local frame
+};
+
+inline const std::array<SensorToBone, kSegmentCount> kSensorToBone = {{
+    // 0  Pelvis    — angle 174.49°, sensor at the small of the back
+    { Quat( 0.048101,  0.517692, -0.029168, -0.853716),
+      QVector3D(-0.05563f,  0.00000f,  0.09514f),
+      QVector3D(-0.01081f,  0.00000f,  0.09730f) },
+    // 1  L5        — no sensor (interpolated)
+    { Quat(1, 0, 0, 0),
+      QVector3D(0, 0, 0),
+      QVector3D( 0.00000f,  0.00000f,  0.10790f) },
+    // 2  L3        — no sensor
+    { Quat(1, 0, 0, 0),
+      QVector3D(0, 0, 0),
+      QVector3D( 0.00000f,  0.00000f,  0.09851f) },
+    // 3  T12       — no sensor
+    { Quat(1, 0, 0, 0),
+      QVector3D(0, 0, 0),
+      QVector3D( 0.00000f,  0.00000f,  0.09840f) },
+    // 4  T8        — angle 71.26°, sensor on the sternum/upper back
+    { Quat( 0.812802, -0.010534,  0.582112,  0.019711),
+      QVector3D( 0.14000f,  0.00000f,  0.07700f),
+      QVector3D( 0.00000f,  0.00000f,  0.13790f) },
+    // 5  Neck      — no sensor
+    { Quat(1, 0, 0, 0),
+      QVector3D(0, 0, 0),
+      QVector3D( 0.00000f,  0.00000f,  0.09161f) },
+    // 6  Head      — angle 104.55°
+    { Quat( 0.611905,  0.694764, -0.362720,  0.106347),
+      QVector3D(-0.06928f,  0.00000f,  0.07616f),
+      QVector3D( 0.00000f,  0.00000f,  0.17029f) },
+    // 7  RShoulder — angle 78.14°
+    { Quat( 0.776381,  0.332211, -0.258954, -0.468841),
+      QVector3D(-0.02000f, -0.05000f, -0.06000f),
+      QVector3D( 0.00000f, -0.14000f,  0.00000f) },
+    // 8  RUpperArm — angle 99.66°
+    { Quat( 0.645046, -0.253557,  0.224966, -0.684846),
+      QVector3D(-0.02000f, -0.10000f,  0.02000f),
+      QVector3D( 0.00000f, -0.30000f,  0.00000f) },
+    // 9  RForeArm  — angle 82.87°
+    { Quat( 0.749726, -0.193893,  0.211256, -0.596396),
+      QVector3D( 0.00184f, -0.20024f,  0.02000f),
+      QVector3D( 0.00000f, -0.24520f,  0.00000f) },
+    // 10 RHand     — angle 92.37°
+    { Quat( 0.692346,  0.147448,  0.046195, -0.704828),
+      QVector3D( 0.00000f, -0.05500f,  0.02000f),
+      QVector3D( 0.00000f, -0.18300f,  0.00000f) },
+    // 11 LShoulder — angle 87.07°
+    { Quat( 0.724949, -0.264417, -0.439236,  0.460004),
+      QVector3D(-0.02000f,  0.05000f, -0.06000f),
+      QVector3D( 0.00000f,  0.14000f,  0.00000f) },
+    // 12 LUpperArm — angle 92.49°
+    { Quat( 0.691599,  0.080354,  0.106548,  0.709846),
+      QVector3D(-0.02000f,  0.10000f,  0.02000f),
+      QVector3D( 0.00000f,  0.30000f,  0.00000f) },
+    // 13 LForeArm  — angle 81.08°
+    { Quat( 0.759964,  0.011096,  0.069391,  0.646155),
+      QVector3D( 0.00184f,  0.20024f,  0.02000f),
+      QVector3D( 0.00000f,  0.24520f,  0.00000f) },
+    // 14 LHand     — angle 95.95°
+    { Quat( 0.669439, -0.100277,  0.054421,  0.734053),
+      QVector3D( 0.00000f,  0.05500f,  0.02000f),
+      QVector3D( 0.00000f,  0.18300f,  0.00000f) },
+    // 15 RUpperLeg — angle 126.39°
+    { Quat( 0.450969,  0.605623,  0.478005, -0.448730),
+      QVector3D( 0.01205f, -0.06000f, -0.25071f),
+      QVector3D( 0.00000f,  0.00000f, -0.41648f) },
+    // 16 RLowerLeg — angle 101.45°
+    { Quat( 0.633032, -0.250941,  0.700127,  0.214757),
+      QVector3D( 0.03090f,  0.01000f, -0.13293f),
+      QVector3D( 0.00000f,  0.00000f, -0.40634f) },
+    // 17 RFoot     — angle 32.22°
+    { Quat( 0.960726,  0.112046,  0.252661, -0.024793),
+      QVector3D( 0.08500f,  0.00200f, -0.01200f),
+      QVector3D( 0.14700f,  0.00000f, -0.06500f) },
+    // 18 RToe      — no sensor
+    { Quat(1, 0, 0, 0),
+      QVector3D(0, 0, 0),
+      QVector3D( 0.06400f,  0.00000f, -0.01500f) },
+    // 19 LUpperLeg — angle 134.94°
+    { Quat( 0.383195, -0.605793,  0.460515,  0.523548),
+      QVector3D( 0.01205f,  0.06000f, -0.25071f),
+      QVector3D( 0.00000f,  0.00000f, -0.41648f) },
+    // 20 LLowerLeg — angle 98.55°
+    { Quat( 0.652402,  0.304931,  0.665425, -0.196464),
+      QVector3D( 0.03090f, -0.01000f, -0.13293f),
+      QVector3D( 0.00000f,  0.00000f, -0.40634f) },
+    // 21 LFoot     — angle 35.17°
+    { Quat( 0.953278, -0.149169,  0.227166,  0.131928),
+      QVector3D( 0.08500f, -0.00200f, -0.01200f),
+      QVector3D( 0.14700f,  0.00000f, -0.06500f) },
+    // 22 LToe      — no sensor
+    { Quat(1, 0, 0, 0),
+      QVector3D(0, 0, 0),
+      QVector3D( 0.06400f,  0.00000f, -0.01500f) },
+}};
+
 // Stub offsets (pelvis→hip-joint, T8→shoulder-joint) used by the FK dummy chain.
 // Hip half-width ±0.08 m Y (spec §37.6: «таз: бёдра ±0.08 по Y, ширина таза 0.16 м»).
 // Shoulder half-width ±0.16 m Y (typical bi-acromial half on a 1.75 m subject;
@@ -252,6 +366,69 @@ constexpr double kSin6  = 0.10452846;
 // Both poses share the same arm/leg references; only the spine differs by gender,
 // and only the arms differ between T-pose and N-pose.
 Quat referenceQuat(int seg, Pose pose, Gender gender);
+
+// ---------------------------------------------------------------------------
+//  §40 — biomechanical joint-coupling coefficients (FOX_FE.bioMech.c_*).
+//  In the engine these enter the WLS solver as Jacobian rows; in this
+//  reduced-scope build we apply them deterministically as a post-FK
+//  redistribution of a parent→child rotation across an anatomical chain
+//  (foxcoupling.cpp).
+//
+//  All numbers are spec §40.2 verbatim (lines 3341–3358 of the spec doc).
+// ---------------------------------------------------------------------------
+
+// Spine rhythm: total Pelvis→T8 rotation is distributed across the 6 spinal
+// joints (jL5S1, jL4L3, jL1T12, jT9T8) plus neck and head (jT1C7, jC1Head)
+// using these weights.  Lumbar bends less (0.05..0.85 rising), cervical
+// almost freely (0.9).  Weights ARE NOT normalised in the spec — the engine
+// uses them as Jacobian factors; foxcoupling.cpp normalises by their sum so
+// the redistributed angles add up to the original total.
+inline constexpr std::array<double, 9> kCSpine = {
+    0.05, 0.45, 0.65, 0.85, 0.35, 0.9, 0.9, 0.9, 0.9
+};
+
+// Pelvis tilt coupling [c_pelvis] — first is the fraction of pelvic tilt
+// preserved (0.35), second is a degree/weight scale (25).
+inline constexpr std::array<double, 2> kCPelvis = { 0.35, 25.0 };
+
+// Scapulo-humeral ratio: shoulder elevation drags the scapula along with
+// coefficients [0.95, 0.95, 0.99] — almost 1:1 at large abduction angles.
+inline constexpr std::array<double, 3> kCArms = { 0.95, 0.95, 0.99 };
+
+// Hip–knee leg coupling [c_legs] — biarticular muscle effect on the chain.
+inline constexpr std::array<double, 2> kCLegs  = { 0.9,  0.95 };
+
+// Knee screw-home mechanism [c_knees] — small obligatory tibial rotation
+// during the final 20° of extension.
+inline constexpr std::array<double, 2> kCKnees = { 0.9,  0.95 };
+
+// Ankle plantar-flexion / eversion limits and coupling [c_ankles]:
+//   [0] = 2.0           — eversion coupling gain
+//   [1] = 0.523599 rad  — plantar-flexion limit (30°)
+//   [2] = 0.5           — secondary coupling
+//   [3] = 0.0           — offset
+inline constexpr std::array<double, 4> kCAnkles = { 2.0, 0.523599, 0.5, 0.0 };
+
+// Toe-off / metatarsal-phalangeal coupling [c_toes]:
+//   [0] = 0.2     — base flex coupling
+//   [1] = 1.05    — toe-extension gain
+//   [2] = -0.5    — counter coupling
+//   [3] = 1.0     — scale
+//   [4] = 0.1     — small offset
+//   [5] = 0.0872  — sin(5°): threshold for «toe lifted off» state
+inline constexpr std::array<double, 6> kCToes = { 0.2, 1.05, -0.5, 1.0, 0.1, 0.0872 };
+
+// Lump-state Gauss-Markov A matrices: chosen per phase (contact vs flight).
+// A_sub  — sub-state, no decay (free to move);
+// A_jump1— fast-decay branch used at impact / heel-strike;
+// A_jump2— slow-decay branch used during stance.
+inline constexpr std::array<double, 3> kALumpA_sub   = { 1.000, 1.000, 1.000  };
+inline constexpr std::array<double, 3> kALumpA_jump1 = { 0.900, 0.900, 0.900  };
+inline constexpr std::array<double, 3> kALumpA_jump2 = { 0.995, 0.995, 0.9995 };
+
+// Joint laxity & hyper-extension limits applied as soft constraints.
+inline constexpr double kJointLaxityRad     = 0.005;  // soft «play» per joint, radians
+inline constexpr double kHyperExtensionMax  = 0.0;    // hyper-extension forbidden
 
 // ---------------------------------------------------------------------------
 //  §37.5 — calibration body dimensions and their measurement sd (metres).
