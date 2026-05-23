@@ -554,12 +554,16 @@ public:
         // Update peak-detection window for impact detection (§49.5).
         double peakWindowAccMax = 0.0;
         double peakWindowAccMin = 1e9;
+        int    peakWindowSeg    = -1;
         for (int seg : { fb::kFootContacts[0].seg, fb::kFootContacts[4].seg }) {
             if (seg < 0 || seg >= fb::kSegmentCount) continue;
             const double an = std::sqrt(double((*in.accLPBody)[seg].x()*(*in.accLPBody)[seg].x()) +
                                         double((*in.accLPBody)[seg].y()*(*in.accLPBody)[seg].y()) +
                                         double((*in.accLPBody)[seg].z()*(*in.accLPBody)[seg].z()));
-            peakWindowAccMax = std::max(peakWindowAccMax, an);
+            if (an > peakWindowAccMax) {
+                peakWindowAccMax = an;
+                peakWindowSeg    = seg;
+            }
             peakWindowAccMin = std::min(peakWindowAccMin, an);
         }
         m_accPeakWindow.push_back(peakWindowAccMax);
@@ -572,6 +576,7 @@ public:
                                                     m_accPeakWindow.end());
             if ((winMax - winMin) > fb::kContact.impactTh) {
                 out.impactDetected = true;
+                out.impactSeg      = peakWindowSeg;
             }
         }
 
@@ -659,10 +664,31 @@ public:
                                  fb::kAir[8] * std::min(1.0, pelvisSpeed / 2.0);
             // Feature: general bias (§229).
             const double f_general = fb::kGeneralProb[0];
+            // Spec §1102.7 — joint acc+vel boost gives a positive lift to
+            // candidates that look stationary on BOTH acceleration AND
+            // velocity (the two features are not independent — a heel
+            // strike spikes acc but velocity stays low because the foot
+            // has just touched down).  kBoost = [2, 4] from §44.10:
+            // boost = 2·f_acc + 4·f_vel.
+            const double f_boost = 2.0 * f_acc + 4.0 * f_vel;
+            // Spec §1102.8 — small positive bias on every candidate so that
+            // a candidate with zero contributory features still has a
+            // floor probability close to th1 = 0.05.  kPos[0] = 0.12.
+            const double f_pos = 0.12;
+            // Spec §1102.9 — peak-detection boost.  When the rolling
+            // acceleration window registers a peak (impactDetected is set
+            // earlier in the frame) and this candidate is on the same
+            // foot segment as the impact, lift its score by the spec
+            // peakDetection[0] = 3.6515 — captures a heel strike that
+            // happened in the last 10-frame window.
+            const double f_peak = (out.impactDetected && (seg == out.impactSeg))
+                                ? fb::kPeakDetection[0]
+                                : 0.0;
 
-            // Aggregate.  f_air is large (negative) baseline; the other terms
-            // pull up.  Apply sigmoid for [0, 1] probability.
-            const double score = f_air + f_acc + f_vel + f_com + f_general;
+            // Aggregate.  f_air is large (negative) baseline; the other
+            // terms pull up.  Apply sigmoid for [0, 1] probability.
+            const double score = f_air + f_acc + f_vel + f_com + f_general
+                               + f_boost + f_pos + f_peak;
             const double P = sigmoid(score);
 
             cands[nCand].seg          = seg;
