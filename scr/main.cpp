@@ -340,6 +340,8 @@ public:
         for (auto& x : m_x)   x = QVector3D(0, 0, 0);
         for (auto& p : m_var) p = (fb::kSkin.sigmaOriDeg * kD2R) *
                                    (fb::kSkin.sigmaOriDeg * kD2R);
+        for (auto& x : m_xPos)   x = QVector3D(0, 0, 0);
+        for (auto& p : m_varPos) p = fb::kSkin.sigmaPosM * fb::kSkin.sigmaPosM;
         m_inited = true;
     }
 
@@ -377,6 +379,72 @@ public:
     double tauLast(int seg) const {
         if (seg < 0 || seg >= fb::kSegmentCount) return fb::kSkin.tauSec;
         return m_tauLast[seg] > 0.0 ? m_tauLast[seg] : fb::kSkin.tauSec;
+    }
+
+    // §50.5 — Position skin-artifact GM (parallel to the orientation
+    // artifact above).  Tracks the sensor's mounting-point drift on the
+    // skin/muscle relative to the underlying bone (≤ 0.02 m 1-σ on the
+    // base tau = 0.15 s).  The state is maintained per-segment but NOT
+    // YET applied to FK (Phase B will plumb it through SkeletonXsens
+    // and the ZUPT lever-arm calculation in a follow-up commit) — for
+    // now the predict / update / drift accessors give the rest of the
+    // code a stable handle, and the diag dump surfaces the per-sensor
+    // max drift so the operator can see when soft tissue is moving.
+    void predictPos(int seg, double dt, double linAccMag = 0.0) {
+        if (seg < 0 || seg >= fb::kSegmentCount) return;
+        if (!m_inited) reset();
+        double tauEff = fb::kSkin.tauSec;
+        if (fb::kSkin.doSkinArtifactBasedOnDynamics && linAccMag > 0.0) {
+            // Re-use the orientation-side mapping with linear accel as
+            // the "motion" scalar; ref normalisation tauMotionRefRad is
+            // dimensionally an angular rate but the same exponential
+            // shape applies (1 g ≈ 10 m/s² → blend ≈ 1, full τ_fast).
+            const double ref = std::max(1e-6, 10.0);
+            const double blend = 1.0 - std::exp(-linAccMag / ref);
+            tauEff = fb::kSkin.tauSlowSec
+                   + blend * (fb::kSkin.tauFastSec - fb::kSkin.tauSlowSec);
+        }
+        const double a = std::exp(-dt / std::max(1e-6, tauEff));
+        m_xPos[seg] = m_xPos[seg] * float(a);
+        const double sigmaPos  = fb::kSkin.sigmaPosM;       // 0.02 m
+        const double sigmaEta2 = sigmaPos * sigmaPos * (1.0 - a * a);
+        m_varPos[seg] = a * a * m_varPos[seg] + sigmaEta2;
+    }
+
+    void updatePos(int seg, const QVector3D& rMeas, double R_pos) {
+        if (seg < 0 || seg >= fb::kSegmentCount) return;
+        if (!m_inited) reset();
+        const double R = R_pos + 1e-12;
+        const double K = m_varPos[seg] / (m_varPos[seg] + R);
+        m_xPos[seg] = m_xPos[seg] + float(K) * rMeas;
+        m_varPos[seg] = (1.0 - K) * m_varPos[seg];
+        // Cap at 3σ — anything bigger is a real bone displacement, not
+        // soft-tissue play.
+        const double maxNorm = 3.0 * fb::kSkin.sigmaPosM;
+        const double n = std::sqrt(
+            double(m_xPos[seg].x()) * double(m_xPos[seg].x()) +
+            double(m_xPos[seg].y()) * double(m_xPos[seg].y()) +
+            double(m_xPos[seg].z()) * double(m_xPos[seg].z()));
+        if (n > maxNorm) m_xPos[seg] = m_xPos[seg] * float(maxNorm / n);
+    }
+
+    QVector3D driftPos(int seg) const {
+        if (seg < 0 || seg >= fb::kSegmentCount) return QVector3D(0, 0, 0);
+        return m_inited ? m_xPos[seg] : QVector3D(0, 0, 0);
+    }
+
+    // Apply the position drift to a sensor-mounting-point coordinate.
+    // Phase A — defined for future Phase B FK plumbing, currently
+    // unused at runtime.  Returns r_local + R(q) · x_skin_pos in the
+    // segment world frame (so SkeletonXsens can fold it into bone
+    // origins before computing the kp[] keypoints).
+    QVector3D applyPosTo(int seg, const QVector3D& r_local,
+                         const Quat& q_seg_world) const {
+        if (seg < 0 || seg >= fb::kSegmentCount) return r_local;
+        if (!m_inited) return r_local;
+        const QVector3D drift = m_xPos[seg];
+        if (drift.length() < 1e-6) return r_local;
+        return r_local + vec_rotate(drift, q_seg_world);
     }
 
     // Update step: feed an orientation-residual measurement r (radians, 3D
@@ -427,6 +495,9 @@ private:
     std::array<QVector3D, fb::kSegmentCount> m_x{};      // drift vector (rad)
     std::array<double,    fb::kSegmentCount> m_var{};    // variance (rad²)
     std::array<double,    fb::kSegmentCount> m_tauLast{};// last τ used per seg
+    // §50.5 — position skin-artifact GM state (m, segment world frame).
+    std::array<QVector3D, fb::kSegmentCount> m_xPos{};
+    std::array<double,    fb::kSegmentCount> m_varPos{};
 };
 
 // ----------------------------------------------------------------------------
@@ -1321,6 +1392,8 @@ public:
             // §38.5 — feed per-segment angular-rate magnitude into the GM
             // predict step so τ shortens on dynamic frames (faster artifact
             // relaxation) and lengthens on stationary ones (slower drift).
+            // §50.5 — also advance the parallel position skin-artifact
+            // state, driven by linear acceleration magnitude.
             for (int i = 0; i < fb::kSegmentCount; ++i) {
                 if (!(*ctx.sensorPresent)[i]) continue;
                 const double omegaNorm = m_havePrev
@@ -1329,6 +1402,14 @@ public:
                                 double(omega[i].z()) * double(omega[i].z()))
                     : 0.0;
                 m_skin.predict(i, dt, omegaNorm);
+                double accMag = 0.0;
+                if (ctx.accLPBody) {
+                    const QVector3D& a = (*ctx.accLPBody)[i];
+                    accMag = std::sqrt(double(a.x()) * double(a.x()) +
+                                       double(a.y()) * double(a.y()) +
+                                       double(a.z()) * double(a.z()));
+                }
+                m_skin.predictPos(i, dt, accMag);
             }
         }
 
@@ -1533,6 +1614,28 @@ void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
                    << std::setprecision(4);
             }
         }
+        ss << "\n";
+
+        // §50.5 — position skin-artifact magnitudes (mm).  Phase A: the
+        // state is maintained but not yet plumbed into FK; this dump
+        // makes the per-sensor drift visible so the operator can verify
+        // the GM saturates near the 20 mm 1-σ ceiling without crashing
+        // the model.  Phase B will fold driftPos into bone origins.
+        ss << "[skin-pos]";
+        bool any = false;
+        for (int i = 0; i < fb::kSegmentCount; ++i) {
+            if (!fb::kSensorPresent[i]) continue;
+            const QVector3D x = skin.driftPos(i);
+            const double mag = std::sqrt(double(x.x()*x.x()) +
+                                         double(x.y()*x.y()) +
+                                         double(x.z()*x.z())) * 1000.0;
+            if (mag > 0.5) {     // > 0.5 mm
+                ss << " seg" << i << "=" << std::setprecision(1) << mag
+                   << "mm" << std::setprecision(4);
+                any = true;
+            }
+        }
+        if (!any) ss << " (all <0.5 mm)";
         ss << "\n";
     }
 
