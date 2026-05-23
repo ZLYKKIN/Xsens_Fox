@@ -60,6 +60,11 @@
 #define KFA_GYR_BIAS_MIN_DEG     0.005f        // §43.8 floor
 #define KFA_GYR_BIAS_MAX_DEG     0.07f         // §43.8 ceiling
 #define KFA_MAG_RES_THRESH       0.03f         // §43.8 magResThresholdGyrBiasDeg
+#define KFA_MAG_RES_TIME_UP_S    0.6f          // §51.5 magResTimeUp — gate up-hysteresis
+#define KFA_MAG_RES_TIME_DOWN_S  3.0f          // §51.5 magResTimeDown — gate down-hysteresis (reserved)
+#define KFA_REDEF_CLOSED_THR_S   5.0f          // §1064 — gate must be closed ≥ 5 s before snap eligibility
+#define KFA_REDEF_RAMP_S         2.0f          // §1064 — boost decays over 2 s
+#define KFA_REDEF_SIGMA_DOWNSCALE 0.10f        // §1064 — sigmaMag × 0.10 → ~100× weight at peak
 
 // §43.7 — accDivMon (body uses HighBoost = 3 per §43.14 gloveHuman)
 #define KFA_LPA_TAU_S            10.0f
@@ -305,6 +310,9 @@ const FusionAhrsSettings fusionAhrsDefaultSettings = {
     .magDipModelDeg         = 78.0f,       // §51.6 e_dip_mag for body
     .magDeclinationDeg      = 0.0f,
     .magNormReferenceLocal  = 0.0f,        // 0 → use body baseline (1.0)
+    .magDipGateRelax        = 0.0f,        // 0 → use strict KFA_MAG_DIP_GATE_DEG
+    .magAngGateRelax        = 0.0f,        // 0 → use strict KFA_MAG_ANG_GATE_DEG
+    .magNormGateRelax       = 0.0f,        // 0 → use strict KFA_MAG_NORM_GATE
 };
 
 // ============================================================================
@@ -348,6 +356,10 @@ void FusionAhrsRestart(FusionAhrs *ahrs) {
     ahrs->dAccHighTime = 0.0f;
     ahrs->sBg = DegToRad(KFA_GYR_BIAS_MIN_DEG);
     ahrs->tauM0 = KFA_TAU_M0_MED_S;
+    ahrs->magClearStreakSec = 0.0f;
+    ahrs->magClosedStreakSec = 0.0f;
+    ahrs->magRedefBoostTimer = 0.0f;
+    ahrs->magWasClosed = false;
     ahrs->stillnessTime = 0.0f;
     ahrs->zruSampleCount = 0;
     ahrs->zruFrameCounter = 0;
@@ -600,6 +612,19 @@ static bool MagGate(FusionAhrs *ahrs, FusionVector m) {
     const float mNorm = sqrtf(m.axis.x * m.axis.x + m.axis.y * m.axis.y + m.axis.z * m.axis.z);
     if (mNorm < 1e-6f) return false;
 
+    // Per-segment relaxation multipliers (spec §51.6 + §43.10).  When
+    // caller leaves them at 0 the strict body baselines apply unchanged;
+    // setting them ≥ 1 widens the gate for sensors that read a distorted
+    // field (hands / head / feet).  Multipliers apply only to the gate
+    // tolerance, not the model itself — the dip / declination expectations
+    // (78°, 0°) stay where they are.
+    const float dipRelax  = (ahrs->settings.magDipGateRelax  > 0.0f)
+                                ? ahrs->settings.magDipGateRelax  : 1.0f;
+    const float angRelax  = (ahrs->settings.magAngGateRelax  > 0.0f)
+                                ? ahrs->settings.magAngGateRelax  : 1.0f;
+    const float normRelax = (ahrs->settings.magNormGateRelax > 0.0f)
+                                ? ahrs->settings.magNormGateRelax : 1.0f;
+
     // Gate 1 — norm  (§51.3 normDiffFromModelMax = 0.03)
     // Reference norm is segment-specific (§51.6 — pelvis 1.0, head 1.3,
     // hands 1.35, feet 1.22).  Falls back to the body baseline (1.0) when
@@ -608,7 +633,7 @@ static bool MagGate(FusionAhrs *ahrs, FusionVector m) {
                               ? ahrs->settings.magNormReferenceLocal
                               : KFA_MAG_NORM_REF;
     const float normErr = fabsf(mNorm - refNorm) / refNorm;
-    if (normErr > KFA_MAG_NORM_GATE) return false;
+    if (normErr > KFA_MAG_NORM_GATE * normRelax) return false;
 
     // Gate 2 — dip.  Use the specific-force gravity convention (+Z up in
     // NWU): sensor-frame "up" = R⁻¹·(0,0,+1).  Dip = arcsin(-m̂·ĝ_up)
@@ -618,7 +643,8 @@ static bool MagGate(FusionAhrs *ahrs, FusionVector m) {
                              gUp.axis.y * m.axis.y +
                              gUp.axis.z * m.axis.z) / mNorm;       // m̂ · ĝ_up
     const float dipMeasDeg = RadToDeg(asinf(fmaxf(-1.0f, fminf(1.0f, -gDotMUnit))));
-    if (fabsf(dipMeasDeg - ahrs->settings.magDipModelDeg) > KFA_MAG_DIP_GATE_DEG) return false;
+    if (fabsf(dipMeasDeg - ahrs->settings.magDipModelDeg)
+            > KFA_MAG_DIP_GATE_DEG * dipRelax) return false;
 
     // Gate 3 — declination angle on the horizontal plane.
     // m_perp = m − (m·ĝ_up) · ĝ_up  (§43.14 doProjectMagOnHoriPlane=B1).
@@ -631,19 +657,51 @@ static bool MagGate(FusionAhrs *ahrs, FusionVector m) {
     const FusionVector mWorld = RotByQ(ahrs->q, mHoriz);
     // NWU: X = North → declination measured east-of-north as atan2(-Y, X)
     const float angDeg = RadToDeg(atan2f(-mWorld.axis.y, mWorld.axis.x));
-    if (fabsf(angDeg - ahrs->settings.magDeclinationDeg) > KFA_MAG_ANG_GATE_DEG) return false;
+    if (fabsf(angDeg - ahrs->settings.magDeclinationDeg)
+            > KFA_MAG_ANG_GATE_DEG * angRelax) return false;
     return true;
 }
 
 static void ApplyMagUpdate(FusionAhrs *ahrs, FusionVector m, float dt) {
+    // §1064 — track sustained gate closure for the snap trigger below.
     if (m.axis.x == 0.0f && m.axis.y == 0.0f && m.axis.z == 0.0f) {
         ahrs->magGateOpen = false;
+        ahrs->magClearStreakSec = 0.0f;
+        ahrs->magClosedStreakSec += dt;
+        ahrs->magWasClosed = true;
         return;
     }
     if (!MagGate(ahrs, m)) {
         ahrs->magGateOpen = false;
+        ahrs->magClearStreakSec = 0.0f;
+        ahrs->magClosedStreakSec += dt;
+        ahrs->magWasClosed = true;
         return;
     }
+    // §51.5 up-hysteresis — the per-frame gate just passed, but we require
+    // a continuous streak of clean passes longer than KFA_MAG_RES_TIME_UP_S
+    // = 0.6 s before re-enabling the update (suppresses momentary glitches
+    // that happen to drift past the 3-condition check by chance).  Once the
+    // streak crosses the threshold the gate stays open until the next
+    // hard failure resets the streak to zero.
+    ahrs->magClearStreakSec += dt;
+    if (ahrs->magClearStreakSec < KFA_MAG_RES_TIME_UP_S) {
+        ahrs->magGateOpen = false;
+        // Don't reset magClosedStreakSec yet — only when the gate truly
+        // opens do we count the closure as "ended".
+        return;
+    }
+    // Gate is fully open this frame.  §1064: if it had been closed for ≥
+    // 5 s before this re-open, arm the heading-redef boost timer so the
+    // next 2 s of mag updates use a smaller sigmaMag (≈ ×0.10 → ~100×
+    // Kalman weight on heading).  Snaps the heading to the newly trusted
+    // field instead of crawling there over m0_avg's τ.
+    if (ahrs->magWasClosed &&
+        ahrs->magClosedStreakSec >= KFA_REDEF_CLOSED_THR_S) {
+        ahrs->magRedefBoostTimer = KFA_REDEF_RAMP_S;
+    }
+    ahrs->magClosedStreakSec = 0.0f;
+    ahrs->magWasClosed = false;
     ahrs->magGateOpen = true;
 
     // Innovation: r = m - h_mag,  h_mag = q⁻¹ · m0 · q
@@ -669,7 +727,21 @@ static void ApplyMagUpdate(FusionAhrs *ahrs, FusionVector m, float dt) {
     H[1 * N15 + 9 + 0] = ex.axis.y;  H[1 * N15 + 9 + 1] = ey.axis.y;  H[1 * N15 + 9 + 2] = ez.axis.y;
     H[2 * N15 + 9 + 0] = ex.axis.z;  H[2 * N15 + 9 + 1] = ey.axis.z;  H[2 * N15 + 9 + 2] = ez.axis.z;
 
-    const float Rs = ahrs->sigmaMag * ahrs->sigmaMag;
+    // §1064 — heading redefinition boost.  When magRedefBoostTimer > 0
+    // (gate just re-opened after a long closure), scale sigmaMag down so
+    // R is tiny and the Kalman gain pulls heading hard.  Linear ramp-down
+    // back to nominal over KFA_REDEF_RAMP_S = 2 s.
+    float sigmaMagEff = ahrs->sigmaMag;
+    if (ahrs->magRedefBoostTimer > 0.0f) {
+        const float frac = ahrs->magRedefBoostTimer / KFA_REDEF_RAMP_S;
+        // boost = downscale at frac=1, 1.0 at frac=0
+        const float boostMul = KFA_REDEF_SIGMA_DOWNSCALE
+                             + (1.0f - KFA_REDEF_SIGMA_DOWNSCALE) * (1.0f - frac);
+        sigmaMagEff = ahrs->sigmaMag * boostMul;
+        ahrs->magRedefBoostTimer -= dt;
+        if (ahrs->magRedefBoostTimer < 0.0f) ahrs->magRedefBoostTimer = 0.0f;
+    }
+    const float Rs = sigmaMagEff * sigmaMagEff;
     const float Rdiag[3] = { Rs, Rs, Rs };
 
     float HP[3 * N15];

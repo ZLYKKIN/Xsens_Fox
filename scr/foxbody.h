@@ -766,8 +766,16 @@ inline constexpr ContactParams kContact = {
 // ---------------------------------------------------------------------------
 struct MagnetParams {
     double declinationDeg;             // D, set by deployment site (0 by default)
-    double inclinationDeg;             // I (spec §37.5 default: 78°)
-    double inclinationDeg2;            // secondary I (spec §37.5: 85°)
+    double inclinationDeg;             // I body-override (spec §37.5: e_dip_mag = 78°)
+    double inclinationDeg2;            // secondary I (spec §37.5: e_dip_mag2 = 85°)
+    // §51.1 reference dip of the FREE-FIELD model (m0DefDipAngleRad).  Signed
+    // in spec convention (negative = field points down in NWU+Z-up).  Stored
+    // alongside the +78° body override so a reader can see both side by side.
+    // Note: the FusionAhrs library expects the positive-magnitude form for its
+    // gate (FusionAhrs.c:316 takes cos(dip) and uses -sin(dip)·1 for m0.z), so
+    // we keep `inclinationDeg = +78` as the value piped in; `inclinationDipRad`
+    // is documentation + reference for the Python parity test.
+    double inclinationDipRad;          // −1.1750679 (= −67.328°, free-field)
     double normReference;              // |m0| (1.0 after normalisation)
     double angleDiffFromModelMaxDeg;   // 6.0°
     double dipDiffFromModelMaxDeg;     // 3.5°
@@ -780,6 +788,7 @@ inline constexpr MagnetParams kMagnet = {
     .declinationDeg            = 0.0,
     .inclinationDeg            = 78.0,
     .inclinationDeg2           = 85.0,
+    .inclinationDipRad         = -1.1750679,
     .normReference             = 1.0,
     .angleDiffFromModelMaxDeg  = 6.0,
     .dipDiffFromModelMaxDeg    = 3.5,
@@ -789,6 +798,127 @@ inline constexpr MagnetParams kMagnet = {
     .magResTimeDownSec         = 3.0,
 };
 
+// §51.1 — reference magnetic-field vector m0 in the world frame, NWU with
+// Z = up.  The textbook formula
+//     m0 = (cos(D)·cos(I), -sin(D)·cos(I), sin(I))
+// uses the signed dip I (negative in the Northern hemisphere where the field
+// points down).  Our FusionAhrs library, in contrast, expects the
+// positive-magnitude form because its internal RebuildM0() writes
+//     m0.z = -sin(|dip|)
+// to obtain the same downward-pointing component.  Both conventions agree on
+// the vector direction; this helper returns whichever the caller asks for.
+//
+// `dipDeg` is the dip ANGLE (signed; positive when the field points UP in
+// NWU, negative when it points DOWN — i.e. spec convention, opposite of the
+// inclination MAGNITUDE the body override stores).
+inline QVector3D referenceM0Vec(double dipDeg, double declinationDeg) {
+    // Inline π/180 — the `constants` namespace is declared later in the
+    // file and would otherwise create a forward-reference hazard.
+    constexpr double kD2R = 0.017453292519943295;
+    const double dipR = dipDeg * kD2R;
+    const double decR = declinationDeg * kD2R;
+    const double cI = std::cos(dipR);
+    const double sI = std::sin(dipR);
+    return QVector3D(float(cI * std::cos(decR)),
+                     float(-cI * std::sin(decR)),
+                     float(sI));
+}
+
+// Convenience: the body-override m0 vector that FusionAhrs actually uses
+// internally (positive 78° dip → m0.z = -sin(78°) = -0.978).
+inline QVector3D referenceM0BodyVec() {
+    return referenceM0Vec(-kMagnet.inclinationDeg, kMagnet.declinationDeg);
+}
+
+// Convenience: the free-field m0 vector matching the spec literal
+// inclinationDipRad = −1.175 (m0.z = sin(−1.175) = −0.923).
+inline QVector3D referenceM0FreeFieldVec() {
+    constexpr double kR2D = 57.29577951308232;
+    return referenceM0Vec(kMagnet.inclinationDipRad * kR2D,
+                          kMagnet.declinationDeg);
+}
+
+// ---------------------------------------------------------------------------
+//  §51.6 / §43.10 — per-segment magnetic-gate relaxation table.
+//
+//  The base gate thresholds (kMagnet.angleDiffFromModelMaxDeg = 6°,
+//  dipDiffFromModelMaxDeg = 3.5°, normDiffFromModelMax = 0.03) target a
+//  body-mounted sensor far from external metal.  In practice the head,
+//  hands, feet and (to a lesser extent) the chest read a noticeably
+//  different field because of skull plates / glove electronics / shoe
+//  steel / sternum-mounted electronics — so the strict body threshold
+//  closes their magnetic gate almost permanently and their heading drifts
+//  off the sole inertial input.  This table relaxes the per-segment gate
+//  in proportion to the spec's FOX_Calib.e_* expectations.
+//
+//  Multipliers ≥ 1.  Caller multiplies them into the base thresholds.
+//  Default for non-distorted segments (Pelvis, legs, shoulders) = 1.0.
+// ---------------------------------------------------------------------------
+struct MagGateRelax {
+    float angleMul;     // multiplier on angleDiffFromModelMaxDeg (base 6°)
+    float dipMul;       // multiplier on dipDiffFromModelMaxDeg   (base 3.5°)
+    float normMul;      // multiplier on normDiffFromModelMax      (base 0.03)
+};
+
+inline constexpr std::array<MagGateRelax, kSegmentCount> kMagGateRelax = {{
+    /* 0  Pelvis    */ { 1.5f, 1.3f, 1.0f + 0.20f }, // e_norm_pelvis=0.20
+    /* 1  L5        */ { 1.0f, 1.0f, 1.0f },         // interpolated
+    /* 2  L3        */ { 1.0f, 1.0f, 1.0f },
+    /* 3  T12       */ { 1.0f, 1.0f, 1.0f },
+    /* 4  T8        */ { 1.5f, 1.3f, 1.0f },         // e_inclx_sternum / spine
+    /* 5  Neck      */ { 1.0f, 1.0f, 1.0f },
+    /* 6  Head      */ { 4.0f, 2.5f, 1.0f + 0.30f }, // e_norm_head=0.30
+    /* 7  RShoulder */ { 1.0f, 1.0f, 1.0f },         // close to torso
+    /* 8  RUpperArm */ { 5.0f, 5.0f, 1.0f },         // e_incl_arm=30° → ×5
+    /* 9  RForearm  */ { 5.0f, 5.0f, 1.0f },
+    /* 10 RHand     */ { 5.0f, 5.0f, 1.0f + 0.35f }, // e_norm_hands=0.35
+    /* 11 LShoulder */ { 1.0f, 1.0f, 1.0f },
+    /* 12 LUpperArm */ { 5.0f, 5.0f, 1.0f },
+    /* 13 LForearm  */ { 5.0f, 5.0f, 1.0f },
+    /* 14 LHand     */ { 5.0f, 5.0f, 1.0f + 0.35f },
+    /* 15 RUpperLeg */ { 1.0f, 1.0f, 1.0f },         // legs run cleaner
+    /* 16 RLowerLeg */ { 1.5f, 1.5f, 1.0f },         // some shin metal
+    /* 17 RFoot     */ { 2.0f, 2.0f, 1.0f + 0.22f }, // 0.1·e_mag_feet=0.22
+    /* 18 RToe      */ { 1.0f, 1.0f, 1.0f },         // interpolated
+    /* 19 LUpperLeg */ { 1.0f, 1.0f, 1.0f },
+    /* 20 LLowerLeg */ { 1.5f, 1.5f, 1.0f },
+    /* 21 LFoot     */ { 2.0f, 2.0f, 1.0f + 0.22f },
+    /* 22 LToe      */ { 1.0f, 1.0f, 1.0f },
+}};
+
+// ---------------------------------------------------------------------------
+//  §43.10 — per-segment IMU chip type.  The FOX_IMU_x3 chip (newest revision)
+//  has 60× higher magnetometer noise density (ndCoefficient = 0.25 vs 0.004
+//  for w2/x2).  Sensors using x3 need a substantially wider magnetic gate
+//  or they essentially never open it.  Default = ImuW2 for compatibility
+//  with existing deployments; override per segment in the table below as
+//  hardware information becomes available.
+// ---------------------------------------------------------------------------
+enum class ImuChipType : std::uint8_t { W2, X2, X3 };
+
+inline constexpr std::array<ImuChipType, kSegmentCount> kImuChipPerSeg = {{
+    /*  0..22 */
+    ImuChipType::W2, ImuChipType::W2, ImuChipType::W2, ImuChipType::W2,
+    ImuChipType::W2, ImuChipType::W2, ImuChipType::W2, ImuChipType::W2,
+    ImuChipType::W2, ImuChipType::W2, ImuChipType::W2, ImuChipType::W2,
+    ImuChipType::W2, ImuChipType::W2, ImuChipType::W2, ImuChipType::W2,
+    ImuChipType::W2, ImuChipType::W2, ImuChipType::W2, ImuChipType::W2,
+    ImuChipType::W2, ImuChipType::W2, ImuChipType::W2,
+}};
+
+// Magnetic noise ratio for the chip's measurement model.  ndCoefficient
+// scales the std-dev linearly; the gate threshold scales by the square
+// root because we compare a dip angle against a noise standard deviation.
+//   x3 / w2 = sqrt(0.25 / 0.004) ≈ 7.91
+inline float magNoiseScaleForChip(ImuChipType c) {
+    switch (c) {
+        case ImuChipType::X3: return 7.91f;
+        case ImuChipType::W2:
+        case ImuChipType::X2:
+        default: return 1.0f;
+    }
+}
+
 // ---------------------------------------------------------------------------
 //  §38.5 — skin artifact (Gauss-Markov soft-tissue model).  This is the
 //  «viscosity» of the IMU relative to the underlying bone.
@@ -796,7 +926,7 @@ inline constexpr MagnetParams kMagnet = {
 //  These numbers are spec defaults; subject calibration can shrink them.
 // ---------------------------------------------------------------------------
 struct SkinParams {
-    double tauSec;             // 0.15 s — relaxation time constant
+    double tauSec;             // 0.15 s — base relaxation time constant
     double sigmaOriDeg;        // 3.0°   — orientation artifact 1-σ
     double sigmaPosM;          // 0.02 m — position artifact 1-σ
     double sigmaOriGmDeg;      // 2.5°   — GM-equivalent ori σ
@@ -809,6 +939,15 @@ struct SkinParams {
     bool   doGaussMarkov;
     bool   doChangeTauInCF;
     bool   doSkinArtifactBasedOnDynamics;
+    // §38.5 doSkinArtifactBasedOnDynamics — adaptive τ.  Spec implies the
+    // GM time constant shortens with high body dynamics (τ → 0.05 s on
+    // peak motion, the artifact has to track and relax fast) and lengthens
+    // when the segment is still (τ → 0.30 s, slow drift dominated by
+    // gravity loading).  We interpolate between the two on per-sensor
+    // motion energy ω in rad/s, normalised by tauMotionRefRad.
+    double tauFastSec;         // 0.05  s — τ at peak motion energy
+    double tauSlowSec;         // 0.30  s — τ at full rest
+    double tauMotionRefRad;    // 1.0 rad/s — soft-clip for ω normalisation
 };
 inline constexpr SkinParams kSkin = {
     .tauSec                       = 0.15,
@@ -824,6 +963,9 @@ inline constexpr SkinParams kSkin = {
     .doGaussMarkov                = true,
     .doChangeTauInCF              = false,
     .doSkinArtifactBasedOnDynamics= true,
+    .tauFastSec                   = 0.05,
+    .tauSlowSec                   = 0.30,
+    .tauMotionRefRad              = 1.0,
 };
 
 // ---------------------------------------------------------------------------
@@ -870,6 +1012,28 @@ inline constexpr EstimatorWeights kEstimator = {
     .gyrBiasStdMinDeg  = 0.005,
     .gyrBiasStdMaxDeg  = 0.07,
     .multiLevelZhcClipVert = 0.005,
+};
+
+// ---------------------------------------------------------------------------
+//  §41.3 / §44.6 / §138.31-32 — aiding-bias Gauss-Markov.
+//
+//  Each ZUPT / aiding hint carries a slowly-evolving residual bias b that
+//  tracks the persistent offset between the predicted contact velocity and
+//  the measured one.  Spec model:
+//      b(k+1) = b(k) · exp(−dt / c_t),   c_t = 0.9 s   (predict step)
+//      b      += c_v · r_v_post,          c_v = 0.01    (after WLS update)
+//  Without this bias the ZUPT row weight oscillates frame-to-frame when the
+//  contact probability hovers around 0.5 (heel-off / toe-on transitions),
+//  visibly jittering the foot anchor.  With the bias absorbed into the
+//  residual, the anchor stays put across the noisy threshold crossing.
+// ---------------------------------------------------------------------------
+struct AidingBiasParams {
+    double cT;        // 0.9 s — bias time constant (larger = more smoothing)
+    double cV;        // 0.01  — fraction of post-residual absorbed each frame
+};
+inline constexpr AidingBiasParams kAidingBias = {
+    .cT = 0.9,
+    .cV = 0.01,
 };
 
 // §44.2 — per-lump per-axis acceleration→velocity integration noise (m/s²),
@@ -1180,6 +1344,16 @@ namespace constants {
     inline constexpr double kSolverC2  = 40680634.23;
     inline constexpr double kSolverAlpha = 0.25;               // damped-step factor §31.2
     inline constexpr double kSolverLambda = 0.01;              // LM damping
+
+    // Spec §41.1 — fox_definitions.xsb FOX_FE.gravity = 9.812687 m/s² (vector
+    // (0, 0, -9.812687) with Z = up).  This is the gravity magnitude the
+    // pose-engine EKF/MNK uses internally; the ISO standard 9.80665 m/s² is
+    // still used at the sensor-IMU layer (calibrated-IMU → G unit conversion)
+    // because raw-IMU output is denominated in standard g.
+    inline constexpr double kGravityMs2 = 9.812687;
+    // Spec §41.1 — FOX_FE.SampleRate = 240 Hz → dt = 1/240 ≈ 4.17 ms.
+    inline constexpr double kSampleRateHz = 240.0;
+    inline constexpr double kSampleDtSec  = 1.0 / kSampleRateHz;
 }
 
 // ---------------------------------------------------------------------------

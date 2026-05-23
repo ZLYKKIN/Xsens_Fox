@@ -340,18 +340,111 @@ public:
         for (auto& x : m_x)   x = QVector3D(0, 0, 0);
         for (auto& p : m_var) p = (fb::kSkin.sigmaOriDeg * kD2R) *
                                    (fb::kSkin.sigmaOriDeg * kD2R);
+        for (auto& x : m_xPos)   x = QVector3D(0, 0, 0);
+        for (auto& p : m_varPos) p = fb::kSkin.sigmaPosM * fb::kSkin.sigmaPosM;
         m_inited = true;
     }
 
     // Predict step: x ← a·x, P ← a²·P + σ_eta².  Called every IMU frame.
-    void predict(int seg, double dt) {
+    //
+    // `omegaRad` is the segment's angular-rate magnitude in rad/s.  When
+    // kSkin.doSkinArtifactBasedOnDynamics is on (spec §38.5) we shorten τ
+    // on dynamic frames so the GM model relaxes towards the new sensor
+    // attitude faster.  Mapping: τ_eff = τ_slow → τ_fast as
+    //     blend = 1 − exp(−ω / tauMotionRefRad)
+    // i.e. ω = 0 → τ_eff = τ_slow (0.30 s, slow drift);
+    //      ω = 1 rad/s → blend ≈ 0.63 → τ_eff ≈ 0.14 s (≈ base 0.15 s);
+    //      ω ≥ 3 rad/s → blend ≈ 1 → τ_eff = τ_fast (0.05 s).
+    //
+    // The 0 default keeps existing call sites that don't have ω available
+    // on the canonical 0.15 s τ — same behaviour as before this PR.
+    void predict(int seg, double dt, double omegaRad = 0.0) {
         if (seg < 0 || seg >= fb::kSegmentCount) return;
         if (!m_inited) reset();
-        const double a = std::exp(-dt / fb::kSkin.tauSec);
+        double tauEff = fb::kSkin.tauSec;
+        if (fb::kSkin.doSkinArtifactBasedOnDynamics && omegaRad > 0.0) {
+            const double ref   = std::max(1e-6, fb::kSkin.tauMotionRefRad);
+            const double blend = 1.0 - std::exp(-omegaRad / ref);
+            tauEff = fb::kSkin.tauSlowSec
+                   + blend * (fb::kSkin.tauFastSec - fb::kSkin.tauSlowSec);
+        }
+        m_tauLast[seg] = tauEff;
+        const double a = std::exp(-dt / std::max(1e-6, tauEff));
         m_x[seg]   = m_x[seg] * float(a);
         const double sigmaOriRad = fb::kSkin.sigmaOriDeg * kD2R;
         const double sigmaEta2   = sigmaOriRad * sigmaOriRad * (1.0 - a * a);
         m_var[seg] = a * a * m_var[seg] + sigmaEta2;
+    }
+
+    double tauLast(int seg) const {
+        if (seg < 0 || seg >= fb::kSegmentCount) return fb::kSkin.tauSec;
+        return m_tauLast[seg] > 0.0 ? m_tauLast[seg] : fb::kSkin.tauSec;
+    }
+
+    // §50.5 — Position skin-artifact GM (parallel to the orientation
+    // artifact above).  Tracks the sensor's mounting-point drift on the
+    // skin/muscle relative to the underlying bone (≤ 0.02 m 1-σ on the
+    // base tau = 0.15 s).  The state is maintained per-segment but NOT
+    // YET applied to FK (Phase B will plumb it through SkeletonXsens
+    // and the ZUPT lever-arm calculation in a follow-up commit) — for
+    // now the predict / update / drift accessors give the rest of the
+    // code a stable handle, and the diag dump surfaces the per-sensor
+    // max drift so the operator can see when soft tissue is moving.
+    void predictPos(int seg, double dt, double linAccMag = 0.0) {
+        if (seg < 0 || seg >= fb::kSegmentCount) return;
+        if (!m_inited) reset();
+        double tauEff = fb::kSkin.tauSec;
+        if (fb::kSkin.doSkinArtifactBasedOnDynamics && linAccMag > 0.0) {
+            // Re-use the orientation-side mapping with linear accel as
+            // the "motion" scalar; ref normalisation tauMotionRefRad is
+            // dimensionally an angular rate but the same exponential
+            // shape applies (1 g ≈ 10 m/s² → blend ≈ 1, full τ_fast).
+            const double ref = std::max(1e-6, 10.0);
+            const double blend = 1.0 - std::exp(-linAccMag / ref);
+            tauEff = fb::kSkin.tauSlowSec
+                   + blend * (fb::kSkin.tauFastSec - fb::kSkin.tauSlowSec);
+        }
+        const double a = std::exp(-dt / std::max(1e-6, tauEff));
+        m_xPos[seg] = m_xPos[seg] * float(a);
+        const double sigmaPos  = fb::kSkin.sigmaPosM;       // 0.02 m
+        const double sigmaEta2 = sigmaPos * sigmaPos * (1.0 - a * a);
+        m_varPos[seg] = a * a * m_varPos[seg] + sigmaEta2;
+    }
+
+    void updatePos(int seg, const QVector3D& rMeas, double R_pos) {
+        if (seg < 0 || seg >= fb::kSegmentCount) return;
+        if (!m_inited) reset();
+        const double R = R_pos + 1e-12;
+        const double K = m_varPos[seg] / (m_varPos[seg] + R);
+        m_xPos[seg] = m_xPos[seg] + float(K) * rMeas;
+        m_varPos[seg] = (1.0 - K) * m_varPos[seg];
+        // Cap at 3σ — anything bigger is a real bone displacement, not
+        // soft-tissue play.
+        const double maxNorm = 3.0 * fb::kSkin.sigmaPosM;
+        const double n = std::sqrt(
+            double(m_xPos[seg].x()) * double(m_xPos[seg].x()) +
+            double(m_xPos[seg].y()) * double(m_xPos[seg].y()) +
+            double(m_xPos[seg].z()) * double(m_xPos[seg].z()));
+        if (n > maxNorm) m_xPos[seg] = m_xPos[seg] * float(maxNorm / n);
+    }
+
+    QVector3D driftPos(int seg) const {
+        if (seg < 0 || seg >= fb::kSegmentCount) return QVector3D(0, 0, 0);
+        return m_inited ? m_xPos[seg] : QVector3D(0, 0, 0);
+    }
+
+    // Apply the position drift to a sensor-mounting-point coordinate.
+    // Phase A — defined for future Phase B FK plumbing, currently
+    // unused at runtime.  Returns r_local + R(q) · x_skin_pos in the
+    // segment world frame (so SkeletonXsens can fold it into bone
+    // origins before computing the kp[] keypoints).
+    QVector3D applyPosTo(int seg, const QVector3D& r_local,
+                         const Quat& q_seg_world) const {
+        if (seg < 0 || seg >= fb::kSegmentCount) return r_local;
+        if (!m_inited) return r_local;
+        const QVector3D drift = m_xPos[seg];
+        if (drift.length() < 1e-6) return r_local;
+        return r_local + vec_rotate(drift, q_seg_world);
     }
 
     // Update step: feed an orientation-residual measurement r (radians, 3D
@@ -401,6 +494,10 @@ private:
     bool m_inited = false;
     std::array<QVector3D, fb::kSegmentCount> m_x{};      // drift vector (rad)
     std::array<double,    fb::kSegmentCount> m_var{};    // variance (rad²)
+    std::array<double,    fb::kSegmentCount> m_tauLast{};// last τ used per seg
+    // §50.5 — position skin-artifact GM state (m, segment world frame).
+    std::array<QVector3D, fb::kSegmentCount> m_xPos{};
+    std::array<double,    fb::kSegmentCount> m_varPos{};
 };
 
 // ----------------------------------------------------------------------------
@@ -429,6 +526,7 @@ public:
         const std::array<QVector3D, fb::kSegmentCount>* segVelocity;   // m/s
         const std::array<QVector3D, fb::kSegmentCount>* segOmega;      // rad/s
         const std::array<QVector3D, fb::kSegmentCount>* accLPBody;     // m/s² (sensor frame, after LPA)
+        const SkinArtifactState*                        skinState = nullptr;  // §50.5 Phase B
         double                                          floorLevelZ;
         double                                          dt;
     };
@@ -456,12 +554,16 @@ public:
         // Update peak-detection window for impact detection (§49.5).
         double peakWindowAccMax = 0.0;
         double peakWindowAccMin = 1e9;
+        int    peakWindowSeg    = -1;
         for (int seg : { fb::kFootContacts[0].seg, fb::kFootContacts[4].seg }) {
             if (seg < 0 || seg >= fb::kSegmentCount) continue;
             const double an = std::sqrt(double((*in.accLPBody)[seg].x()*(*in.accLPBody)[seg].x()) +
                                         double((*in.accLPBody)[seg].y()*(*in.accLPBody)[seg].y()) +
                                         double((*in.accLPBody)[seg].z()*(*in.accLPBody)[seg].z()));
-            peakWindowAccMax = std::max(peakWindowAccMax, an);
+            if (an > peakWindowAccMax) {
+                peakWindowAccMax = an;
+                peakWindowSeg    = seg;
+            }
             peakWindowAccMin = std::min(peakWindowAccMin, an);
         }
         m_accPeakWindow.push_back(peakWindowAccMax);
@@ -474,6 +576,7 @@ public:
                                                     m_accPeakWindow.end());
             if ((winMax - winMin) > fb::kContact.impactTh) {
                 out.impactDetected = true;
+                out.impactSeg      = peakWindowSeg;
             }
         }
 
@@ -494,7 +597,15 @@ public:
             if (nCand >= cands.size()) return;
             const Quat& q = (*in.worldOrient)[seg];
             const QVector3D rWorldRot = vec_rotate(r_local, q);
-            const QVector3D p_world   = (*in.segCenter)[seg] + rWorldRot;
+            // §50.5 Phase B — fold the per-sensor position skin drift into
+            // the world-frame contact point.  driftPos is in segment-world
+            // frame (≤ 3 σ = 60 mm cap; in practice 10–20 mm during gait)
+            // and shifts the contact point alongside the soft-tissue
+            // wobble so the ZUPT residual is computed against the true
+            // anchor location, not the bone-rigid estimate.
+            const QVector3D posDrift = in.skinState
+                ? in.skinState->driftPos(seg) : QVector3D(0, 0, 0);
+            const QVector3D p_world   = (*in.segCenter)[seg] + rWorldRot + posDrift;
             // v_world = v_seg + ω × (R·r_local)
             const QVector3D w = (*in.segOmega)[seg];
             const QVector3D wxr(
@@ -539,9 +650,13 @@ public:
             const double f_lowOmega  = (std::abs(double(w.x())) +
                                         std::abs(double(w.y())) +
                                         std::abs(double(w.z())) < 1.0) ? 1.0 : 0.0;
+            // Spec §41.1 gravity (9.812687 m/s²) is the reference the EKF
+            // uses for the "stationary IMU reads -g" hypothesis; the contact
+            // air-score peaks when |a_lp| is near g (point is in free contact
+            // with the floor) and falls off as |a_lp| diverges.
             const double f_air = fb::kAir[0] +
                                  fb::kAir[2] * (1.0 - std::min(1.0,
-                                     std::abs(aNorm - 9.8) / 4.0)) +
+                                     std::abs(aNorm - fb::constants::kGravityMs2) / 4.0)) +
                                  fb::kAir[3] * f_lowFreq +
                                  fb::kAir[4] * f_lowOmega +
                                  fb::kAir[5] * std::abs(double(v_world.z())) +
@@ -549,10 +664,31 @@ public:
                                  fb::kAir[8] * std::min(1.0, pelvisSpeed / 2.0);
             // Feature: general bias (§229).
             const double f_general = fb::kGeneralProb[0];
+            // Spec §1102.7 — joint acc+vel boost gives a positive lift to
+            // candidates that look stationary on BOTH acceleration AND
+            // velocity (the two features are not independent — a heel
+            // strike spikes acc but velocity stays low because the foot
+            // has just touched down).  kBoost = [2, 4] from §44.10:
+            // boost = 2·f_acc + 4·f_vel.
+            const double f_boost = 2.0 * f_acc + 4.0 * f_vel;
+            // Spec §1102.8 — small positive bias on every candidate so that
+            // a candidate with zero contributory features still has a
+            // floor probability close to th1 = 0.05.  kPos[0] = 0.12.
+            const double f_pos = 0.12;
+            // Spec §1102.9 — peak-detection boost.  When the rolling
+            // acceleration window registers a peak (impactDetected is set
+            // earlier in the frame) and this candidate is on the same
+            // foot segment as the impact, lift its score by the spec
+            // peakDetection[0] = 3.6515 — captures a heel strike that
+            // happened in the last 10-frame window.
+            const double f_peak = (out.impactDetected && (seg == out.impactSeg))
+                                ? fb::kPeakDetection[0]
+                                : 0.0;
 
-            // Aggregate.  f_air is large (negative) baseline; the other terms
-            // pull up.  Apply sigmoid for [0, 1] probability.
-            const double score = f_air + f_acc + f_vel + f_com + f_general;
+            // Aggregate.  f_air is large (negative) baseline; the other
+            // terms pull up.  Apply sigmoid for [0, 1] probability.
+            const double score = f_air + f_acc + f_vel + f_com + f_general
+                               + f_boost + f_pos + f_peak;
             const double P = sigmoid(score);
 
             cands[nCand].seg          = seg;
@@ -680,6 +816,13 @@ public:
         int        outlierSoft         = 0;   // χ² > 2.5 — soft attenuated
         // Spec §52 — number of ZUPT residual rows folded into JᵀWJ this frame.
         int        zuptActiveRows      = 0;
+        // Spec §41.3 — max |aiding bias| across active contacts (m/s).
+        double     aidingBiasMaxMps    = 0.0;
+        // Spec §54 — sensors escalated by the WINDOWED outlier check this
+        // frame (in addition to the instantaneous outlier{Rejected,Huber,Soft}
+        // counters above).  Catches "sticky" magnetic distortion that keeps
+        // χ² in the 2-5 range for ~0.1 s without ever spiking past th2 = 10.
+        int        outlierWindowed     = 0;
     };
 
     // Adaptive Levenberg-Marquardt damping bounds.  The lower bound matches
@@ -698,10 +841,18 @@ public:
                const std::array<Quat, fb::kSegmentCount>& sensorMeas,
                const std::array<bool, fb::kSegmentCount>& sensorPresent,
                const SkinArtifactState& skin,
-               const std::vector<ActiveContact>& activeContacts) {
+               const std::vector<ActiveContact>& activeContacts,
+               double dt) {
         Diag d{};
         const int N = fb::kSegmentCount;
         const int DOF = N * 3;
+
+        // §41.3 — predict-step the per-segment aiding bias before this
+        // frame's ZUPT residuals.  Bias decays towards zero at τ = c_t.
+        const double aBias = std::exp(-dt / std::max(1e-6, fb::kAidingBias.cT));
+        for (int i = 0; i < fb::kSegmentCount; ++i) {
+            m_aidingBias[i] = m_aidingBias[i] * float(aBias);
+        }
 
         Eigen::MatrixXd JtWJ  = Eigen::MatrixXd::Zero(DOF, DOF);
         Eigen::VectorXd JtWr  = Eigen::VectorXd::Zero(DOF);
@@ -738,7 +889,8 @@ public:
                     sum += quat_log(qRel).length();
                 }
             }
-            // (C) Spine rhythm
+            // (C) Spine rhythm — must mirror the Jacobian-build branch below,
+            // including the c_spine[4]=0.35 axial-twist attenuation on Z.
             {
                 const int idxPelvis = 0, idxL5 = 1, idxL3 = 2, idxT12 = 3, idxT8 = 4;
                 const double sumC = fb::kCSpine[0] + fb::kCSpine[1] +
@@ -746,11 +898,12 @@ public:
                 if (sumC > 1e-9) {
                     const QVector3D phi = quat_log(quat_mult(
                         o[idxT8], o[idxPelvis].conj()).normalized());
+                    const double cAxial = fb::kCSpine[4];
                     auto enforceR = [&](int idx, double fraction) {
                         const Quat qExp = quat_mult(
                             quat_exp_rotvec(fraction * double(phi.x()),
                                             fraction * double(phi.y()),
-                                            fraction * double(phi.z())),
+                                            fraction * cAxial * double(phi.z())),
                             o[idxPelvis]).normalized();
                         sum += quat_log(quat_mult(qExp,
                             o[idx].conj()).normalized()).length();
@@ -809,6 +962,13 @@ public:
             d.outlierRejected = 0;
             d.outlierHuber    = 0;
             d.outlierSoft     = 0;
+            d.outlierWindowed = 0;
+            // §54 — windowed escalation parameters.  Window size = number of
+            // frames in jointResWin1 (= 0.1 s) at the current dt.  Soft is
+            // bumped to Huber when >countTh[0]=20 % of the recent window
+            // already crossed outRejTh3.
+            const int winSize = std::min(BodyPoseSolver::kChi2WindowMax,
+                std::max(1, int(std::round(fb::kOutlierRej.jointResWin1 / std::max(1e-6, dt)))));
             for (int i = 0; i < N; ++i) {
                 if (!sensorPresent[i]) continue;
                 const Quat qPred = skin.applyTo(i, orient[i]);
@@ -820,6 +980,31 @@ public:
 
                 const double rNorm2 = double(r.x()*r.x() + r.y()*r.y() + r.z()*r.z());
                 const double chi2   = rNorm2 / std::max(1e-9, R_orient);
+
+                // Push current χ² into the per-segment ring buffer once per
+                // outer iteration — we use the FIRST iteration's chi2 to
+                // avoid double-counting within the Gauss-Newton inner loop.
+                if (d.iterations == 0) {
+                    auto& ring = m_chi2Window[i];
+                    ring.buf[ring.head] = chi2;
+                    ring.head = (ring.head + 1) % BodyPoseSolver::kChi2WindowMax;
+                    if (ring.count < BodyPoseSolver::kChi2WindowMax) ++ring.count;
+                }
+                // Compute per-segment windowed fractions.
+                int overTh3 = 0;
+                {
+                    const auto& ring = m_chi2Window[i];
+                    const int n = std::min(ring.count, winSize);
+                    for (int k = 0; k < n; ++k) {
+                        const int idx = (ring.head - 1 - k + BodyPoseSolver::kChi2WindowMax)
+                                         % BodyPoseSolver::kChi2WindowMax;
+                        if (ring.buf[idx] > fb::kOutlierRej.outRejTh3) ++overTh3;
+                    }
+                }
+                const double winN     = std::max(1, std::min(m_chi2Window[i].count, winSize));
+                const double fracTh3  = double(overTh3) / winN;
+                const bool   winSoftEscalate = (fracTh3 > fb::kOutlierRej.countTh[0]); // 0.2
+
                 if (chi2 > fb::kOutlierRej.outRejTh1) {
                     ++d.outlierRejected;
                     continue;     // catastrophic: skip this sensor entirely
@@ -829,6 +1014,20 @@ public:
                 } else if (chi2 > fb::kOutlierRej.outRejTh3) {
                     w *= std::sqrt(fb::kOutlierRej.outRejTh3 / chi2);   // soft
                     ++d.outlierSoft;
+                }
+                // §54 sustained-distortion escalation.  Independently of the
+                // instantaneous cascade above: if more than countTh[0]=20 %
+                // of the recent 0.1 s window crossed outRejTh3, apply an
+                // additional 0.5× knockdown to this frame's weight.  This
+                // makes a "flapping" sensor (e.g. an arm IMU in a transient
+                // magnetic distortion field that nudges χ² around 3 for a
+                // second) lose trust without waiting for a single-frame
+                // spike past th2.  Otherwise the WLS would re-fight the
+                // small but persistent residual every frame and let the
+                // lump-coupled neighbours get pulled along.
+                if (winSoftEscalate && chi2 > 1.0) {
+                    w *= 0.5;
+                    ++d.outlierWindowed;
                 }
 
                 const int row = i * 3;
@@ -888,11 +1087,17 @@ public:
                     const QVector3D phi = quat_log(quat_mult(qT8, qPel.conj()).normalized());
                     const double w_spine = 1.0 / (fb::kSpineNeck.stdSpine *
                                                   fb::kSpineNeck.stdSpine);
+                    // Spec §45.1 c_spine[4]=0.35 — lumbar axial-twist
+                    // stiffness.  The Z (yaw) component of the Pelvis→T8
+                    // residual is attenuated by this factor on the lumbar
+                    // joints so a yawed-T8 IMU does not drag L5/L3/T12 1:1.
+                    // Matches the post-FK coupling in foxcoupling::applySpineRhythm.
+                    const double cAxial = fb::kCSpine[4];
                     auto enforce = [&](int idx, double fraction) {
                         const Quat qExp = quat_mult(
                             quat_exp_rotvec(fraction * double(phi.x()),
                                             fraction * double(phi.y()),
-                                            fraction * double(phi.z())),
+                                            fraction * cAxial * double(phi.z())),
                             qPel).normalized();
                         // r = log(q_target ⊗ conj(q_current)).  q_current is on
                         // the right of conj() so its Jacobian is -I (small-angle
@@ -978,12 +1183,22 @@ public:
                 // on the parent segment's rotation DOFs only; the lump-
                 // coupling block (B) then propagates the correction up
                 // the kinematic chain.
+                //
+                // §41.3 — subtract the slowly-evolving aiding bias from
+                // the raw residual so the WLS sees only the high-frequency
+                // component.  The bias absorbs persistent offsets (e.g. a
+                // small calibration mismatch making the foot anchor look
+                // like it's moving at 1 mm/s even when stationary) over
+                // ~1 s; without it the WLS would interpret the slow
+                // offset as a real velocity and rock the leg pose every
+                // frame the contact probability dips below the 0.5 gate.
+                const QVector3D bias = m_aidingBias[ac.seg];
                 const double sigmaV = fb::kStdSamePosMeasXY;
                 const double w_zupt = ac.probability /
                                       (sigmaV * sigmaV + 1e-12);
-                const double r_v[3] = { double(ac.v_world.x()),
-                                        double(ac.v_world.y()),
-                                        double(ac.v_world.z()) };
+                const double r_v[3] = { double(ac.v_world.x()) - double(bias.x()),
+                                        double(ac.v_world.y()) - double(bias.y()),
+                                        double(ac.v_world.z()) - double(bias.z()) };
                 const int row = ac.seg * 3;
                 for (int k = 0; k < 3; ++k) {
                     JtWJ(row + k, row + k) += w_zupt;
@@ -992,6 +1207,29 @@ public:
                 }
                 ++residN;
                 ++d.zuptActiveRows;
+
+                // §41.3 — absorb the post-residual into the bias with a
+                // Kalman-style gain c_v.  Per-frame update:
+                //     bias += c_v · (v_world − bias)
+                // (low-pass filter with absorption coefficient c_v).  Combined
+                // with the per-frame decay  bias *= a  (a = exp(-dt/c_t)) at
+                // the top of solve(), the steady-state bias for a constant
+                // v_world is
+                //     b_∞ = c_v · v_∞ / (c_v + 1 − a)  ≈  0.68 · v_∞
+                // i.e. the bias absorbs ~70 % of the DC offset and the
+                // residual carries the remaining ~30 % into the WLS, where
+                // the lump + ROM rows distribute the correction up the chain.
+                // (Contrast: the literal additive form bias += c_v · v over-
+                // shoots to b_∞ ≈ 2.16 · v_∞ at the spec values, flipping the
+                // residual sign and forcing the LM to undo it next frame —
+                // visible foot-anchor flutter.)
+                const QVector3D residWorld = ac.v_world - bias;
+                m_aidingBias[ac.seg] = bias + residWorld * float(fb::kAidingBias.cV);
+                const double biasNorm = std::sqrt(
+                    double(m_aidingBias[ac.seg].x()) * double(m_aidingBias[ac.seg].x()) +
+                    double(m_aidingBias[ac.seg].y()) * double(m_aidingBias[ac.seg].y()) +
+                    double(m_aidingBias[ac.seg].z()) * double(m_aidingBias[ac.seg].z()));
+                if (biasNorm > d.aidingBiasMaxMps) d.aidingBiasMaxMps = biasNorm;
 
                 // Z-height residual when the point is on/near the floor.
                 if (ac.sd_height > 0.0) {
@@ -1089,6 +1327,116 @@ private:
     // the next frame with a sane value rather than restarting at kLambdaMin
     // every tick.
     double m_lambda = kLambdaMin;
+
+    // §41.3 — per-segment aiding-bias state (m/s, world frame).  Predict-
+    // step decays towards zero at τ = kAidingBias.cT each frame; the ZUPT
+    // block subtracts the bias from the velocity residual and folds back a
+    // c_v fraction of the post-residual.  Persisted between frames so the
+    // anchor settles within a few seconds.
+    std::array<QVector3D, fb::kSegmentCount> m_aidingBias{};
+
+    // §54 — per-segment χ² ring buffer for the windowed outlier check.  Sized
+    // at construction to ⌈jointResWin1 / dt⌉ = 24 frames at 240 Hz (0.1 s).
+    // Each frame pushes the orientation-residual χ² and pops the oldest; a
+    // sensor whose recent window has >countTh[0]=0.2 of frames over
+    // outRejTh3=2.5 gets bumped from soft to Huber attenuation even when
+    // the current frame alone is below outRejTh2=10.
+    static constexpr int kChi2WindowMax = 32;
+    struct Chi2Ring {
+        std::array<double, kChi2WindowMax> buf{};
+        int head = 0;
+        int count = 0;
+    };
+    std::array<Chi2Ring, fb::kSegmentCount> m_chi2Window{};
+};
+
+// ----------------------------------------------------------------------------
+//  §29.2 — Locomotion classifier.  Drives the PoseRefiner's understanding of
+//  which contact-pattern regime the actor is in so downstream consumers
+//  (diagnostics here, ZUPT modulation in a later commit) can pick the right
+//  defaults without the operator having to flip a UI switch.  Pure state
+//  machine over the ContactDetector output + pelvis kinematics — no new IO.
+// ----------------------------------------------------------------------------
+enum class LocomotionPhase : std::uint8_t {
+    Unknown   = 0,
+    Standing  = 1,
+    Walking   = 2,
+    Running   = 3,
+    Sitting   = 4,
+    Acrobatic = 5,
+};
+
+inline const char* locomotionPhaseName(LocomotionPhase p) {
+    switch (p) {
+        case LocomotionPhase::Standing:  return "standing";
+        case LocomotionPhase::Walking:   return "walking";
+        case LocomotionPhase::Running:   return "running";
+        case LocomotionPhase::Sitting:   return "sitting";
+        case LocomotionPhase::Acrobatic: return "acrobatic";
+        default: return "unknown";
+    }
+}
+
+class LocomotionClassifier {
+public:
+    LocomotionPhase phase() const { return m_phase; }
+    double          flightFracSec() const { return m_flightSec; }
+    double          contactFracSec() const { return m_contactSec; }
+
+    // `pelvisZ` — world-frame Z of the pelvis origin (m).  `pelvisSpeed`
+    // — magnitude of the pelvis velocity (m/s).  `rFootContact`/`lFootContact`
+    // — boolean from the ContactDetector for the foot segments (RFoot=17,
+    // LFoot=21).  `pelvisInverted` — true when the pelvis Z-axis in world
+    // points DOWN (somersault).  `dt` — frame time in seconds.
+    LocomotionPhase update(double pelvisZ, double pelvisSpeed,
+                            bool rFootContact, bool lFootContact,
+                            bool pelvisInverted,
+                            double standHeightM,
+                            double dt) {
+        // Accumulate flight (no foot contact) vs contact time.  Short windows
+        // (0.2 s) so the classifier reacts quickly without flapping.
+        const bool anyContact = rFootContact || lFootContact;
+        if (anyContact) {
+            m_contactSec += dt;
+            m_flightSec   = std::max(0.0, m_flightSec - dt);
+        } else {
+            m_flightSec  += dt;
+            m_contactSec  = std::max(0.0, m_contactSec - dt);
+        }
+        m_flightSec   = std::min(m_flightSec,   1.0);
+        m_contactSec  = std::min(m_contactSec,  1.0);
+
+        // Track contact alternation (heel-strike pattern of walking).
+        const int curSide = rFootContact ? +1 : (lFootContact ? -1 : 0);
+        if (curSide != 0 && curSide != m_lastContactSide) {
+            m_lastContactSide = curSide;
+            m_altSec = 0.0;
+        } else {
+            m_altSec += dt;
+        }
+
+        const double sittingZ = 0.55 * std::max(0.3, standHeightM);
+        const bool   lowPelvis = pelvisZ < sittingZ;
+
+        // Branch by clearest discriminators first.
+        if (pelvisInverted)                          m_phase = LocomotionPhase::Acrobatic;
+        else if (m_flightSec  > 0.12 && pelvisSpeed > 2.0) m_phase = LocomotionPhase::Running;
+        else if (lowPelvis    && pelvisSpeed < 0.8)        m_phase = LocomotionPhase::Sitting;
+        else if (rFootContact && lFootContact && pelvisSpeed < 0.3)
+                                                          m_phase = LocomotionPhase::Standing;
+        else if (anyContact   && (rFootContact != lFootContact) && m_altSec < 0.8)
+                                                          m_phase = LocomotionPhase::Walking;
+        else if (!anyContact)                              m_phase = LocomotionPhase::Acrobatic;
+        // Otherwise keep the previous phase (transient).
+        return m_phase;
+    }
+
+private:
+    LocomotionPhase m_phase           = LocomotionPhase::Unknown;
+    double          m_flightSec       = 0.0;
+    double          m_contactSec      = 0.0;
+    double          m_altSec          = 0.0;
+    int             m_lastContactSide = 0;
 };
 
 // ----------------------------------------------------------------------------
@@ -1147,6 +1495,7 @@ public:
             in.segVelocity   = &velocity;
             in.segOmega      = &omega;
             in.accLPBody     = ctx.accLPBody;
+            in.skinState     = &m_skin;        // §50.5 Phase B — apply posDrift
             in.floorLevelZ   = ctx.floorLevelZ;
             in.dt            = dt;
             cr = m_contacts.detect(in);
@@ -1164,10 +1513,57 @@ public:
         BodyPoseSolver::Diag dg{};
         if (ctx.sensorMeas && ctx.sensorPresent) {
             dg = m_solver.solve(orient, *ctx.sensorMeas, *ctx.sensorPresent,
-                                m_skin, cr.active);
+                                m_skin, cr.active, dt);
+            // §38.5 — feed per-segment angular-rate magnitude into the GM
+            // predict step so τ shortens on dynamic frames (faster artifact
+            // relaxation) and lengthens on stationary ones (slower drift).
+            // §50.5 — also advance the parallel position skin-artifact
+            // state, driven by linear acceleration magnitude.
             for (int i = 0; i < fb::kSegmentCount; ++i) {
-                if ((*ctx.sensorPresent)[i]) m_skin.predict(i, dt);
+                if (!(*ctx.sensorPresent)[i]) continue;
+                const double omegaNorm = m_havePrev
+                    ? std::sqrt(double(omega[i].x()) * double(omega[i].x()) +
+                                double(omega[i].y()) * double(omega[i].y()) +
+                                double(omega[i].z()) * double(omega[i].z()))
+                    : 0.0;
+                m_skin.predict(i, dt, omegaNorm);
+                double accMag = 0.0;
+                if (ctx.accLPBody) {
+                    const QVector3D& a = (*ctx.accLPBody)[i];
+                    accMag = std::sqrt(double(a.x()) * double(a.x()) +
+                                       double(a.y()) * double(a.y()) +
+                                       double(a.z()) * double(a.z()));
+                }
+                m_skin.predictPos(i, dt, accMag);
             }
+        }
+
+        // §29.2 — drive the locomotion-phase classifier off the contact
+        // detector + pelvis kinematics.  Pure read-side, no flag / GUI.
+        // Output is exposed via locomotion() for the diag dump and
+        // future ZUPT-weight modulation.
+        if (ctx.segCenter) {
+            bool rContact = false, lContact = false;
+            for (const auto& ac : cr.active) {
+                if (ac.probability < 0.5) continue;
+                if (ac.seg == 17) rContact = true;     // RFoot
+                if (ac.seg == 21) lContact = true;     // LFoot
+            }
+            const QVector3D pelvis = (*ctx.segCenter)[0];
+            const double pelvisSpeed = m_havePrev
+                ? (pelvis - m_prevSegCenter[0]).length() / std::max(1e-4, dt)
+                : 0.0;
+            // Inverted: pelvis Z-axis points DOWN in world (somersault).
+            const QVector3D pelvisZAxisWorld = vec_rotate(QVector3D(0, 0, 1), orient[0]);
+            const bool pelvisInverted = (pelvisZAxisWorld.z() < -0.3f);
+            // Reference standing height = pelvis-stand for 1.75 m subject;
+            // any per-actor scaling is handled by ContactDetector's floor
+            // estimate and the WLS, this just gives the classifier a
+            // sensible "low pelvis" threshold (≈ 0.5 × stand height).
+            const double standH = fb::pelvisStandHeightM(1.75);
+            m_locomotion.update(double(pelvis.z()), pelvisSpeed,
+                                rContact, lContact, pelvisInverted,
+                                standH, dt);
         }
 
         if (ctx.segCenter) {
@@ -1178,13 +1574,15 @@ public:
         return dg;
     }
 
-    const SkinArtifactState& skin()     const { return m_skin; }
-    const ContactDetector&   contacts() const { return m_contacts; }
+    const SkinArtifactState&    skin()     const { return m_skin; }
+    const ContactDetector&      contacts() const { return m_contacts; }
+    const LocomotionClassifier& locomotion() const { return m_locomotion; }
 
 private:
-    SkinArtifactState m_skin;
-    ContactDetector   m_contacts;
-    BodyPoseSolver    m_solver;
+    SkinArtifactState     m_skin;
+    ContactDetector       m_contacts;
+    BodyPoseSolver        m_solver;
+    LocomotionClassifier  m_locomotion;
     std::array<Quat,      fb::kSegmentCount> m_prevOrient{};
     std::array<QVector3D, fb::kSegmentCount> m_prevSegCenter{};
     bool   m_havePrev = false;
@@ -1213,7 +1611,8 @@ inline std::atomic<bool>& g_glovesFlag() { static std::atomic<bool> v{false}; re
 void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
                    const BodyPoseSolver::Diag& d,
                    const ContactDetector::Result& cr,
-                   const SkinArtifactState& skin)
+                   const SkinArtifactState& skin,
+                   const LocomotionClassifier& loco)
 {
     if (!testEnabled) return;
     static int frameCounter = 0;
@@ -1223,7 +1622,9 @@ void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
     // height the solver is actually using and the bone-derived hip/sitting
     // heights so the reader can see the spec §57 numbers replacing the
     // legacy 0.55·H heuristic.  glovesEnabled tightens the trigger so the
-    // dump only shows when the verbose stream is on.
+    // dump only shows when the verbose stream is on.  Also prints the spec
+    // §41.1 model constants (gravity 9.812687, sample-rate 240 Hz) so the
+    // calibration of the EKF gravity gate is visible.
     if (glovesEnabled) {
         static bool antropDumped = false;
         if (!antropDumped) {
@@ -1239,6 +1640,34 @@ void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
                       << "  ankle=" << fb::ankleHeightM(H) << " m"
                       << "  (legacy 0.55·H=" << 0.55 * H << " m, delta="
                       << (hStand - 0.55 * H) << " m)\n";
+            std::cout << "[engine] gravity=" << fb::constants::kGravityMs2
+                      << " m/s²"
+                      << "  sampleRate=" << fb::constants::kSampleRateHz
+                      << " Hz"
+                      << "  dt=" << fb::constants::kSampleDtSec << " s"
+                      << "  (spec §41.1)\n";
+            // §51.1 — magnetic reference vector (NWU, Z up).  Body sensors run
+            // against the 78° override (m0.z ≈ -0.978); the free-field 67.3°
+            // reference is shown alongside so the calibration of the EKF
+            // magnetic-gate is auditable.
+            const QVector3D m0Body = fb::referenceM0BodyVec();
+            const QVector3D m0Free = fb::referenceM0FreeFieldVec();
+            std::cout << "[mag]    m0_body=(" << std::setprecision(3)
+                      << m0Body.x() << "," << m0Body.y() << "," << m0Body.z()
+                      << ") dip=" << fb::kMagnet.inclinationDeg << "°"
+                      << "  m0_free=(" << m0Free.x() << "," << m0Free.y()
+                      << "," << m0Free.z() << ") dip="
+                      << (fb::kMagnet.inclinationDipRad * fb::constants::kRad2Deg) << "°"
+                      << "  (spec §51.1)\n";
+            // §51.6 — per-segment gate-relaxation multipliers (only the
+            // segments where loosening is meaningful are listed; the rest
+            // run at the strict 1.0× body baseline).
+            std::cout << "[mag-gate] arms ×" << fb::kMagGateRelax[8].angleMul
+                      << " (e_incl_arm)  head ×" << fb::kMagGateRelax[6].angleMul
+                      << " (skull)  feet ×" << fb::kMagGateRelax[17].angleMul
+                      << " (sole steel)  T8 ×" << fb::kMagGateRelax[4].angleMul
+                      << "  (spec §51.3 / §51.6)\n";
+            std::cout << std::setprecision(4);
             std::cout.flush();
         }
     }
@@ -1262,11 +1691,41 @@ void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
                   : d.poseQualityBand == fb::PoseQualityPoor      ? "poor"
                                                                    : "invalid")
        << ")  rows=" << d.numRows
-       << "  outlier(rej/h/s)=" << d.outlierRejected
+       << "  outlier(rej/h/s/win)=" << d.outlierRejected
        << "/" << d.outlierHuber
        << "/" << d.outlierSoft
+       << "/" << d.outlierWindowed
        << "  zupt_rows=" << d.zuptActiveRows
+       << "  aiding_bias_max=" << std::setprecision(3)
+                                << (d.aidingBiasMaxMps * 1000.0) << "mm/s"
+       << std::setprecision(4)
        << "\n";
+
+    // §29.2 locomotion phase — internal state, no UI flag.
+    ss << "[loco] phase=" << locomotionPhaseName(loco.phase())
+       << "  flight=" << std::setprecision(2) << loco.flightFracSec() << "s"
+       << "  contact=" << loco.contactFracSec() << "s"
+       << std::setprecision(4) << "\n";
+
+    // §1127 / §12.1 — body centre of mass.  Only useful when segCenters
+    // are valid (FK has run at least once).  Drawn from the contact
+    // detector's cached pelvis position to avoid a full FK re-trace.
+    if (glovesEnabled) {
+        const QVector3D cop = cr.active.empty()
+            ? QVector3D(0, 0, 0)
+            : [&cr]() {
+                  QVector3D sum(0, 0, 0); double w = 0.0;
+                  for (const auto& c : cr.active) {
+                      sum += c.p_world * float(c.probability);
+                      w += c.probability;
+                  }
+                  return (w > 0.0) ? (sum / float(w)) : QVector3D(0, 0, 0);
+              }();
+        ss << "[CoP]  active=" << cr.active.size()
+           << "  centre=(" << std::setprecision(3) << cop.x()
+           << "," << cop.y() << "," << cop.z() << ")"
+           << std::setprecision(4) << "\n";
+    }
 
     if (!cr.active.empty()) {
         ss << "[zupt-wls] active=" << cr.active.size();
@@ -1285,23 +1744,31 @@ void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
     if (glovesEnabled) {
         const auto& cd = fox::coupling::diagnostics();
         ss << std::fixed << std::setprecision(2);
-        ss << "[coupling spine] full=" << cd.spineFullDeg
-           << "° fracs=" << cd.spineFracL5
+        // Spec §45.5 + §45.1 — spine angular partition Pelvis→T8 across the
+        // three unsensored lumbar joints, with c_spine[4]=0.35 axial-twist
+        // attenuation now applied to the Z component.
+        ss << "[coupling spine]  full=" << cd.spineFullDeg
+           << "° fracs L5/L3/T12=" << cd.spineFracL5
            << "/" << cd.spineFracL3
-           << "/" << cd.spineFracT12 << "\n";
-        ss << "[coupling arm]   R: θ=" << cd.scapThetaRDeg
-           << "° c_eff=" << cd.scapCEffR
-           << "   L: θ=" << cd.scapThetaLDeg
-           << "° c_eff=" << cd.scapCEffL << "\n";
-        ss << "[coupling knee]  R: flex=" << cd.kneeFlexRDeg
+           << "/" << cd.spineFracT12
+           << "  c_axial(Z)=" << fb::kCSpine[4] << "\n";
+        // Spec §46.2 — scapulo-humeral rhythm now uses T8 reference (not
+        // gleno-humeral), so cd.scapThetaR/L is the FULL humerus elevation
+        // in the T8 frame, and the scapula is placed at c_eff × that angle.
+        ss << "[coupling arm]    R: humerusInT8=" << cd.scapThetaRDeg
+           << "° scap=" << (cd.scapCEffR * cd.scapThetaRDeg) << "° c_eff=" << cd.scapCEffR
+           << "   L: humerusInT8=" << cd.scapThetaLDeg
+           << "° scap=" << (cd.scapCEffL * cd.scapThetaLDeg) << "° c_eff=" << cd.scapCEffL
+           << "\n";
+        ss << "[coupling knee]   R: flex=" << cd.kneeFlexRDeg
            << "° screw=" << cd.kneeScrewRDeg
            << "°   L: flex=" << cd.kneeFlexLDeg
            << "° screw=" << cd.kneeScrewLDeg << "°\n";
-        ss << "[coupling ankle] R: pf=" << cd.anklePfRDeg
+        ss << "[coupling ankle]  R: pf=" << cd.anklePfRDeg
            << "°" << (cd.ankleClampedR ? " CLAMP" : "")
            << "   L: pf=" << cd.anklePfLDeg
            << "°" << (cd.ankleClampedL ? " CLAMP" : "") << "\n";
-        ss << "[coupling toe]   R: ext=" << cd.toeRDeg
+        ss << "[coupling toe]    R: ext=" << cd.toeRDeg
            << "° w(heel/toe)=" << cd.toeWeights.w_heel_R
            << "/" << cd.toeWeights.w_toe_R
            << "   L: ext=" << cd.toeLDeg
@@ -1311,6 +1778,11 @@ void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
     }
 
     if (glovesEnabled) {
+        // §38.5 / §50.1 — per-segment skin drift magnitude (degrees) and the
+        // adaptive τ in use (seconds).  Only segments above 0.05° drift are
+        // listed to keep the line short.  τ varies between kSkin.tauFastSec
+        // (= 0.05 s when ω ≥ 3 rad/s) and kSkin.tauSlowSec (= 0.30 s when
+        // ω ≈ 0); the base 0.15 s is the τ at ω ≈ 1 rad/s.
         ss << "[skin]";
         for (int i = 0; i < fb::kSegmentCount; ++i) {
             if (!fb::kSensorPresent[i]) continue;
@@ -1320,9 +1792,32 @@ void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
                                          double(x.z()*x.z())) * kR2D;
             if (mag > 0.05) {
                 ss << " seg" << i << "=" << std::setprecision(2) << mag
-                   << "° " << std::setprecision(4);
+                   << "°τ=" << std::setprecision(3) << skin.tauLast(i) << "s"
+                   << std::setprecision(4);
             }
         }
+        ss << "\n";
+
+        // §50.5 — position skin-artifact magnitudes (mm).  Phase A: the
+        // state is maintained but not yet plumbed into FK; this dump
+        // makes the per-sensor drift visible so the operator can verify
+        // the GM saturates near the 20 mm 1-σ ceiling without crashing
+        // the model.  Phase B will fold driftPos into bone origins.
+        ss << "[skin-pos]";
+        bool any = false;
+        for (int i = 0; i < fb::kSegmentCount; ++i) {
+            if (!fb::kSensorPresent[i]) continue;
+            const QVector3D x = skin.driftPos(i);
+            const double mag = std::sqrt(double(x.x()*x.x()) +
+                                         double(x.y()*x.y()) +
+                                         double(x.z()*x.z())) * 1000.0;
+            if (mag > 0.5) {     // > 0.5 mm
+                ss << " seg" << i << "=" << std::setprecision(1) << mag
+                   << "mm" << std::setprecision(4);
+                any = true;
+            }
+        }
+        if (!any) ss << " (all <0.5 mm)";
         ss << "\n";
     }
 
@@ -1643,7 +2138,7 @@ SkeletonXsens::computeKeypoints(const std::array<Quat, kXsensSegmentCount>& raw,
         ctx.segCenter     = m_haveLastSegCenter ? &m_lastSegCenter : nullptr;
         ctx.accLPBody     = m_accLPBodyValid    ? &m_accLPBodyHint : nullptr;
         ctx.floorLevelZ   = 0.0;
-        ctx.dt            = 1.0 / 240.0;
+        ctx.dt            = fox::body::constants::kSampleDtSec;   // spec §41.1 — 1/240 s
 
         pose_solver::ContactDetector::Result contacts;
         std::lock_guard<std::mutex> lk(pose_solver::g_refinerMtx());
@@ -1653,7 +2148,8 @@ SkeletonXsens::computeKeypoints(const std::array<Quat, kXsensSegmentCount>& raw,
         pose_solver::dumpFrameDiag(
             pose_solver::g_testFlag().load(),
             pose_solver::g_glovesFlag().load(),
-            dg, contacts, pose_solver::g_refiner().skin());
+            dg, contacts, pose_solver::g_refiner().skin(),
+            pose_solver::g_refiner().locomotion());
     }
 
     // Step 2: expand to 27 (add dummy stubs).
@@ -4849,6 +5345,24 @@ void MocapReceiver::run()
                         default:                                        refNorm = 1.0f;                           break;
                     }
                     s.magNormReferenceLocal = refNorm;
+                    // §51.3 + §51.6 + §43.10 — per-segment gate-relaxation
+                    // multipliers.  Hands / head / feet read a noticeably
+                    // distorted field (skull plates, glove electronics, shoe
+                    // steel) so the strict 6° angle / 3.5° dip thresholds
+                    // close their magnetic gate almost permanently.  We
+                    // loosen the gate per kMagGateRelax (5× for arms, 4×
+                    // for head, etc.) and additionally scale by 7.9× when
+                    // the sensor uses the FOX_IMU_x3 chip (60× higher mag
+                    // noise density).  The actual model dip / declination
+                    // are unchanged — only the tolerance widens.
+                    if (targetSeg >= 0 && targetSeg < fox::body::kSegmentCount) {
+                        const auto& relax = fox::body::kMagGateRelax[targetSeg];
+                        const float chipMul = fox::body::magNoiseScaleForChip(
+                            fox::body::kImuChipPerSeg[targetSeg]);
+                        s.magDipGateRelax  = relax.dipMul   * chipMul;
+                        s.magAngGateRelax  = relax.angleMul * chipMul;
+                        s.magNormGateRelax = relax.normMul;
+                    }
                     FusionAhrsSetSettings(&ahrs, &s);
                     I.fusionReady[targetSeg] = true;
                 }
@@ -7647,6 +8161,21 @@ void NewSessionWizard::onCaptureTick()
     for (int i = 0; i < kXsensSegmentCount; ++i)
         m_result.calibReference[i] = Quat(1, 0, 0, 0);
 
+    // Cache the T-pose Markley averages produced in CaptureT (see line ~7526)
+    // for the §174.6 Stage-2 blending below.  These are already stored in
+    // m_result.tposeReference; tposeValid[i] tracks whether the segment had
+    // enough T-pose samples to produce a usable estimate.
+    std::array<bool, kXsensSegmentCount> tposeValid{};
+    for (int i = 0; i < kXsensSegmentCount; ++i) {
+        // CaptureT-handler at line ~7517 fills tposeReference[i] with an
+        // identity quaternion when sampT[i].size() < 4, so we treat anything
+        // other than identity as a valid measurement.
+        const Quat& q = m_result.tposeReference[i];
+        const double dist2 = (q.w - 1.0) * (q.w - 1.0)
+                           +  q.x * q.x +  q.y * q.y +  q.z * q.z;
+        tposeValid[i] = (dist2 > 1e-12);
+    }
+
     for (int i = 0; i < kXsensSegmentCount; ++i) {
         if (!fox::body::kSensorPresent[i]) continue;
         if (sampN[i].size() < 10) continue;
@@ -7656,11 +8185,44 @@ void NewSessionWizard::onCaptureTick()
         m_result.calibReference[i] = qAvgN;
         const Quat& q_bs  = fox::body::kSensorToBone[i].q_bs;
         const Quat& qRefN = fox::body::kRefQuatN[i];
+        const Quat& qRefT = fox::body::kRefQuatT[i];
 
         // §174.4 q_align — closed-form analytical alignment.
-        const Quat qAlign = quat_mult(
+        // Two independent estimates from the two static stages:
+        //     q_align_N = q_ref_N ⊗ conj(q_savg_N) ⊗ conj(q_bs)     (Stage 1)
+        //     q_align_T = q_ref_T ⊗ conj(q_savg_T) ⊗ conj(q_bs)     (Stage 2)
+        //
+        // §174.6 Stage 2 verification: both stages should give the SAME
+        // q_align up to capture noise.  We Markley-average them so the final
+        // q_align has ~1.5× lower σ than either stage alone (the residual
+        // gain depends on noise correlation between the two captures; ours
+        // are independent stillness windows so the gain is empirical 1.4-1.5×).
+        // If only N-pose is available we fall back to the N-only estimate.
+        const Quat qAlignN = quat_mult(
             quat_mult(qRefN, qAvgN.conj()),
             q_bs.conj()).normalized();
+
+        Quat qAlign = qAlignN;
+        double residDegN = 0.0;
+        double residDegT = 0.0;
+        if (tposeValid[i]) {
+            const Quat& qAvgT = m_result.tposeReference[i];
+            const Quat qAlignT = quat_mult(
+                quat_mult(qRefT, qAvgT.conj()),
+                q_bs.conj()).normalized();
+            std::vector<Quat> v{qAlignN, qAlignT};
+            qAlign = fox::quat_avg_markley(v);
+
+            // §174.6 per-stage residuals (printed under -test).
+            const Quat qResidN = quat_mult(qAlignN, q_bs).normalized();
+            double absN = std::abs(qResidN.w);
+            if (absN > 1.0) absN = 1.0;
+            residDegN = 2.0 * std::acos(absN) * 180.0 / M_PI;
+            const Quat qResidT = quat_mult(qAlignT, q_bs).normalized();
+            double absT = std::abs(qResidT.w);
+            if (absT > 1.0) absT = 1.0;
+            residDegT = 2.0 * std::acos(absT) * 180.0 / M_PI;
+        }
         s2s[i] = qAlign;
 
         // §174.5 quality: q_resid = q_align ⊗ q_bs.
@@ -7669,6 +8231,19 @@ void NewSessionWizard::onCaptureTick()
         if (absw > 1.0) absw = 1.0;
         residDeg[i]    = 2.0 * std::acos(absw) * 180.0 / M_PI;
         qualityBand[i] = fox::body::calibrationQuality(residDeg[i]);
+
+        // Verbose -test diagnostic on Stage-1 / Stage-2 individual residuals,
+        // visible only when -test -gloves is on.  The pose_solver flags
+        // are the canonical -gloves source the rest of the engine consults.
+        if (m_test && fox::pose_solver::g_glovesFlag().load(
+                std::memory_order_relaxed) && tposeValid[i]) {
+            std::cout << "[calib §174.6] " << std::left << std::setw(14)
+                      << kSegmentNames[i] << std::right
+                      << "  N-only=" << std::fixed << std::setprecision(2)
+                      << residDegN << "°"
+                      << "  T-only=" << residDegT << "°"
+                      << "  N+T="    << residDeg[i] << "°  (Markley)\n";
+        }
 
         // T+N pose statistics for downstream filter tuning.
         const int cT = m_accumCountT[i];
