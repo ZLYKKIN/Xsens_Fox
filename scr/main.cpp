@@ -712,6 +712,11 @@ public:
         int        zuptActiveRows      = 0;
         // Spec §41.3 — max |aiding bias| across active contacts (m/s).
         double     aidingBiasMaxMps    = 0.0;
+        // Spec §54 — sensors escalated by the WINDOWED outlier check this
+        // frame (in addition to the instantaneous outlier{Rejected,Huber,Soft}
+        // counters above).  Catches "sticky" magnetic distortion that keeps
+        // χ² in the 2-5 range for ~0.1 s without ever spiking past th2 = 10.
+        int        outlierWindowed     = 0;
     };
 
     // Adaptive Levenberg-Marquardt damping bounds.  The lower bound matches
@@ -851,6 +856,13 @@ public:
             d.outlierRejected = 0;
             d.outlierHuber    = 0;
             d.outlierSoft     = 0;
+            d.outlierWindowed = 0;
+            // §54 — windowed escalation parameters.  Window size = number of
+            // frames in jointResWin1 (= 0.1 s) at the current dt.  Soft is
+            // bumped to Huber when >countTh[0]=20 % of the recent window
+            // already crossed outRejTh3.
+            const int winSize = std::min(BodyPoseSolver::kChi2WindowMax,
+                std::max(1, int(std::round(fb::kOutlierRej.jointResWin1 / std::max(1e-6, dt)))));
             for (int i = 0; i < N; ++i) {
                 if (!sensorPresent[i]) continue;
                 const Quat qPred = skin.applyTo(i, orient[i]);
@@ -862,6 +874,31 @@ public:
 
                 const double rNorm2 = double(r.x()*r.x() + r.y()*r.y() + r.z()*r.z());
                 const double chi2   = rNorm2 / std::max(1e-9, R_orient);
+
+                // Push current χ² into the per-segment ring buffer once per
+                // outer iteration — we use the FIRST iteration's chi2 to
+                // avoid double-counting within the Gauss-Newton inner loop.
+                if (d.iterations == 0) {
+                    auto& ring = m_chi2Window[i];
+                    ring.buf[ring.head] = chi2;
+                    ring.head = (ring.head + 1) % BodyPoseSolver::kChi2WindowMax;
+                    if (ring.count < BodyPoseSolver::kChi2WindowMax) ++ring.count;
+                }
+                // Compute per-segment windowed fractions.
+                int overTh3 = 0;
+                {
+                    const auto& ring = m_chi2Window[i];
+                    const int n = std::min(ring.count, winSize);
+                    for (int k = 0; k < n; ++k) {
+                        const int idx = (ring.head - 1 - k + BodyPoseSolver::kChi2WindowMax)
+                                         % BodyPoseSolver::kChi2WindowMax;
+                        if (ring.buf[idx] > fb::kOutlierRej.outRejTh3) ++overTh3;
+                    }
+                }
+                const double winN     = std::max(1, std::min(m_chi2Window[i].count, winSize));
+                const double fracTh3  = double(overTh3) / winN;
+                const bool   winSoftEscalate = (fracTh3 > fb::kOutlierRej.countTh[0]); // 0.2
+
                 if (chi2 > fb::kOutlierRej.outRejTh1) {
                     ++d.outlierRejected;
                     continue;     // catastrophic: skip this sensor entirely
@@ -871,6 +908,20 @@ public:
                 } else if (chi2 > fb::kOutlierRej.outRejTh3) {
                     w *= std::sqrt(fb::kOutlierRej.outRejTh3 / chi2);   // soft
                     ++d.outlierSoft;
+                }
+                // §54 sustained-distortion escalation.  Independently of the
+                // instantaneous cascade above: if more than countTh[0]=20 %
+                // of the recent 0.1 s window crossed outRejTh3, apply an
+                // additional 0.5× knockdown to this frame's weight.  This
+                // makes a "flapping" sensor (e.g. an arm IMU in a transient
+                // magnetic distortion field that nudges χ² around 3 for a
+                // second) lose trust without waiting for a single-frame
+                // spike past th2.  Otherwise the WLS would re-fight the
+                // small but persistent residual every frame and let the
+                // lump-coupled neighbours get pulled along.
+                if (winSoftEscalate && chi2 > 1.0) {
+                    w *= 0.5;
+                    ++d.outlierWindowed;
                 }
 
                 const int row = i * 3;
@@ -1177,6 +1228,20 @@ private:
     // c_v fraction of the post-residual.  Persisted between frames so the
     // anchor settles within a few seconds.
     std::array<QVector3D, fb::kSegmentCount> m_aidingBias{};
+
+    // §54 — per-segment χ² ring buffer for the windowed outlier check.  Sized
+    // at construction to ⌈jointResWin1 / dt⌉ = 24 frames at 240 Hz (0.1 s).
+    // Each frame pushes the orientation-residual χ² and pops the oldest; a
+    // sensor whose recent window has >countTh[0]=0.2 of frames over
+    // outRejTh3=2.5 gets bumped from soft to Huber attenuation even when
+    // the current frame alone is below outRejTh2=10.
+    static constexpr int kChi2WindowMax = 32;
+    struct Chi2Ring {
+        std::array<double, kChi2WindowMax> buf{};
+        int head = 0;
+        int count = 0;
+    };
+    std::array<Chi2Ring, fb::kSegmentCount> m_chi2Window{};
 };
 
 // ----------------------------------------------------------------------------
@@ -1380,9 +1445,10 @@ void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
                   : d.poseQualityBand == fb::PoseQualityPoor      ? "poor"
                                                                    : "invalid")
        << ")  rows=" << d.numRows
-       << "  outlier(rej/h/s)=" << d.outlierRejected
+       << "  outlier(rej/h/s/win)=" << d.outlierRejected
        << "/" << d.outlierHuber
        << "/" << d.outlierSoft
+       << "/" << d.outlierWindowed
        << "  zupt_rows=" << d.zuptActiveRows
        << "  aiding_bias_max=" << std::setprecision(3)
                                 << (d.aidingBiasMaxMps * 1000.0) << "mm/s"
