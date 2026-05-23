@@ -710,6 +710,8 @@ public:
         int        outlierSoft         = 0;   // χ² > 2.5 — soft attenuated
         // Spec §52 — number of ZUPT residual rows folded into JᵀWJ this frame.
         int        zuptActiveRows      = 0;
+        // Spec §41.3 — max |aiding bias| across active contacts (m/s).
+        double     aidingBiasMaxMps    = 0.0;
     };
 
     // Adaptive Levenberg-Marquardt damping bounds.  The lower bound matches
@@ -728,10 +730,18 @@ public:
                const std::array<Quat, fb::kSegmentCount>& sensorMeas,
                const std::array<bool, fb::kSegmentCount>& sensorPresent,
                const SkinArtifactState& skin,
-               const std::vector<ActiveContact>& activeContacts) {
+               const std::vector<ActiveContact>& activeContacts,
+               double dt) {
         Diag d{};
         const int N = fb::kSegmentCount;
         const int DOF = N * 3;
+
+        // §41.3 — predict-step the per-segment aiding bias before this
+        // frame's ZUPT residuals.  Bias decays towards zero at τ = c_t.
+        const double aBias = std::exp(-dt / std::max(1e-6, fb::kAidingBias.cT));
+        for (int i = 0; i < fb::kSegmentCount; ++i) {
+            m_aidingBias[i] = m_aidingBias[i] * float(aBias);
+        }
 
         Eigen::MatrixXd JtWJ  = Eigen::MatrixXd::Zero(DOF, DOF);
         Eigen::VectorXd JtWr  = Eigen::VectorXd::Zero(DOF);
@@ -1016,12 +1026,22 @@ public:
                 // on the parent segment's rotation DOFs only; the lump-
                 // coupling block (B) then propagates the correction up
                 // the kinematic chain.
+                //
+                // §41.3 — subtract the slowly-evolving aiding bias from
+                // the raw residual so the WLS sees only the high-frequency
+                // component.  The bias absorbs persistent offsets (e.g. a
+                // small calibration mismatch making the foot anchor look
+                // like it's moving at 1 mm/s even when stationary) over
+                // ~1 s; without it the WLS would interpret the slow
+                // offset as a real velocity and rock the leg pose every
+                // frame the contact probability dips below the 0.5 gate.
+                const QVector3D bias = m_aidingBias[ac.seg];
                 const double sigmaV = fb::kStdSamePosMeasXY;
                 const double w_zupt = ac.probability /
                                       (sigmaV * sigmaV + 1e-12);
-                const double r_v[3] = { double(ac.v_world.x()),
-                                        double(ac.v_world.y()),
-                                        double(ac.v_world.z()) };
+                const double r_v[3] = { double(ac.v_world.x()) - double(bias.x()),
+                                        double(ac.v_world.y()) - double(bias.y()),
+                                        double(ac.v_world.z()) - double(bias.z()) };
                 const int row = ac.seg * 3;
                 for (int k = 0; k < 3; ++k) {
                     JtWJ(row + k, row + k) += w_zupt;
@@ -1030,6 +1050,29 @@ public:
                 }
                 ++residN;
                 ++d.zuptActiveRows;
+
+                // §41.3 — absorb the post-residual into the bias with a
+                // Kalman-style gain c_v.  Per-frame update:
+                //     bias += c_v · (v_world − bias)
+                // (low-pass filter with absorption coefficient c_v).  Combined
+                // with the per-frame decay  bias *= a  (a = exp(-dt/c_t)) at
+                // the top of solve(), the steady-state bias for a constant
+                // v_world is
+                //     b_∞ = c_v · v_∞ / (c_v + 1 − a)  ≈  0.68 · v_∞
+                // i.e. the bias absorbs ~70 % of the DC offset and the
+                // residual carries the remaining ~30 % into the WLS, where
+                // the lump + ROM rows distribute the correction up the chain.
+                // (Contrast: the literal additive form bias += c_v · v over-
+                // shoots to b_∞ ≈ 2.16 · v_∞ at the spec values, flipping the
+                // residual sign and forcing the LM to undo it next frame —
+                // visible foot-anchor flutter.)
+                const QVector3D residWorld = ac.v_world - bias;
+                m_aidingBias[ac.seg] = bias + residWorld * float(fb::kAidingBias.cV);
+                const double biasNorm = std::sqrt(
+                    double(m_aidingBias[ac.seg].x()) * double(m_aidingBias[ac.seg].x()) +
+                    double(m_aidingBias[ac.seg].y()) * double(m_aidingBias[ac.seg].y()) +
+                    double(m_aidingBias[ac.seg].z()) * double(m_aidingBias[ac.seg].z()));
+                if (biasNorm > d.aidingBiasMaxMps) d.aidingBiasMaxMps = biasNorm;
 
                 // Z-height residual when the point is on/near the floor.
                 if (ac.sd_height > 0.0) {
@@ -1127,6 +1170,13 @@ private:
     // the next frame with a sane value rather than restarting at kLambdaMin
     // every tick.
     double m_lambda = kLambdaMin;
+
+    // §41.3 — per-segment aiding-bias state (m/s, world frame).  Predict-
+    // step decays towards zero at τ = kAidingBias.cT each frame; the ZUPT
+    // block subtracts the bias from the velocity residual and folds back a
+    // c_v fraction of the post-residual.  Persisted between frames so the
+    // anchor settles within a few seconds.
+    std::array<QVector3D, fb::kSegmentCount> m_aidingBias{};
 };
 
 // ----------------------------------------------------------------------------
@@ -1202,7 +1252,7 @@ public:
         BodyPoseSolver::Diag dg{};
         if (ctx.sensorMeas && ctx.sensorPresent) {
             dg = m_solver.solve(orient, *ctx.sensorMeas, *ctx.sensorPresent,
-                                m_skin, cr.active);
+                                m_skin, cr.active, dt);
             // §38.5 — feed per-segment angular-rate magnitude into the GM
             // predict step so τ shortens on dynamic frames (faster artifact
             // relaxation) and lengthens on stationary ones (slower drift).
@@ -1334,6 +1384,9 @@ void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
        << "/" << d.outlierHuber
        << "/" << d.outlierSoft
        << "  zupt_rows=" << d.zuptActiveRows
+       << "  aiding_bias_max=" << std::setprecision(3)
+                                << (d.aidingBiasMaxMps * 1000.0) << "mm/s"
+       << std::setprecision(4)
        << "\n";
 
     if (!cr.active.empty()) {

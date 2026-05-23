@@ -933,6 +933,28 @@ inline constexpr EstimatorWeights kEstimator = {
     .multiLevelZhcClipVert = 0.005,
 };
 
+// ---------------------------------------------------------------------------
+//  §41.3 / §44.6 / §138.31-32 — aiding-bias Gauss-Markov.
+//
+//  Each ZUPT / aiding hint carries a slowly-evolving residual bias b that
+//  tracks the persistent offset between the predicted contact velocity and
+//  the measured one.  Spec model:
+//      b(k+1) = b(k) · exp(−dt / c_t),   c_t = 0.9 s   (predict step)
+//      b      += c_v · r_v_post,          c_v = 0.01    (after WLS update)
+//  Without this bias the ZUPT row weight oscillates frame-to-frame when the
+//  contact probability hovers around 0.5 (heel-off / toe-on transitions),
+//  visibly jittering the foot anchor.  With the bias absorbed into the
+//  residual, the anchor stays put across the noisy threshold crossing.
+// ---------------------------------------------------------------------------
+struct AidingBiasParams {
+    double cT;        // 0.9 s — bias time constant (larger = more smoothing)
+    double cV;        // 0.01  — fraction of post-residual absorbed each frame
+};
+inline constexpr AidingBiasParams kAidingBias = {
+    .cT = 0.9,
+    .cV = 0.01,
+};
+
 // §44.2 — per-lump per-axis acceleration→velocity integration noise (m/s²),
 // 7 lumps × 3 axes (X,Y,Z).  The diagonal-only kEstimator.sdIntAccToVel is the
 // max-of-axes summary used by legacy code; the WLS body solver wants the full
