@@ -300,7 +300,7 @@ inline constexpr std::array<Quat, kSegmentCount> kRefQuatN = {{
 // spec §37.5 says shoulderWidth is a measured dimension — at default body it
 // matches the existing 0.10–0.16 range used by SkeletonXsens).
 inline constexpr float kHipHalfY      = 0.080f;
-inline constexpr float kShoulderHalfY = 0.160f;
+inline constexpr float kShoulderHalfY = 0.140f;   // §87 RightShoulder offset r=(0,-0.140,0)
 inline constexpr float kRefHeightM    = 1.75f;   // reference height used by §37.6
 
 // ---------------------------------------------------------------------------
@@ -871,6 +871,251 @@ inline constexpr EstimatorWeights kEstimator = {
     .gyrBiasStdMaxDeg  = 0.07,
     .multiLevelZhcClipVert = 0.005,
 };
+
+// §44.2 — per-lump per-axis acceleration→velocity integration noise (m/s²),
+// 7 lumps × 3 axes (X,Y,Z).  The diagonal-only kEstimator.sdIntAccToVel is the
+// max-of-axes summary used by legacy code; the WLS body solver wants the full
+// matrix because vertical Z is consistently tighter than the horizontal plane
+// (gravity anchor).  Order matches kLumps[] (upperbody/rightleg/rightfoot/
+// leftleg/leftfoot/rightarm/leftarm).
+inline constexpr std::array<std::array<double, 3>, kLumpGroups> kSdIntAccToVelXYZ = {{
+    {{  2.0,  2.0,  1.0 }},   // 0 upperbody
+    {{  4.0,  4.0,  2.0 }},   // 1 rightleg
+    {{  8.0,  8.0,  4.0 }},   // 2 rightfoot
+    {{  4.0,  4.0,  2.0 }},   // 3 leftleg
+    {{  8.0,  8.0,  4.0 }},   // 4 leftfoot
+    {{ 20.0, 20.0, 20.0 }},   // 5 rightarm
+    {{ 20.0, 20.0, 20.0 }},   // 6 leftarm
+}};
+
+// §44.3 Б — bone-length kinematic constraint sd (m).  Bones don't stretch.
+inline constexpr double kStdJointBoneLength = 0.0002;
+// §52.1 — ZUPT velocity sd at contact point (m/s).  Hard anchor.
+inline constexpr double kStdSamePosMeasXY   = 0.0003;
+// §44.3 Г — ZUPT same-position sd Z (3D vs XY-plane).
+inline constexpr double kStdSamePosMeasZ3d  = 0.002;
+inline constexpr double kStdSamePosMeasZ    = 10.0;   // ZHC off: Z is free vertically
+// §44.5 — Gauss-Newton settings for the body solver.
+inline constexpr int    kMaxIKSteps         = 2;        // FOX_FE.LX.maxIKsteps
+inline constexpr double kJointLaxitySolver  = 0.005;    // FOX_FE.LX.jointLaxity (rad)
+inline constexpr double kHypExtPenaltySd    = 0.0002;   // hard barrier sd for knee/elbow ≥ 0
+
+// §45.1 — spineNeck namespace coefficients (separate from c_spine, fox_definitions.xsb
+// spineNeck.*).  These are the per-joint coupling strengths used by the
+// spinal-rhythm distribution and the corresponding measurement sd's.
+struct SpineNeckParams {
+    double cL3;        // 0.65  — L3 fraction (matches c_spine[2])
+    double cL5;        // 0.45  — L5 fraction (matches c_spine[1])
+    double cT12;       // 0.85  — T12 fraction (matches c_spine[3])
+    double cNeck;      // 0.35  — Neck axial-twist fraction (matches c_spine[4])
+    double stdNeck;    // 0.001 — measurement sd for neck constraint (rad)
+    double stdSpine;   // 0.001 — measurement sd for spine constraints (rad)
+};
+inline constexpr SpineNeckParams kSpineNeck = {
+    .cL3      = 0.65,
+    .cL5      = 0.45,
+    .cT12     = 0.85,
+    .cNeck    = 0.35,
+    .stdNeck  = 0.001,
+    .stdSpine = 0.001,
+};
+
+// §46.2 — scapulo-humeral piecewise-linear envelope.
+inline constexpr double kScapHumThetaLowDeg  = 60.0;   // below: c_arms_effective = 0.95
+inline constexpr double kScapHumThetaHighDeg = 90.0;   // above: c_arms_effective = 0.99
+// §47.2 — knee screw-home maximum axial rotation.
+inline constexpr double kKneeScrewMaxDeg     = 15.0;
+// §48.1 — ankle dorsiflex limit (extension; spec says ~ -45°).
+inline constexpr double kAnkleDorsiLimitRad  = 45.0 * 0.017453292519943295;
+// §48.2 — toe rocker switching thresholds (rad).
+inline constexpr double kToeRockerLowRad     = 5.0  * 0.017453292519943295;  // 5°
+inline constexpr double kToeRockerHighRad    = 30.0 * 0.017453292519943295;  // 30°
+
+// §226 — air[]: contact-air probability detector (11 coefficients).
+inline constexpr std::array<double, 11> kAir = {
+    -3.0, 0.0, 0.3, 3.0, 0.1, -0.05, 0.3, 0.0, -6.0, -0.05, -0.02
+};
+// §227 — com[]: CoM-distance contact factor (5 coefficients).
+inline constexpr std::array<double, 5> kCom = { 0.05, 0.5, 0.08, 0.0, 0.6 };
+// §228.1 — acc[]: ||a_lp|| → contact-likelihood (4 coefficients).
+inline constexpr std::array<double, 4> kAccProb = { 0.6, 0.3, 0.95, 0.4 };
+// §228.2 — vel[]: ||v_p|| → contact-likelihood (4 coefficients).
+inline constexpr std::array<double, 4> kVelProb = { 0.1, 0.4, 0.95, 0.2 };
+// §229 — general[]: residual contact factor (4 coefficients).
+inline constexpr std::array<double, 4> kGeneralProb = { 0.5, 0.4, 0.275, 0.0015 };
+// §230 — peakDetection[]: heel-strike peak detection (7 coefficients).
+inline constexpr std::array<double, 7> kPeakDetection = {
+    3.6515, 0.1667, 20.0, 10.0, 1.5, 1.0, 0.025
+};
+// §231 — samepos[]: same-position contact handling (8 coefficients).
+inline constexpr std::array<double, 8> kSamepos = {
+    0.02, 0.02, 0.07, 0.05, 0.005, 0.005, 0.15, 0.8
+};
+// §42.3 — outlier rejection thresholds.
+struct OutlierRej {
+    double outRejTh1;             // 100
+    double outRejTh2;             // 10
+    double outRejTh3;             // 2.5
+    double jointResTh[6];         // §42.3 outRejJointResTh1..6
+    double footSlidingTh[3];      // §42.3 outRejFootSlidingTh1/2/3
+    double countTh[3];            // §42.3 outRejCountTh
+    double jointResWin1;          // 0.1  (s)
+    double jointResWin2;          // 0.05 (s)
+};
+inline constexpr OutlierRej kOutlierRej = {
+    .outRejTh1    = 100.0,
+    .outRejTh2    = 10.0,
+    .outRejTh3    = 2.5,
+    .jointResTh   = { 0.000625, 0.005, 0.035, 0.002, 0.0075, 0.000625 },
+    .footSlidingTh= { 0.3, 0.07, 0.9 },
+    .countTh      = { 0.2, 0.4, 0.4 },
+    .jointResWin1 = 0.1,
+    .jointResWin2 = 0.05,
+};
+
+// §52.6 — multi-level floor bank (stairs).
+struct MultiLevelParams {
+    int    averagingStairHeight;     // 5    (number of steps to average)
+    double maxDevFromAvgStairHeight; // 0.05 m
+    int    maxLevelsToDetectStairWalking; // 10
+    double newLevelMeasureThreshold; // 0.03
+    double sameLevelMargin;          // 0.09
+    double zhcClipSdVertical;        // 0.005
+    double zhcLevelMargin1;          // 0.12
+    double zhcLevelMargin2;          // 0.09
+    double zhcMaximumLikelihood;     // 0.9
+    double zhcMaxLikelihoodBoost;    // 1000
+    double zhcMinimumLikelihood;     // 0.4
+};
+inline constexpr MultiLevelParams kMultiLevel = {
+    .averagingStairHeight          = 5,
+    .maxDevFromAvgStairHeight      = 0.05,
+    .maxLevelsToDetectStairWalking = 10,
+    .newLevelMeasureThreshold      = 0.03,
+    .sameLevelMargin               = 0.09,
+    .zhcClipSdVertical             = 0.005,
+    .zhcLevelMargin1               = 0.12,
+    .zhcLevelMargin2               = 0.09,
+    .zhcMaximumLikelihood          = 0.9,
+    .zhcMaxLikelihoodBoost         = 1000.0,
+    .zhcMinimumLikelihood          = 0.4,
+};
+
+// §51.6 — FOX_Calib.e_* per-region magnetic calibration constants (deg / unitless).
+// These are expected per-segment dips and field-norm fractions, used by the
+// per-segment magnetometer-gate to compensate for body-mounted distortion
+// (different limbs see different external fields due to magnetisation of the
+// suit hardware).
+struct CalibMagE {
+    double e_dip_mag;        // 78°  primary expected dip (body sensors)
+    double e_dip_mag2;       // 85°  secondary (auxiliary placement)
+    double e_incl_arm;       // 30°  expected N-pose arm inclination
+    double e_inclx_pelvis;   // 45°  expected pelvis X-inclination
+    double e_inclx_sternum;  // 40°  for T8
+    double e_incly_pelvis;   // 25°
+    double e_mag_diff;       // 0.5  max field diff between segments
+    double e_mag_feet;       // 2.2  field coefficient for feet
+    double e_mag_pelvis;     // 1.5
+    double e_mag_pelvis2;    // 0.5
+    double e_norm_hands;     // 0.35 expected field norm for hands
+    double e_norm_head;      // 0.3
+    double e_norm_pelvis;    // 0.2
+    double e_sternum_pelvis; // 25°  T8↔Pelvis difference
+};
+inline constexpr CalibMagE kCalibMagE = {
+    .e_dip_mag        = 78.0,
+    .e_dip_mag2       = 85.0,
+    .e_incl_arm       = 30.0,
+    .e_inclx_pelvis   = 45.0,
+    .e_inclx_sternum  = 40.0,
+    .e_incly_pelvis   = 25.0,
+    .e_mag_diff       = 0.5,
+    .e_mag_feet       = 2.2,
+    .e_mag_pelvis     = 1.5,
+    .e_mag_pelvis2    = 0.5,
+    .e_norm_hands     = 0.35,
+    .e_norm_head      = 0.3,
+    .e_norm_pelvis    = 0.2,
+    .e_sternum_pelvis = 25.0,
+};
+
+// §87 / §1582 — foot contact-point local coordinates (metres, segment frame).
+// Points enumerated in spec §44.10 (point ids match): 3=pHeel, 4=p1stMet,
+// 5=p5thMet, 6=pBall/Toe.  Y is mirrored for the left foot.
+struct FootPoint {
+    int       pointId;             // §44.10 point index
+    QVector3D r_local;             // local-frame coordinate (m)
+};
+inline constexpr std::array<FootPoint, 4> kFootPointsRight = {{
+    { 3, QVector3D(-0.036f,  0.000f, -0.080f) },   // pHeel
+    { 4, QVector3D( 0.116f, -0.038f, -0.080f) },   // p1stMet
+    { 5, QVector3D( 0.116f,  0.036f, -0.080f) },   // p5thMet
+    { 6, QVector3D( 0.140f,  0.000f, -0.080f) },   // pBall/Toe6
+}};
+inline constexpr std::array<FootPoint, 4> kFootPointsLeft = {{
+    { 3, QVector3D(-0.036f,  0.000f, -0.080f) },
+    { 4, QVector3D( 0.116f,  0.038f, -0.080f) },
+    { 5, QVector3D( 0.116f, -0.036f, -0.080f) },
+    { 6, QVector3D( 0.140f,  0.000f, -0.080f) },
+}};
+// §82, §86 — toe-tip point on Toe segment (point id 2 = pToe in the spec).
+inline constexpr QVector3D kToeTipPoint = QVector3D(0.064f, 0.0f, -0.015f);
+
+// §91–§93 — finger ROM (per joint, degrees).  Twenty hand joints per side
+// (matches FOX_Skeleton.rightHand.jointsCount=19 plus the wrist; we mirror
+// the same table for the left hand because the spec spells out only the
+// right-hand layout and notes (§93) that left is a Y-mirror).
+//
+// Order is the natural digit order: thumb → index → middle → ring → little,
+// with each finger contributing CMC/MCP/PIP/DIP except the thumb which is
+// CMC/MCP/IP (3 joints).  Total: 3 + 4·4 = 19 joints per hand.
+struct FingerRom {
+    const char* label;
+    double flxMin, flxMax;   // flexion / extension (Y)
+    double abdMin, abdMax;   // abduction / adduction (X — only at MCP)
+    double rotMin, rotMax;   // axial rotation (Z — only at thumb CMC)
+};
+inline constexpr std::array<FingerRom, 19> kFingerRom = {{
+    /* 0  thumb CMC (saddle) */ { "TM_CMC",   -15.0,  60.0,  -45.0,  45.0,  -20.0, 30.0 },
+    /* 1  thumb MCP          */ { "TM_MCP",     0.0,  60.0,   -5.0,   5.0,    0.0,  0.0 },
+    /* 2  thumb IP           */ { "TM_IP",    -10.0,  80.0,    0.0,   0.0,    0.0,  0.0 },
+    /* 3  index MCP          */ { "II_MCP",   -20.0,  90.0,  -25.0,  25.0,    0.0,  0.0 },
+    /* 4  index PIP          */ { "II_PIP",     0.0, 110.0,    0.0,   0.0,    0.0,  0.0 },
+    /* 5  index DIP          */ { "II_DIP",     0.0,  80.0,    0.0,   0.0,    0.0,  0.0 },
+    /* 6  middle MCP         */ { "MI_MCP",   -20.0,  90.0,  -25.0,  25.0,    0.0,  0.0 },
+    /* 7  middle PIP         */ { "MI_PIP",     0.0, 110.0,    0.0,   0.0,    0.0,  0.0 },
+    /* 8  middle DIP         */ { "MI_DIP",     0.0,  80.0,    0.0,   0.0,    0.0,  0.0 },
+    /* 9  ring MCP           */ { "RI_MCP",   -20.0,  90.0,  -25.0,  25.0,    0.0,  0.0 },
+    /* 10 ring PIP           */ { "RI_PIP",     0.0, 110.0,    0.0,   0.0,    0.0,  0.0 },
+    /* 11 ring DIP           */ { "RI_DIP",     0.0,  80.0,    0.0,   0.0,    0.0,  0.0 },
+    /* 12 little MCP         */ { "LI_MCP",   -20.0,  90.0,  -30.0,  30.0,    0.0,  0.0 },
+    /* 13 little PIP         */ { "LI_PIP",     0.0, 110.0,    0.0,   0.0,    0.0,  0.0 },
+    /* 14 little DIP         */ { "LI_DIP",     0.0,  80.0,    0.0,   0.0,    0.0,  0.0 },
+    /* 15 carpus rotate      */ { "Carpus",   -10.0,  10.0,    0.0,   0.0,    0.0,  0.0 },
+    /* 16 thumb opposition   */ { "TM_OPP",     0.0,  45.0,    0.0,   0.0,    0.0,  0.0 },
+    /* 17 finger spread      */ { "Spread",   -20.0,  20.0,    0.0,   0.0,    0.0,  0.0 },
+    /* 18 reserved / fillers */ { "RSV",       -5.0,   5.0,    0.0,   0.0,    0.0,  0.0 },
+}};
+
+// §44.12 — pose-quality residual bands (mean |r| across active rows).
+inline constexpr std::array<double, 5> kPoseQualityResidBands = {
+    0.005, 0.02, 0.05, 0.1, 1.0      // <0.005 excellent, ..., >0.1 invalid
+};
+// Pose quality integer band names — match spec §44.12.
+enum PoseQualityBand : int {
+    PoseQualityInvalid   = 0,
+    PoseQualityPoor      = 1,
+    PoseQualityAdequate  = 2,
+    PoseQualityGood      = 3,
+    PoseQualityExcellent = 4,
+};
+inline int poseQualityFromResidual(double residual) {
+    if (residual < kPoseQualityResidBands[0]) return PoseQualityExcellent;
+    if (residual < kPoseQualityResidBands[1]) return PoseQualityGood;
+    if (residual < kPoseQualityResidBands[2]) return PoseQualityAdequate;
+    if (residual < kPoseQualityResidBands[3]) return PoseQualityPoor;
+    return PoseQualityInvalid;
+}
 
 // ---------------------------------------------------------------------------
 //  §30.4 — per-joint ergonomic-extractor type (5 handlers).

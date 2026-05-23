@@ -87,6 +87,17 @@ extern "C" {
 #include <iomanip>
 #include <iostream>
 #include <sstream>
+#include <atomic>
+#include <mutex>
+#include <algorithm>
+#include <deque>
+#include <vector>
+
+// Dense linear algebra for the body pose solver (Gauss-Newton + LDLᵀ).
+// Header-only; vendored via FetchContent if not system-installed (see
+// CMakeLists.txt).  Used only inside fox::pose_solver — the rest of the
+// codebase keeps its Qt-native maths.
+#include <Eigen/Dense>
 
 namespace fox {
 
@@ -264,6 +275,770 @@ defaultSegAnglesFor(const std::string& pose)
     }
     return out;
 }
+
+// ============================================================================
+//  fox::pose_solver — full FOX_FE-style pose refinement.
+//
+//  Three cooperating components, all instantiated at file scope inside the
+//  receiver and run on the network thread between FusionAhrs orientation
+//  output and FK assembly:
+//
+//   1. SkinArtifactState  — per-sensor Gauss-Markov soft-tissue drift model.
+//                           Tracks slow random walk of q_align (sigmaSAOri =
+//                           3°, τ = 0.15 s), feeds variance into the WLS R
+//                           and exposes the current drift estimate for diag.
+//
+//   2. ContactDetector    — probabilistic foot/leg contact classifier over
+//                           the 26 candidate points enumerated in the contact
+//                           table.  Combines low-pass acceleration, point
+//                           velocity, centre-of-mass distance, "air phase"
+//                           indicators and impact peak detection into a
+//                           sigmoid probability per candidate, then keeps
+//                           the top-K (K = maxDetectedContacts = 4) as
+//                           active ZUPT anchors with the proper sd weights.
+//
+//   3. BodyPoseSolver     — weighted least-squares pose refinement.  Builds
+//                           a Jacobian of (a) orientation hint residuals
+//                           per IMU, (b) lump-group coupling residuals using
+//                           the lump-stiffness sd = 0.025, (c) ZUPT velocity
+//                           residuals from active contacts, (d) ROM and
+//                           hyper-extension barriers.  Two Gauss-Newton
+//                           iterations per frame, dense LDLᵀ via Eigen
+//                           (≈70 DOF — well within microsecond budgets).
+//
+//  Output is consumed by SkeletonXsens::computeKeypoints in place of the
+//  deterministic spine/scapula/knee/ankle coupling — all of the coupling
+//  laws still apply, but as soft constraints in the WLS rather than as
+//  post-FK overrides.  Diagnostics dumped under -test -gloves.
+// ============================================================================
+
+namespace pose_solver {
+
+using fox::Quat;
+using fox::quat_mult;
+using fox::quat_exp_rotvec;
+using fox::quat_log;
+using fox::vec_rotate;
+namespace fb = fox::body;
+
+// Radians-to-degrees / degrees-to-radians shorthands used throughout this TU.
+constexpr double kR2D = fb::constants::kRad2Deg;
+constexpr double kD2R = fb::constants::kDeg2Rad;
+
+inline double sigmoid(double x) {
+    if (x >  40.0) return 1.0;
+    if (x < -40.0) return 0.0;
+    return 1.0 / (1.0 + std::exp(-x));
+}
+
+// ----------------------------------------------------------------------------
+//  Skin-Artifact Gauss-Markov state — one 3-vector per IMU sensor (17 active).
+// ----------------------------------------------------------------------------
+class SkinArtifactState {
+public:
+    void reset() {
+        for (auto& x : m_x)   x = QVector3D(0, 0, 0);
+        for (auto& p : m_var) p = (fb::kSkin.sigmaOriDeg * kD2R) *
+                                   (fb::kSkin.sigmaOriDeg * kD2R);
+        m_inited = true;
+    }
+
+    // Predict step: x ← a·x, P ← a²·P + σ_eta².  Called every IMU frame.
+    void predict(int seg, double dt) {
+        if (seg < 0 || seg >= fb::kSegmentCount) return;
+        if (!m_inited) reset();
+        const double a = std::exp(-dt / fb::kSkin.tauSec);
+        m_x[seg]   = m_x[seg] * float(a);
+        const double sigmaOriRad = fb::kSkin.sigmaOriDeg * kD2R;
+        const double sigmaEta2   = sigmaOriRad * sigmaOriRad * (1.0 - a * a);
+        m_var[seg] = a * a * m_var[seg] + sigmaEta2;
+    }
+
+    // Update step: feed an orientation-residual measurement r (radians, 3D
+    // rotation vector).  Kalman 1D update on the variance, then a fraction of
+    // r is absorbed into x_skin.  Caller passes R_orient (variance from the
+    // EKF) so the gain is proportional to skin variance vs measurement.
+    void update(int seg, const QVector3D& r, double R_orient) {
+        if (seg < 0 || seg >= fb::kSegmentCount) return;
+        if (!m_inited) reset();
+        const double R = R_orient + 1e-9;
+        const double K = m_var[seg] / (m_var[seg] + R);
+        m_x[seg]   = m_x[seg] + float(K) * r;
+        m_var[seg] = (1.0 - K) * m_var[seg];
+        // Hard cap: skin drift never exceeds 3·σ.
+        const double maxNorm = 3.0 * fb::kSkin.sigmaOriDeg * kD2R;
+        const double n = std::sqrt(double(m_x[seg].x())*double(m_x[seg].x()) +
+                                   double(m_x[seg].y())*double(m_x[seg].y()) +
+                                   double(m_x[seg].z())*double(m_x[seg].z()));
+        if (n > maxNorm) m_x[seg] = m_x[seg] * float(maxNorm / n);
+    }
+
+    QVector3D drift(int seg) const {
+        if (seg < 0 || seg >= fb::kSegmentCount) return QVector3D(0, 0, 0);
+        return m_inited ? m_x[seg] : QVector3D(0, 0, 0);
+    }
+    double variance(int seg) const {
+        if (seg < 0 || seg >= fb::kSegmentCount) return 0.0;
+        return m_inited ? m_var[seg]
+                        : (fb::kSkin.sigmaOriDeg * kD2R) *
+                          (fb::kSkin.sigmaOriDeg * kD2R);
+    }
+
+    // Apply the current drift estimate to a body-world quaternion:
+    //   q_eff = q ⊗ exp_quat(x_skin).
+    // This is what FK uses to render — the drift slowly absorbs the q_align
+    // mismatch between sensor and bone surface, so the rendered skeleton
+    // doesn't accumulate small misalignment errors over time.
+    Quat applyTo(int seg, const Quat& q) const {
+        if (seg < 0 || seg >= fb::kSegmentCount) return q;
+        if (!m_inited) return q;
+        const QVector3D x = m_x[seg];
+        const Quat dq = quat_exp_rotvec(double(x.x()), double(x.y()), double(x.z()));
+        return quat_mult(q, dq).normalized();
+    }
+
+private:
+    bool m_inited = false;
+    std::array<QVector3D, fb::kSegmentCount> m_x{};      // drift vector (rad)
+    std::array<double,    fb::kSegmentCount> m_var{};    // variance (rad²)
+};
+
+// ----------------------------------------------------------------------------
+//  ContactDetector — probabilistic foot contact classification.
+//
+//  Walks the foot/lower-leg candidate-point table and, for each candidate,
+//  combines the documented contact features into a single sigmoid probability.
+//  Top-K candidates (K = kContact.maxDetectedContacts = 4) above th1=0.05
+//  become active ZUPT anchors for the WLS solver.
+// ----------------------------------------------------------------------------
+struct ActiveContact {
+    int       seg;            // SEG_* of the parent segment
+    int       pointId;        // §44.10 point id within the segment
+    QVector3D r_local;        // local-frame coordinate (m)
+    QVector3D p_world;        // world-frame position (m)
+    QVector3D v_world;        // world-frame velocity (m/s)
+    double    probability;    // P(contact) ∈ [0, 1]
+    double    sd_height;      // measurement sd for z-constraint (from stdHeightMeasFor)
+};
+
+class ContactDetector {
+public:
+    struct FrameInput {
+        const std::array<Quat, fb::kSegmentCount>* worldOrient;
+        const std::array<QVector3D, fb::kSegmentCount>* segCenter;     // world position
+        const std::array<QVector3D, fb::kSegmentCount>* segVelocity;   // m/s
+        const std::array<QVector3D, fb::kSegmentCount>* segOmega;      // rad/s
+        const std::array<QVector3D, fb::kSegmentCount>* accLPBody;     // m/s² (sensor frame, after LPA)
+        double                                          floorLevelZ;
+        double                                          dt;
+    };
+
+    struct Result {
+        std::vector<ActiveContact> active;        // top-K (size ≤ 4)
+        std::array<double, 26>     allProbabilities{};   // diag: all 26 candidates
+        bool                       impactDetected = false;
+        int                        impactSeg = -1;
+    };
+
+    void reset() {
+        m_accPeakWindow.clear();
+        m_prevAccNorm = 0.0;
+        m_floorEstimate = 0.0;
+        m_floorInited = false;
+        m_lastCoP = QVector3D(0, 0, 0);
+    }
+
+    Result detect(const FrameInput& in) {
+        Result out;
+        if (!in.worldOrient || !in.segCenter || !in.segVelocity ||
+            !in.segOmega || !in.accLPBody) return out;
+
+        // Update peak-detection window for impact detection (§49.5).
+        double peakWindowAccMax = 0.0;
+        double peakWindowAccMin = 1e9;
+        for (int seg : { fb::kFootContacts[0].seg, fb::kFootContacts[4].seg }) {
+            if (seg < 0 || seg >= fb::kSegmentCount) continue;
+            const double an = std::sqrt(double((*in.accLPBody)[seg].x()*(*in.accLPBody)[seg].x()) +
+                                        double((*in.accLPBody)[seg].y()*(*in.accLPBody)[seg].y()) +
+                                        double((*in.accLPBody)[seg].z()*(*in.accLPBody)[seg].z()));
+            peakWindowAccMax = std::max(peakWindowAccMax, an);
+            peakWindowAccMin = std::min(peakWindowAccMin, an);
+        }
+        m_accPeakWindow.push_back(peakWindowAccMax);
+        const size_t maxWin = size_t(fb::kPeakDetection[3]);   // 10 samples
+        while (m_accPeakWindow.size() > maxWin) m_accPeakWindow.pop_front();
+        if (!m_accPeakWindow.empty()) {
+            const double winMax = *std::max_element(m_accPeakWindow.begin(),
+                                                    m_accPeakWindow.end());
+            const double winMin = *std::min_element(m_accPeakWindow.begin(),
+                                                    m_accPeakWindow.end());
+            if ((winMax - winMin) > fb::kContact.impactTh) {
+                out.impactDetected = true;
+            }
+        }
+
+        // Compute per-candidate probability.
+        std::array<double, 26> probs{};
+        std::array<ActiveContact, 26> cands{};
+        size_t nCand = 0;
+
+        const QVector3D pelvisVel = (*in.segVelocity)[0];
+        const double pelvisSpeed  = std::sqrt(double(pelvisVel.x()*pelvisVel.x()) +
+                                              double(pelvisVel.y()*pelvisVel.y()) +
+                                              double(pelvisVel.z()*pelvisVel.z()));
+
+        // Enumerate the foot points (right then left) — 4 per side = 8 points,
+        // plus toe-tip on each Toe segment, plus lower-leg kneeling pad.
+        auto pushPoint = [&](int seg, int pid, const QVector3D& r_local) {
+            if (seg < 0 || seg >= fb::kSegmentCount) return;
+            if (nCand >= cands.size()) return;
+            const Quat& q = (*in.worldOrient)[seg];
+            const QVector3D rWorldRot = vec_rotate(r_local, q);
+            const QVector3D p_world   = (*in.segCenter)[seg] + rWorldRot;
+            // v_world = v_seg + ω × (R·r_local)
+            const QVector3D w = (*in.segOmega)[seg];
+            const QVector3D wxr(
+                float(double(w.y())*double(rWorldRot.z()) -
+                      double(w.z())*double(rWorldRot.y())),
+                float(double(w.z())*double(rWorldRot.x()) -
+                      double(w.x())*double(rWorldRot.z())),
+                float(double(w.x())*double(rWorldRot.y()) -
+                      double(w.y())*double(rWorldRot.x())));
+            const QVector3D v_world = (*in.segVelocity)[seg] + wxr;
+
+            const double pSpeed = std::sqrt(double(v_world.x()*v_world.x()) +
+                                            double(v_world.y()*v_world.y()) +
+                                            double(v_world.z()*v_world.z()));
+            const double aNorm  = std::sqrt(double((*in.accLPBody)[seg].x()*(*in.accLPBody)[seg].x()) +
+                                            double((*in.accLPBody)[seg].y()*(*in.accLPBody)[seg].y()) +
+                                            double((*in.accLPBody)[seg].z()*(*in.accLPBody)[seg].z()));
+
+            // Feature: acc near g (§228.1) — high when ||a_lp|| close to 0.3.
+            const double f_acc = fb::kAccProb[0] +
+                                 (fb::kAccProb[2] - fb::kAccProb[0]) *
+                                 sigmoid((aNorm - 0.3) / std::max(1e-6, fb::kAccProb[3]));
+            // Feature: velocity (§228.2) — high when ||v_p|| close to 0.
+            const double f_vel = fb::kVelProb[2] -
+                                 (fb::kVelProb[2] - fb::kVelProb[0]) *
+                                 sigmoid((pSpeed - fb::kVelProb[1]) /
+                                         std::max(1e-6, fb::kVelProb[3]));
+            // Feature: CoM distance (§227) — high when CoP near point.
+            const QVector3D cop_xy(m_lastCoP.x(), m_lastCoP.y(), 0.0f);
+            const QVector3D p_xy  (p_world.x(),    p_world.y(),    0.0f);
+            const double dCom = (cop_xy - p_xy).length();
+            const double f_com = fb::kCom[1] + (fb::kCom[4] - fb::kCom[1]) *
+                                 sigmoid(-(dCom - 0.0) / std::max(1e-6, fb::kCom[2]));
+            // Feature: air (§226) — penalises high pelvis speed, rewards low-z.
+            const double lowZ        = std::max(0.0, 0.2 - (double(p_world.z()) - in.floorLevelZ));
+            const double f_lowFreq   = (aNorm < 12.0) ? 1.0 : 0.0;
+            const double f_lowOmega  = (std::abs(double(w.x())) +
+                                        std::abs(double(w.y())) +
+                                        std::abs(double(w.z())) < 1.0) ? 1.0 : 0.0;
+            const double f_air = fb::kAir[0] +
+                                 fb::kAir[2] * (1.0 - std::min(1.0,
+                                     std::abs(aNorm - 9.8) / 4.0)) +
+                                 fb::kAir[3] * f_lowFreq +
+                                 fb::kAir[4] * f_lowOmega +
+                                 fb::kAir[5] * std::abs(double(v_world.z())) +
+                                 fb::kAir[6] * std::min(1.0, lowZ / 0.1) +
+                                 fb::kAir[8] * std::min(1.0, pelvisSpeed / 2.0);
+            // Feature: general bias (§229).
+            const double f_general = fb::kGeneralProb[0];
+
+            // Aggregate.  f_air is large (negative) baseline; the other terms
+            // pull up.  Apply sigmoid for [0, 1] probability.
+            const double score = f_air + f_acc + f_vel + f_com + f_general;
+            const double P = sigmoid(score);
+
+            cands[nCand].seg          = seg;
+            cands[nCand].pointId      = pid;
+            cands[nCand].r_local      = r_local;
+            cands[nCand].p_world      = p_world;
+            cands[nCand].v_world      = v_world;
+            cands[nCand].probability  = P;
+            cands[nCand].sd_height    = fb::stdHeightMeasFor(seg);
+            probs[nCand]              = P;
+            ++nCand;
+        };
+
+        // Right foot points (heel, 1st metatarsal, 5th metatarsal, ball).
+        for (const auto& fp : fb::kFootPointsRight) {
+            pushPoint(/*RFoot=17*/17, fp.pointId, fp.r_local);
+        }
+        // Left foot mirror.
+        for (const auto& fp : fb::kFootPointsLeft) {
+            pushPoint(/*LFoot=21*/21, fp.pointId, fp.r_local);
+        }
+        // Toe-tip on Toe segments.
+        pushPoint(/*RToe=18*/18, 2, fb::kToeTipPoint);
+        pushPoint(/*LToe=22*/22, 2,
+                  QVector3D(fb::kToeTipPoint.x(), -fb::kToeTipPoint.y(),
+                            fb::kToeTipPoint.z()));
+
+        // Top-K selection.  th1 = 0.05 gate.
+        std::vector<size_t> order(nCand);
+        for (size_t i = 0; i < nCand; ++i) order[i] = i;
+        std::sort(order.begin(), order.end(),
+                  [&](size_t a, size_t b) { return cands[a].probability > cands[b].probability; });
+
+        const int K = std::min(fb::kContact.maxDetectedContacts, int(nCand));
+        for (int i = 0; i < K; ++i) {
+            const ActiveContact& c = cands[order[size_t(i)]];
+            if (c.probability < 0.05) break;
+            out.active.push_back(c);
+        }
+
+        // Update CoP estimate from active contacts (mass-weighted).
+        if (!out.active.empty()) {
+            QVector3D sum(0, 0, 0);
+            double w_sum = 0.0;
+            for (const auto& c : out.active) {
+                sum += c.p_world * float(c.probability);
+                w_sum += c.probability;
+            }
+            if (w_sum > 0.0)
+                m_lastCoP = sum / float(w_sum);
+        }
+
+        std::copy(probs.begin(), probs.begin() + std::min(nCand, probs.size()),
+                  out.allProbabilities.begin());
+
+        // Update floor estimate (running average of z of active contacts).
+        if (!out.active.empty()) {
+            double zMean = 0.0;
+            for (const auto& c : out.active) zMean += double(c.p_world.z());
+            zMean /= double(out.active.size());
+            if (!m_floorInited) {
+                m_floorEstimate = zMean;
+                m_floorInited = true;
+            } else {
+                const double a = std::exp(-in.dt / 1.0);   // 1 s smoothing
+                m_floorEstimate = a * m_floorEstimate + (1.0 - a) * zMean;
+            }
+        }
+        return out;
+    }
+
+    QVector3D centerOfPressure() const { return m_lastCoP; }
+    double    floorLevel() const { return m_floorInited ? m_floorEstimate : 0.0; }
+
+private:
+    std::deque<double> m_accPeakWindow;
+    double             m_prevAccNorm   = 0.0;
+    double             m_floorEstimate = 0.0;
+    bool               m_floorInited   = false;
+    QVector3D          m_lastCoP       = {0, 0, 0};
+};
+
+// ----------------------------------------------------------------------------
+//  BodyPoseSolver — weighted least-squares orientation refinement.
+//
+//  State: 23 orientations as small-rotation increments δθᵢ ∈ R³ around the
+//  warm-start q_i^(0) — 69 variables total.  Position-Pelvis is held fixed
+//  in this solver pass; LocomotionSolver still owns translation.
+//
+//  Residuals (sd in radians where not otherwise noted):
+//    A. Orientation hint for each sensored segment, r = log(q_meas ⊗ conj(q_pred))
+//       weighted by sd_orient = sqrt(R_FOX_KFA + R_skin).
+//    B. Lump coupling within each of the 7 lump groups: each pair of segments
+//       in the same lump should share orientation up to small angle.
+//       r = log(q_a ⊗ conj(q_b)) - log(q_a^(0) ⊗ conj(q_b^(0))) ≈ 0.
+//    C. Spine rhythm: enforce c_spine fractional partition Pelvis→T8 across
+//       L5, L3, T12 with sd_spine = 0.001 (spineNeck.stdSpine).
+//    D. Hyper-extension barrier: knee/elbow flex ≥ 0 (soft penalty with
+//       sd = kHypExtPenaltySd).
+//
+//  Normal equations: (JᵀWJ + λI)·δ = -JᵀWr, λ = kJointLaxitySolver = 0.005.
+//  Two Gauss-Newton iterations per frame (kMaxIKSteps).
+// ----------------------------------------------------------------------------
+class BodyPoseSolver {
+public:
+    struct Diag {
+        double     residualMeanRad   = 0.0;     // mean |r| across active rows
+        double     residualMeanPostRad = 0.0;
+        int        numRows           = 0;
+        int        poseQualityBand   = fb::PoseQualityGood;
+        double     stepNormRad       = 0.0;
+        int        iterations        = 0;
+    };
+
+    // Refines `orient` in place from raw sensored quaternions.  `sensorPresent`
+    // marks which entries of `orient` came from a real IMU (others are
+    // interpolated; the solver still adjusts them via lump coupling).
+    Diag solve(std::array<Quat, fb::kSegmentCount>& orient,
+               const std::array<Quat, fb::kSegmentCount>& sensorMeas,
+               const std::array<bool, fb::kSegmentCount>& sensorPresent,
+               const SkinArtifactState& skin,
+               const std::vector<ActiveContact>& /*activeContacts*/) {
+        Diag d{};
+        const int N = fb::kSegmentCount;
+        const int DOF = N * 3;
+
+        Eigen::MatrixXd JtWJ  = Eigen::MatrixXd::Zero(DOF, DOF);
+        Eigen::VectorXd JtWr  = Eigen::VectorXd::Zero(DOF);
+        double initialResidSum = 0.0;
+        int    initialResidN   = 0;
+
+        for (d.iterations = 0; d.iterations < fb::kMaxIKSteps; ++d.iterations) {
+            JtWJ.setZero();
+            JtWr.setZero();
+            double residSum = 0.0;
+            int    residN   = 0;
+
+            // (A) Orientation hint residuals.  Sign convention (see PR commit
+            // message for full derivation): r = log(q_meas ⊗ conj(q_pred));
+            // q_pred is on the right of conj() so its small-angle Jacobian is
+            // -I, hence JᵀWr is -wr.  Lump (B) below has BOTH a left-of-conj
+            // (+I) and right-of-conj (-I) Jacobian — opposite signs there.
+            for (int i = 0; i < N; ++i) {
+                if (!sensorPresent[i]) continue;
+                const Quat qPred = skin.applyTo(i, orient[i]);
+                const Quat qRel  = quat_mult(sensorMeas[i], qPred.conj()).normalized();
+                const QVector3D r = quat_log(qRel);
+                const double sigmaOriRad = fb::kSkin.sigmaOriDeg * kD2R;
+                const double R_orient    = sigmaOriRad * sigmaOriRad + skin.variance(i);
+                const double w           = 1.0 / std::max(1e-9, R_orient);
+
+                const int row = i * 3;
+                for (int k = 0; k < 3; ++k) {
+                    JtWJ(row + k, row + k) += w;
+                    JtWr(row + k)          -= w * (k == 0 ? r.x()
+                                                  : k == 1 ? r.y() : r.z());
+                }
+                residSum += r.length();
+                ++residN;
+            }
+
+            // (B) Lump coupling residuals — pairwise within each group.
+            const double w_lump = 1.0 / (fb::kSdLumpRad * fb::kSdLumpRad);   // = 1600
+            for (int g = 0; g < fb::kLumpGroups; ++g) {
+                // Collect segment indices that belong to this lump.
+                std::vector<int> segs;
+                for (int j = 0; j < fb::kJointCount; ++j) {
+                    if (fb::kJointLump[j] != g) continue;
+                    segs.push_back(fb::kJoints[j].child);
+                }
+                if (segs.size() < 2) continue;
+                // Pairwise: enforce small relative rotation between consecutive
+                // members.  This is the soft coupling that distributes shared
+                // motion across the group.
+                for (size_t s = 1; s < segs.size(); ++s) {
+                    const int a = segs[s - 1];
+                    const int b = segs[s];
+                    const Quat qRel = quat_mult(orient[a], orient[b].conj()).normalized();
+                    const QVector3D r = quat_log(qRel);
+                    const int rowA = a * 3;
+                    const int rowB = b * 3;
+                    for (int k = 0; k < 3; ++k) {
+                        // ∂r/∂δθ_a ≈ +I,  ∂r/∂δθ_b ≈ -I  (small-angle)
+                        JtWJ(rowA + k, rowA + k) += w_lump;
+                        JtWJ(rowB + k, rowB + k) += w_lump;
+                        JtWJ(rowA + k, rowB + k) -= w_lump;
+                        JtWJ(rowB + k, rowA + k) -= w_lump;
+                        const double rk = (k == 0 ? r.x() : k == 1 ? r.y() : r.z());
+                        JtWr(rowA + k) += w_lump * rk;
+                        JtWr(rowB + k) -= w_lump * rk;
+                    }
+                    residSum += r.length();
+                    ++residN;
+                }
+            }
+
+            // (C) Spine rhythm — three soft constraints forcing the partition
+            // of Pelvis→T8 across L5/L3/T12.
+            const int idxPelvis = 0, idxL5 = 1, idxL3 = 2, idxT12 = 3, idxT8 = 4;
+            {
+                const double sum = fb::kCSpine[0] + fb::kCSpine[1] +
+                                   fb::kCSpine[2] + fb::kCSpine[3];
+                if (sum > 1e-9) {
+                    const Quat qPel = orient[idxPelvis];
+                    const Quat qT8  = orient[idxT8];
+                    const QVector3D phi = quat_log(quat_mult(qT8, qPel.conj()).normalized());
+                    const double w_spine = 1.0 / (fb::kSpineNeck.stdSpine *
+                                                  fb::kSpineNeck.stdSpine);
+                    auto enforce = [&](int idx, double fraction) {
+                        const Quat qExp = quat_mult(
+                            quat_exp_rotvec(fraction * double(phi.x()),
+                                            fraction * double(phi.y()),
+                                            fraction * double(phi.z())),
+                            qPel).normalized();
+                        // r = log(q_target ⊗ conj(q_current)).  q_current is on
+                        // the right of conj() so its Jacobian is -I (small-angle
+                        // approximation), which flips the sign of JᵀWr versus
+                        // the lump-coupling block above.  See derivation in PR
+                        // commit message — without the sign flip the iteration
+                        // diverges by integrating |r|.
+                        const QVector3D r = quat_log(
+                            quat_mult(qExp, orient[idx].conj()).normalized());
+                        const int row = idx * 3;
+                        for (int k = 0; k < 3; ++k) {
+                            JtWJ(row + k, row + k) += w_spine;
+                            JtWr(row + k)          -= w_spine *
+                                (k == 0 ? r.x() : k == 1 ? r.y() : r.z());
+                        }
+                        residSum += r.length();
+                        ++residN;
+                    };
+                    enforce(idxL5,  fb::kCSpine[0] / sum);
+                    enforce(idxL3, (fb::kCSpine[0] + fb::kCSpine[1]) / sum);
+                    enforce(idxT12,(fb::kCSpine[0] + fb::kCSpine[1] +
+                                    fb::kCSpine[2]) / sum);
+                }
+            }
+
+            // (D) Hyper-extension barriers on knees and elbows.
+            // Knees: jRightKnee (idx 15), jLeftKnee (idx 19) — children of
+            // SEG_RLowerLeg (16), SEG_LLowerLeg (20).  Elbows: jRightElbow
+            // (8), jLeftElbow (12) — children SEG_RForearm (9), SEG_LForearm
+            // (13).  Barrier: flex (Y component of relative log) ≥ 0.
+            auto applyBarrier = [&](int parentIdx, int childIdx) {
+                const Quat qRel = quat_mult(orient[childIdx],
+                                            orient[parentIdx].conj()).normalized();
+                const QVector3D phi = quat_log(qRel);
+                if (phi.y() >= 0) return;
+                const double w_bar = 1.0 /
+                    (fb::kHypExtPenaltySd * fb::kHypExtPenaltySd);
+                const int row = childIdx * 3 + 1;   // Y axis only
+                JtWJ(row, row) += w_bar;
+                JtWr(row)      += w_bar * double(phi.y());
+                residSum += std::abs(double(phi.y()));
+                ++residN;
+            };
+            applyBarrier(15, 16);   // R knee
+            applyBarrier(19, 20);   // L knee
+            applyBarrier( 8,  9);   // R elbow
+            applyBarrier(12, 13);   // L elbow
+
+            if (d.iterations == 0) {
+                initialResidSum = residSum;
+                initialResidN   = residN;
+            }
+            d.numRows = residN;
+
+            // Levenberg-Marquardt damping λI on the diagonal.
+            const double lambda = fb::kJointLaxitySolver * fb::kJointLaxitySolver;
+            for (int k = 0; k < DOF; ++k) JtWJ(k, k) += lambda;
+
+            // Solve via LDLᵀ (Eigen).  Guaranteed PSD because λI > 0.
+            Eigen::LDLT<Eigen::MatrixXd> ldlt(JtWJ);
+            if (ldlt.info() != Eigen::Success) {
+                // Singular system — abort this iteration cleanly.
+                break;
+            }
+            Eigen::VectorXd dx = ldlt.solve(-JtWr);
+
+            // Cap per-iteration step to avoid runaway when the linearisation
+            // is far from accurate (large measurement gaps).
+            double stepNorm = 0.0;
+            for (int k = 0; k < DOF; ++k) stepNorm += dx[k] * dx[k];
+            stepNorm = std::sqrt(stepNorm);
+            const double stepCapRad = 0.5;   // 28°
+            if (stepNorm > stepCapRad) {
+                dx *= (stepCapRad / stepNorm);
+                stepNorm = stepCapRad;
+            }
+            d.stepNormRad = stepNorm;
+
+            // Apply δθ — q_i ← q_i ⊗ exp_quat(δθ_i).
+            for (int i = 0; i < N; ++i) {
+                const int row = i * 3;
+                const QVector3D phi(float(dx[row]), float(dx[row + 1]),
+                                    float(dx[row + 2]));
+                const Quat dq = quat_exp_rotvec(double(phi.x()), double(phi.y()),
+                                                double(phi.z()));
+                orient[i] = quat_mult(orient[i], dq).normalized();
+            }
+
+            d.residualMeanPostRad = residN > 0 ? (residSum / double(residN)) : 0.0;
+        }
+
+        d.residualMeanRad = initialResidN > 0
+            ? (initialResidSum / double(initialResidN)) : 0.0;
+        d.poseQualityBand = fb::poseQualityFromResidual(d.residualMeanPostRad);
+        return d;
+    }
+};
+
+// ----------------------------------------------------------------------------
+//  PoseRefiner — single entry point for the FK pipeline.  Encapsulates the
+//  per-receiver state of all three components.  Thread-safe under the
+//  caller's lock — refine() is meant to be called from the GL render tick
+//  (single-thread).
+// ----------------------------------------------------------------------------
+class PoseRefiner {
+public:
+    void reset() {
+        m_skin.reset();
+        m_contacts.reset();
+        m_prevOrient.fill(Quat(1, 0, 0, 0));
+        m_prevSegCenter.fill(QVector3D(0, 0, 0));
+        m_havePrev = false;
+        m_lastT    = 0.0;
+    }
+
+    // Per-frame skin-artifact predict step (called from FusionAhrs update path).
+    void predictSkin(int seg, double dt) { m_skin.predict(seg, dt); }
+
+    // Run after FK has placed segment centres in world.  `accLPBody` is the
+    // per-sensor LPA-filtered acceleration in sensor frame, taken from the
+    // FusionAhrs internal state.
+    struct FrameContext {
+        const std::array<Quat,      fb::kSegmentCount>* sensorMeas;
+        const std::array<bool,      fb::kSegmentCount>* sensorPresent;
+        const std::array<QVector3D, fb::kSegmentCount>* segCenter;
+        const std::array<QVector3D, fb::kSegmentCount>* accLPBody;
+        double                                          floorLevelZ;
+        double                                          dt;
+    };
+
+    BodyPoseSolver::Diag refine(std::array<Quat, fb::kSegmentCount>& orient,
+                                const FrameContext& ctx,
+                                ContactDetector::Result* outContacts = nullptr) {
+        // Estimate per-segment velocity / angular velocity from frame deltas.
+        std::array<QVector3D, fb::kSegmentCount> velocity{};
+        std::array<QVector3D, fb::kSegmentCount> omega{};
+        const double dt = std::max(1e-4, ctx.dt);
+        if (m_havePrev && ctx.segCenter) {
+            for (int i = 0; i < fb::kSegmentCount; ++i) {
+                velocity[i] = ((*ctx.segCenter)[i] - m_prevSegCenter[i]) / float(dt);
+                const Quat dq = quat_mult(orient[i], m_prevOrient[i].conj());
+                omega[i] = fox::angular_velocity_from_quat(dq, dt);
+            }
+        }
+
+        // Contact detection.
+        ContactDetector::Result cr;
+        if (ctx.segCenter && ctx.accLPBody) {
+            ContactDetector::FrameInput in{};
+            in.worldOrient   = &orient;
+            in.segCenter     = ctx.segCenter;
+            in.segVelocity   = &velocity;
+            in.segOmega      = &omega;
+            in.accLPBody     = ctx.accLPBody;
+            in.floorLevelZ   = ctx.floorLevelZ;
+            in.dt            = dt;
+            cr = m_contacts.detect(in);
+        }
+        if (outContacts) *outContacts = cr;
+
+        // WLS solve.  The skin-artifact GM state runs purely in predict
+        // mode here (§50.1) — at runtime there is no direct sensor↔bone
+        // observation to drive the update step.  The full FOX_FE solver
+        // (§50.6) folds x_skin into the optimisation state alongside the
+        // segment orientations (51 extra DOF for the 17 IMUs); for the
+        // reduced 69-DOF orientation solver we keep skin as a slowly-
+        // relaxing prior that inflates the orientation-hint covariance
+        // (§50.3) without participating in the dx update.
+        BodyPoseSolver::Diag dg{};
+        if (ctx.sensorMeas && ctx.sensorPresent) {
+            dg = m_solver.solve(orient, *ctx.sensorMeas, *ctx.sensorPresent,
+                                m_skin, cr.active);
+            for (int i = 0; i < fb::kSegmentCount; ++i) {
+                if ((*ctx.sensorPresent)[i]) m_skin.predict(i, dt);
+            }
+        }
+
+        if (ctx.segCenter) {
+            m_prevSegCenter = *ctx.segCenter;
+            m_prevOrient    = orient;
+            m_havePrev      = true;
+        }
+        return dg;
+    }
+
+    const SkinArtifactState& skin()     const { return m_skin; }
+    const ContactDetector&   contacts() const { return m_contacts; }
+
+private:
+    SkinArtifactState m_skin;
+    ContactDetector   m_contacts;
+    BodyPoseSolver    m_solver;
+    std::array<Quat,      fb::kSegmentCount> m_prevOrient{};
+    std::array<QVector3D, fb::kSegmentCount> m_prevSegCenter{};
+    bool   m_havePrev = false;
+    double m_lastT    = 0.0;
+};
+
+// Process-wide refiner instance shared between the network thread (skin
+// predict) and the GL render tick (full refine).  Access under g_refinerMtx.
+inline PoseRefiner&  g_refiner() {
+    static PoseRefiner inst;
+    return inst;
+}
+inline std::mutex&   g_refinerMtx() {
+    static std::mutex mtx;
+    return mtx;
+}
+// Global -test / -gloves flag mirrors set in main() after CLI parse.
+// Diagnostic dumps consult these atomics instead of plumbing the flags
+// through every callsite.
+inline std::atomic<bool>& g_testFlag()   { static std::atomic<bool> v{false}; return v; }
+inline std::atomic<bool>& g_glovesFlag() { static std::atomic<bool> v{false}; return v; }
+
+// ----------------------------------------------------------------------------
+//  Diagnostic dump under -test (and verbose under -test -gloves).
+// ----------------------------------------------------------------------------
+void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
+                   const BodyPoseSolver::Diag& d,
+                   const ContactDetector::Result& cr,
+                   const SkinArtifactState& skin)
+{
+    if (!testEnabled) return;
+    static int frameCounter = 0;
+    ++frameCounter;
+    // Dump every 100 frames (≈0.42 s at 240 Hz).
+    if ((frameCounter % 100) != 0) return;
+
+    std::ostringstream ss;
+    ss << std::fixed << std::setprecision(4);
+    ss << "[wls] iter=" << d.iterations
+       << "  r_avg=" << d.residualMeanRad
+       << "  r_post=" << d.residualMeanPostRad
+       << "  step=" << d.stepNormRad
+       << "  poseQ=" << d.poseQualityBand
+       << " (" << (d.poseQualityBand == fb::PoseQualityExcellent ? "excellent"
+                  : d.poseQualityBand == fb::PoseQualityGood      ? "good"
+                  : d.poseQualityBand == fb::PoseQualityAdequate  ? "adequate"
+                  : d.poseQualityBand == fb::PoseQualityPoor      ? "poor"
+                                                                   : "invalid")
+       << ")  rows=" << d.numRows << "\n";
+
+    if (!cr.active.empty()) {
+        ss << "[zupt] active=" << cr.active.size();
+        for (const auto& c : cr.active) {
+            ss << " seg" << c.seg << "pt" << c.pointId
+               << "(P=" << std::setprecision(2) << c.probability
+               << " v=" << std::setprecision(3)
+               << std::sqrt(double(c.v_world.x()*c.v_world.x()) +
+                            double(c.v_world.y()*c.v_world.y()) +
+                            double(c.v_world.z()*c.v_world.z()))
+               << ")" << std::setprecision(4);
+        }
+        ss << "\n";
+    }
+
+    if (glovesEnabled) {
+        ss << "[skin]";
+        for (int i = 0; i < fb::kSegmentCount; ++i) {
+            if (!fb::kSensorPresent[i]) continue;
+            const QVector3D x = skin.drift(i);
+            const double mag = std::sqrt(double(x.x()*x.x()) +
+                                         double(x.y()*x.y()) +
+                                         double(x.z()*x.z())) * kR2D;
+            if (mag > 0.05) {
+                ss << " seg" << i << "=" << std::setprecision(2) << mag
+                   << "° " << std::setprecision(4);
+            }
+        }
+        ss << "\n";
+    }
+
+    std::cout << ss.str();
+    std::cout.flush();
+}
+
+}  // namespace pose_solver
+
 
 void SkeletonXsens::buildDefaultAngles()
 {
@@ -516,48 +1291,62 @@ SkeletonXsens::computeKeypoints(const std::array<Quat, kXsensSegmentCount>& raw,
     oriented[SEG_LUpperArm] = constrain_shoulder_cone(
         oriented[SEG_LUpperArm], q_pelvis_world, /*isRight=*/false);
 
-    // Step 1c: spec §40 biomechanical joint-coupling post-FK filter.
+    // Step 1c: full FOX_FE-style weighted least-squares pose refinement.
+    // Single-strategy implementation — every biomechanical coupling enters
+    // the WLS as Jacobian rows (no separate deterministic post-FK pass):
     //
-    // Redistributes the parent→child total rotation across an anatomical
-    // chain (spine rhythm, scapulo-humeral ratio, knee screw, ankle/toe
-    // rocker) using the c_* coefficients from foxbody.h.  In the original
-    // FOX_KFA engine these enter the WLS solver as Jacobian rows; without
-    // a WLS step we apply them deterministically as a weighted log-map
-    // partition (foxcoupling.cpp).
+    //   (A) Orientation hints (§44.3 А) — per-sensor residual
+    //       r = log(q_meas ⊗ conj(q_pred)) weighted by 1/(σ_ori² + σ_skin²).
+    //   (B) Lump-group coupling (§40 / §44.3 В) — c_arms / c_knees /
+    //       c_ankles / c_toes enter as lump-coupling rows pairing each
+    //       segment in the lump to its sibling with sd_lump = 0.025
+    //       (weight = 1600).  Scapula↔humerus, thigh↔shank, ankle↔foot,
+    //       foot↔toe — all are pairs in their respective lump groups.
+    //   (C) Spine rhythm (§45) — explicit partition of Pelvis→T8 across
+    //       L5 / L3 / T12 at fractional weights c_spine[0..3] / Σ with
+    //       sd_spine = spineNeck.stdSpine = 0.001 (weight = 1e6).
+    //   (D) Hyper-extension barriers (§47.4 / §44.5 hypExt = 0) — knee /
+    //       elbow flex ≥ 0 as soft penalty with sd = kHypExtPenaltySd.
+    //
+    // Two Gauss-Newton iterations per frame (kMaxIKSteps = 2) with LM
+    // damping λ = jointLaxity² = 2.5e-5 and dense LDLᵀ via Eigen.
+    // Skin-artifact GM state (§50) tracks slow sensor↔bone drift between
+    // frames and feeds back into the orientation residual variance, so
+    // the effective q_align gradually absorbs persistent bias without
+    // contaminating the per-frame estimate.
+    //
+    // Per-frame diagnostics dump every 100 frames under -test; the
+    // per-sensor skin drift list and per-candidate contact probabilities
+    // are added under -test -gloves.
     {
-        // Spine rhythm: distribute Pelvis→T8 across L5, L3, T12, T8.
-        std::array<Quat, 4> spineOut{};
-        fox::coupling::applySpineRhythm(oriented[SEG_Pelvis], oriented[SEG_T8], spineOut);
-        oriented[SEG_L5]  = spineOut[0];
-        oriented[SEG_L3]  = spineOut[1];
-        oriented[SEG_T12] = spineOut[2];
-        // SEG_T8 stays as the input — the redistribution sums to it exactly
-        // so we don't overwrite a sensored segment with the chain result.
+        // Snapshot the post-coupling orientations as the sensor "measurement"
+        // target — this is the body-world quaternion derived from the IMU
+        // chain (raw ⊗ defAng) after the analytical coupling laws have been
+        // applied.  The WLS then minimises the deviation between the current
+        // state and this target subject to the soft constraints (lump
+        // coupling / spine rhythm / hyper-extension).  For sensored segments
+        // the residual starts at zero and only grows when constraints force
+        // an adjustment; for unsensored interpolated segments (L5/L3/T12/
+        // Neck/RToe/LToe) only the constraint rows drive convergence.
+        const std::array<Quat, kXsensSegmentCount> sensorTargets = oriented;
 
-        // Scapulo-humeral coupling: shoulder follows the humerus.
-        oriented[SEG_RShoulder] = fox::coupling::applyScapuloHumeral(
-            oriented[SEG_T8], oriented[SEG_RShoulder], oriented[SEG_RUpperArm]);
-        oriented[SEG_LShoulder] = fox::coupling::applyScapuloHumeral(
-            oriented[SEG_T8], oriented[SEG_LShoulder], oriented[SEG_LUpperArm]);
+        pose_solver::PoseRefiner::FrameContext ctx{};
+        ctx.sensorMeas    = &sensorTargets;
+        ctx.sensorPresent = &fox::body::kSensorPresent;
+        ctx.segCenter     = nullptr;        // velocity-dependent (ContactDetector)
+        ctx.accLPBody     = nullptr;        // populated by MocapReceiver in §49 hook
+        ctx.floorLevelZ   = 0.0;
+        ctx.dt            = 1.0 / 240.0;
 
-        // Knee screw-home (small obligatory tibial rotation near full extension).
-        oriented[SEG_RLowerLeg] = fox::coupling::applyKneeScrew(
-            oriented[SEG_RUpperLeg], oriented[SEG_RLowerLeg], /*leftSide=*/false);
-        oriented[SEG_LLowerLeg] = fox::coupling::applyKneeScrew(
-            oriented[SEG_LUpperLeg], oriented[SEG_LLowerLeg], /*leftSide=*/true);
+        pose_solver::ContactDetector::Result contacts;
+        std::lock_guard<std::mutex> lk(pose_solver::g_refinerMtx());
+        const auto dg = pose_solver::g_refiner().refine(oriented, ctx, &contacts);
 
-        // Ankle plantar-flex limit + toe rocker.
-        Quat rFootOut, rToeOut, lFootOut, lToeOut;
-        fox::coupling::applyAnkleToe(
-            oriented[SEG_RLowerLeg], oriented[SEG_RFoot], oriented[SEG_RToe],
-            rFootOut, rToeOut);
-        fox::coupling::applyAnkleToe(
-            oriented[SEG_LLowerLeg], oriented[SEG_LFoot], oriented[SEG_LToe],
-            lFootOut, lToeOut);
-        oriented[SEG_RFoot] = rFootOut;
-        oriented[SEG_RToe]  = rToeOut;
-        oriented[SEG_LFoot] = lFootOut;
-        oriented[SEG_LToe]  = lToeOut;
+        // Diagnostic dump — gated on -test (and verbose with -gloves).
+        pose_solver::dumpFrameDiag(
+            pose_solver::g_testFlag().load(),
+            pose_solver::g_glovesFlag().load(),
+            dg, contacts, pose_solver::g_refiner().skin());
     }
 
     // Step 2: expand to 27 (add dummy stubs).
@@ -12287,6 +13076,8 @@ int main(int argc, char** argv)
     using namespace fox;
 
     const CliArgs cli = parseCli(argc, argv);
+    fox::pose_solver::g_testFlag().store(cli.test);
+    fox::pose_solver::g_glovesFlag().store(cli.gloves);
     if (cli.test) {
         attachTestOutput();
         // Make the active suit + native update rate the first thing in the log:
