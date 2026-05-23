@@ -65,8 +65,9 @@ Quat applyKneeScrew(const Quat& qUpperLegWorld,
                     bool leftSide);
 
 // Spec §48 — ankle plantar-flexion limit + toe rocker.  Applies the kCAnkles
-// limit (30° plantar) as a soft clamp and propagates a small toe lift when
-// the foot is plantar-flexed (kCToes[5] = sin5° threshold).
+// limit (30° plantar, 45° dorsi) as a soft clamp, eversion coupling
+// θ_ev_corr = c_ankles[0]·θ_ev + c_ankles[2]·sin(θ_plantar), and a piecewise
+// toe rocker that lifts the toe linearly between 5° and 30°.
 //
 // Inputs: shank, foot, toe (raw) in world frame; outputs: corrected foot,
 // corrected toe.
@@ -75,5 +76,21 @@ void applyAnkleToe(const Quat& qLowerLegWorld,
                    const Quat& qToeRawWorld,
                    Quat& qFootOut,
                    Quat& qToeOut);
+
+// Spec §45 — extended spinal distribution covering Pelvis → L5 → L3 → T12 →
+// T8 → Neck → Head with c_spine[5..8] cervical weights.
+void applySpineRhythmFull(const Quat& qPelvisWorld,
+                          const Quat& qT8World,
+                          const Quat& qHeadWorld,
+                          Quat& outL5, Quat& outL3, Quat& outT12,
+                          Quat& outT8, Quat& outNeck, Quat& outHead);
+
+// Spec §47.4 — soft hyper-extension barrier (knee, elbow).
+Quat applyHyperExtensionBarrier(const Quat& qParentWorld,
+                                const Quat& qChildWorld);
+
+// Spec §48.2 — toe rocker weights for a given metatarsal-phalangeal angle.
+struct ToeRockerWeights { double heel; double toe; };
+ToeRockerWeights toeRockerWeights(double thetaToeRad);
 
 }  // namespace fox::coupling
