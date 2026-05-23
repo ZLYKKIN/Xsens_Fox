@@ -250,4 +250,78 @@ QVector3D angular_velocity_from_quat(const Quat& dq, double dtSec)
     return QVector3D(float(k*dq.x), float(k*dq.y), float(k*dq.z));
 }
 
+// Spec §174.2 — Jacobi eigendecomposition of 4×4 symmetric.  Cyclic
+// sweeps over off-diagonals; converges in ~6–8 sweeps for the matrix
+// sizes we feed it.  Modifies A in place (eigenvalues on diagonal);
+// U receives the eigenvector columns.
+void jacobiSym4(double A[4][4], double U[4][4])
+{
+    for (int i = 0; i < 4; ++i)
+        for (int j = 0; j < 4; ++j)
+            U[i][j] = (i == j) ? 1.0 : 0.0;
+
+    for (int sweep = 0; sweep < 60; ++sweep) {
+        int p = 0, q = 1;
+        double maxOff = std::abs(A[0][1]);
+        for (int i = 0; i < 4; ++i) {
+            for (int j = i + 1; j < 4; ++j) {
+                if (std::abs(A[i][j]) > maxOff) {
+                    maxOff = std::abs(A[i][j]); p = i; q = j;
+                }
+            }
+        }
+        if (maxOff < 1e-14) break;
+
+        const double app = A[p][p];
+        const double aqq = A[q][q];
+        const double apq = A[p][q];
+        double t;
+        if (std::abs(apq) < 1e-300) { t = 0.0; }
+        else {
+            const double theta = (aqq - app) / (2.0 * apq);
+            t = (theta >= 0 ? 1.0 : -1.0) / (std::abs(theta) + std::sqrt(theta*theta + 1.0));
+        }
+        const double c = 1.0 / std::sqrt(t*t + 1.0);
+        const double s = t * c;
+
+        A[p][p] = app - t * apq;
+        A[q][q] = aqq + t * apq;
+        A[p][q] = A[q][p] = 0.0;
+        for (int k = 0; k < 4; ++k) {
+            if (k == p || k == q) continue;
+            const double akp = A[k][p];
+            const double akq = A[k][q];
+            A[k][p] = A[p][k] = c * akp - s * akq;
+            A[k][q] = A[q][k] = s * akp + c * akq;
+        }
+        for (int k = 0; k < 4; ++k) {
+            const double ukp = U[k][p];
+            const double ukq = U[k][q];
+            U[k][p] = c * ukp - s * ukq;
+            U[k][q] = s * ukp + c * ukq;
+        }
+    }
+}
+
+// Spec §174.2 — Markley/Shepard 4-D eigenvector quaternion average.
+Quat quat_avg_markley(const std::vector<Quat>& samples)
+{
+    if (samples.empty()) return Quat(1, 0, 0, 0);
+    double M[4][4] = {{0,0,0,0},{0,0,0,0},{0,0,0,0},{0,0,0,0}};
+    for (const Quat& q : samples) {
+        const double v[4] = { q.w, q.x, q.y, q.z };
+        for (int i = 0; i < 4; ++i)
+            for (int j = 0; j < 4; ++j)
+                M[i][j] += v[i] * v[j];
+    }
+    double U[4][4];
+    jacobiSym4(M, U);
+    int kmax = 0;
+    for (int k = 1; k < 4; ++k)
+        if (M[k][k] > M[kmax][kmax]) kmax = k;
+    Quat q(U[0][kmax], U[1][kmax], U[2][kmax], U[3][kmax]);
+    if (q.w < 0.0) q = Quat(-q.w, -q.x, -q.y, -q.z);
+    return q.normalized();
+}
+
 }  // namespace fox

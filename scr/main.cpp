@@ -594,66 +594,6 @@ SkeletonXsens::computeKeypoints(const std::array<Quat, kXsensSegmentCount>& raw,
     return kp;
 }
 
-// ============================================================================
-//  Calibration AHRS-init helper — analytic ecompass orientation consumed by
-//  the double/triple-pose sensor-to-segment solver.  The live per-segment
-//  attitude filter is the xio Fusion library (see MocapReceiver::run); the
-//  hand-rolled Madgwick filter that used to live here was unused and removed.
-// ============================================================================
-
-// ecompass analytical init — from acc (gravity) + mag (horizontal north).
-// Returns an NED quaternion identical to ahrs.common.orientation.ecompass
-// with frame="NED", representation="quaternion".
-static Quat ecompassNED(const QVector3D& a, const QVector3D& m)
-{
-    // Build rotation matrix whose rows are sensor-axes expressed in NED.
-    QVector3D down = -a.normalized();                 // gravity points up in sensor
-    // Degenerate guard: when the magnetic vector is (nearly) parallel to
-    // gravity, cross(down, m) collapses to ~0 and the basis is undefined.
-    // Fall back to any axis perpendicular to `down` so the matrix stays
-    // orthonormal and finite — yaw is then arbitrary, but the caller's
-    // residual check rejects such a pose anyway.
-    QVector3D east = QVector3D::crossProduct(down, m);
-    if (east.lengthSquared() < 1e-12f) {
-        east = QVector3D::crossProduct(down, QVector3D(1, 0, 0));
-        if (east.lengthSquared() < 1e-12f)
-            east = QVector3D::crossProduct(down, QVector3D(0, 1, 0));
-    }
-    east.normalize();
-    QVector3D north = QVector3D::crossProduct(east, down).normalized();
-    // R: rows = north, east, down  (NED) — world basis in sensor frame.
-    const double m00 = north.x(), m01 = north.y(), m02 = north.z();
-    const double m10 = east.x(),  m11 = east.y(),  m12 = east.z();
-    const double m20 = down.x(),  m21 = down.y(),  m22 = down.z();
-    const double tr = m00 + m11 + m22;
-    Quat q;
-    if (tr > 0.0) {
-        const double s = 0.5 / std::sqrt(tr + 1.0);
-        q.w = 0.25 / s;
-        q.x = (m21 - m12) * s;
-        q.y = (m02 - m20) * s;
-        q.z = (m10 - m01) * s;
-    } else if (m00 > m11 && m00 > m22) {
-        const double s = 2.0 * std::sqrt(1.0 + m00 - m11 - m22);
-        q.w = (m21 - m12) / s;
-        q.x = 0.25 * s;
-        q.y = (m01 + m10) / s;
-        q.z = (m02 + m20) / s;
-    } else if (m11 > m22) {
-        const double s = 2.0 * std::sqrt(1.0 + m11 - m00 - m22);
-        q.w = (m02 - m20) / s;
-        q.x = (m01 + m10) / s;
-        q.y = 0.25 * s;
-        q.z = (m12 + m21) / s;
-    } else {
-        const double s = 2.0 * std::sqrt(1.0 + m22 - m00 - m11);
-        q.w = (m10 - m01) / s;
-        q.x = (m02 + m20) / s;
-        q.y = (m12 + m21) / s;
-        q.z = 0.25 * s;
-    }
-    return q.normalized();
-}
 
 // ============================================================================
 //  LocomotionSolver — direct port of the contract observed in the
@@ -836,106 +776,6 @@ static Quat matToQuat(double m00, double m01, double m02,
     return q.normalized();
 }
 
-// ---------- TRIAD (double-pose) sensor-to-body solver ----------
-//
-// Given two linearly-independent vector observations made in BOTH the body
-// frame AND the sensor frame, return the rotation R_sensor_to_body such
-// that R * v_sensor ≈ v_body for both pairs.
-//
-// In our pipeline: v1 = gravity in T-pose, v2 = gravity in N-pose.  Both
-// are unit vectors (normalised).  For segments where the two body-frame
-// gravity vectors are NEARLY parallel (torso, legs, feet — body is upright
-// in both poses) TRIAD degenerates; the caller must fall back to the
-// ecompass single-pose estimate.
-//
-// Returned quaternion rotates sensor-frame vectors into body-frame —
-// this is what we store as `s2sInv` in MocapReceiver.  `s2s` itself is
-// the inverse (body → sensor).
-static Quat triadSolve(const QVector3D& v1b, const QVector3D& v2b,
-                       const QVector3D& v1s, const QVector3D& v2s)
-{
-    const QVector3D r1 = v1b.normalized();
-    const QVector3D r2raw = QVector3D::crossProduct(v1b, v2b);
-    const QVector3D r2 = r2raw.normalized();
-    const QVector3D r3 = QVector3D::crossProduct(r1, r2).normalized();
-
-    const QVector3D s1 = v1s.normalized();
-    const QVector3D s2raw = QVector3D::crossProduct(v1s, v2s);
-    const QVector3D s2 = s2raw.normalized();
-    const QVector3D s3 = QVector3D::crossProduct(s1, s2).normalized();
-
-    // R = r1 s1^T + r2 s2^T + r3 s3^T — rotation mapping s_k → r_k.
-    const double m00 = r1.x()*s1.x() + r2.x()*s2.x() + r3.x()*s3.x();
-    const double m01 = r1.x()*s1.y() + r2.x()*s2.y() + r3.x()*s3.y();
-    const double m02 = r1.x()*s1.z() + r2.x()*s2.z() + r3.x()*s3.z();
-    const double m10 = r1.y()*s1.x() + r2.y()*s2.x() + r3.y()*s3.x();
-    const double m11 = r1.y()*s1.y() + r2.y()*s2.y() + r3.y()*s3.y();
-    const double m12 = r1.y()*s1.z() + r2.y()*s2.z() + r3.y()*s3.z();
-    const double m20 = r1.z()*s1.x() + r2.z()*s2.x() + r3.z()*s3.x();
-    const double m21 = r1.z()*s1.y() + r2.z()*s2.y() + r3.z()*s3.y();
-    const double m22 = r1.z()*s1.z() + r2.z()*s2.z() + r3.z()*s3.z();
-    const double det = m00 * (m11*m22 - m12*m21)
-                     - m01 * (m10*m22 - m12*m20)
-                     + m02 * (m10*m21 - m11*m20);
-    double mm00 = m00, mm01 = m01, mm02 = m02;
-    double mm10 = m10, mm11 = m11, mm12 = m12;
-    double mm20 = m20, mm21 = m21, mm22 = m22;
-    if (det < 0.0) {
-        mm00 = -mm00; mm10 = -mm10; mm20 = -mm20;
-    }
-    Quat q = matToQuat(mm00, mm01, mm02, mm10, mm11, mm12, mm20, mm21, mm22);
-    if (q.w < 0.0) {
-        q = Quat(-q.w, -q.x, -q.y, -q.z);
-    }
-    return q;
-}
-
-static double triadResidualDeg(const Quat& q_s2b,
-                               const QVector3D& v1b, const QVector3D& v2b,
-                               const QVector3D& v1s, const QVector3D& v2s)
-{
-    auto angBetweenDeg = [](const QVector3D& a, const QVector3D& b) -> double {
-        const double na = double(a.length()), nb = double(b.length());
-        if (na < 1e-9 || nb < 1e-9) return 0.0;
-        const double c = double(QVector3D::dotProduct(a, b)) / (na * nb);
-        const double cc = c > 1.0 ? 1.0 : (c < -1.0 ? -1.0 : c);
-        return std::acos(cc) * 180.0 / M_PI;
-    };
-    const QVector3D r1 = vec_rotate(v1s.normalized(), q_s2b);
-    const QVector3D r2 = vec_rotate(v2s.normalized(), q_s2b);
-    return std::max(angBetweenDeg(r1, v1b.normalized()),
-                    angBetweenDeg(r2, v2b.normalized()));
-}
-
-// One candidate observation pair for the double-pose TRIAD solver.
-struct TriadPairCand {
-    float sep;                       // |cross(b1,b2)| — pose separation
-    QVector3D b1, b2, s1, s2;        // body- and sensor-frame observations
-    const char* name;
-};
-
-// Pick the lowest-residual TRIAD solution among candidate pairs (skipping pairs
-// whose separation is too small to be well-conditioned).
-static void bestTriadOfPairs(const TriadPairCand (&cands)[3],
-                             Quat& outQ, double& outResidualDeg,
-                             const char*& outName, float& outSep)
-{
-    outQ = Quat(1, 0, 0, 0);
-    outResidualDeg = 999.0;
-    outName = "none";
-    outSep = 0.0f;
-    for (const auto& c : cands) {
-        if (c.sep <= 0.3f) continue;
-        const Quat q = triadSolve(c.b1, c.b2, c.s1, c.s2);
-        const double r = triadResidualDeg(q, c.b1, c.b2, c.s1, c.s2);
-        if (r < outResidualDeg) {
-            outResidualDeg = r;
-            outQ = q;
-            outName = c.name;
-            outSep = c.sep;
-        }
-    }
-}
 
 static double mirrorYDeviationDeg(const Quat& qR, const Quat& qL)
 {
@@ -954,264 +794,9 @@ static double parallelDeviationDeg(const Quat& qR, const Quat& qL)
     return 2.0 * std::acos(dot) * 180.0 / M_PI;
 }
 
-static double ecompResidualDeg(const Quat& q_s2b,
-                               const QVector3D& vb, const QVector3D& vs)
-{
-    const QVector3D r = vec_rotate(vs.normalized(), q_s2b);
-    const QVector3D b = vb.normalized();
-    const double na = double(r.length()), nb = double(b.length());
-    if (na < 1e-9 || nb < 1e-9) return 0.0;
-    double c = double(QVector3D::dotProduct(r, b)) / (na * nb);
-    if (c < 0.0) c = -c;
-    if (c > 1.0) c = 1.0;
-    return std::acos(c) * 180.0 / M_PI;
-}
 
-static double confidenceFromResidual(double residualDeg, int mode)
-{
-    if (mode == 2) return 0.0;
-    const double r = residualDeg;
-    double c;
-    if (r <= 3.0)       c = 1.0;
-    else if (r <= 10.0) c = 1.0 - (r - 3.0) / 7.0 * 0.4;
-    else if (r <= 20.0) c = 0.6 - (r - 10.0) / 10.0 * 0.3;
-    else if (r <= 40.0) c = 0.3 - (r - 20.0) / 20.0 * 0.3;
-    else                c = 0.0;
-    if (mode == 1) c *= 0.85;
-    if (c < 0.0) c = 0.0;
-    if (c > 1.0) c = 1.0;
-    return c;
-}
 
-static void jacobiSym4(double A[4][4], double U[4][4])
-{
-    for (int i = 0; i < 4; ++i)
-        for (int j = 0; j < 4; ++j)
-            U[i][j] = (i == j) ? 1.0 : 0.0;
 
-    for (int sweep = 0; sweep < 60; ++sweep) {
-        int p = 0, q = 1;
-        double maxOff = std::abs(A[0][1]);
-        for (int i = 0; i < 4; ++i) {
-            for (int j = i + 1; j < 4; ++j) {
-                if (std::abs(A[i][j]) > maxOff) {
-                    maxOff = std::abs(A[i][j]); p = i; q = j;
-                }
-            }
-        }
-        if (maxOff < 1e-14) break;
-
-        const double app = A[p][p];
-        const double aqq = A[q][q];
-        const double apq = A[p][q];
-        double t;
-        if (std::abs(apq) < 1e-300) { t = 0.0; }
-        else {
-            const double theta = (aqq - app) / (2.0 * apq);
-            t = (theta >= 0 ? 1.0 : -1.0) / (std::abs(theta) + std::sqrt(theta*theta + 1.0));
-        }
-        const double c = 1.0 / std::sqrt(t*t + 1.0);
-        const double s = t * c;
-
-        A[p][p] = app - t * apq;
-        A[q][q] = aqq + t * apq;
-        A[p][q] = A[q][p] = 0.0;
-        for (int k = 0; k < 4; ++k) {
-            if (k == p || k == q) continue;
-            const double akp = A[k][p];
-            const double akq = A[k][q];
-            A[k][p] = A[p][k] = c * akp - s * akq;
-            A[k][q] = A[q][k] = s * akp + c * akq;
-        }
-        for (int k = 0; k < 4; ++k) {
-            const double ukp = U[k][p];
-            const double ukq = U[k][q];
-            U[k][p] = c * ukp - s * ukq;
-            U[k][q] = s * ukp + c * ukq;
-        }
-    }
-}
-
-static void jacobiSym3(double A[3][3], double U[3][3])
-{
-    for (int i = 0; i < 3; ++i)
-        for (int j = 0; j < 3; ++j)
-            U[i][j] = (i == j) ? 1.0 : 0.0;
-
-    for (int sweep = 0; sweep < 40; ++sweep) {
-        int p = 0, q = 1;
-        double maxOff = std::abs(A[0][1]);
-        const double off02 = std::abs(A[0][2]);
-        const double off12 = std::abs(A[1][2]);
-        if (off02 > maxOff) { maxOff = off02; p = 0; q = 2; }
-        if (off12 > maxOff) { maxOff = off12; p = 1; q = 2; }
-        if (maxOff < 1e-14) break;
-
-        const double app = A[p][p];
-        const double aqq = A[q][q];
-        const double apq = A[p][q];
-        double t;
-        if (std::abs(apq) < 1e-300) { t = 0.0; }
-        else {
-            const double theta = (aqq - app) / (2.0 * apq);
-            t = (theta >= 0 ? 1.0 : -1.0) / (std::abs(theta) + std::sqrt(theta*theta + 1.0));
-        }
-        const double c = 1.0 / std::sqrt(t*t + 1.0);
-        const double s = t * c;
-
-        A[p][p] = app - t * apq;
-        A[q][q] = aqq + t * apq;
-        A[p][q] = A[q][p] = 0.0;
-        for (int k = 0; k < 3; ++k) {
-            if (k == p || k == q) continue;
-            const double akp = A[k][p];
-            const double akq = A[k][q];
-            A[k][p] = A[p][k] = c * akp - s * akq;
-            A[k][q] = A[q][k] = s * akp + c * akq;
-        }
-        for (int k = 0; k < 3; ++k) {
-            const double ukp = U[k][p];
-            const double ukq = U[k][q];
-            U[k][p] = c * ukp - s * ukq;
-            U[k][q] = s * ukp + c * ukq;
-        }
-    }
-}
-
-static Quat wahbaSolve(const QVector3D* vb, const QVector3D* vs,
-                       const double* w, int n)
-{
-    double B[3][3] = {{0,0,0},{0,0,0},{0,0,0}};
-    for (int k = 0; k < n; ++k) {
-        const QVector3D r = vb[k].normalized();
-        const QVector3D b = vs[k].normalized();
-        const double wk = w[k];
-        const double rr[3] = { double(r.x()), double(r.y()), double(r.z()) };
-        const double bb[3] = { double(b.x()), double(b.y()), double(b.z()) };
-        for (int i = 0; i < 3; ++i)
-            for (int j = 0; j < 3; ++j)
-                B[i][j] += wk * rr[i] * bb[j];
-    }
-    const double sigma = B[0][0] + B[1][1] + B[2][2];
-    const double z0 = B[1][2] - B[2][1];
-    const double z1 = B[2][0] - B[0][2];
-    const double z2 = B[0][1] - B[1][0];
-
-    double K[4][4];
-    K[0][0] = sigma;
-    K[0][1] = z0; K[0][2] = z1; K[0][3] = z2;
-    K[1][0] = z0; K[2][0] = z1; K[3][0] = z2;
-    for (int i = 0; i < 3; ++i)
-        for (int j = 0; j < 3; ++j)
-            K[i+1][j+1] = B[i][j] + B[j][i] - (i == j ? sigma : 0.0);
-
-    double A[4][4], U[4][4];
-    for (int i = 0; i < 4; ++i)
-        for (int j = 0; j < 4; ++j)
-            A[i][j] = K[i][j];
-    jacobiSym4(A, U);
-
-    int maxIdx = 0;
-    for (int i = 1; i < 4; ++i)
-        if (A[i][i] > A[maxIdx][maxIdx]) maxIdx = i;
-
-    Quat q(U[0][maxIdx], U[1][maxIdx], U[2][maxIdx], U[3][maxIdx]);
-    if (q.w < 0.0) q = Quat(-q.w, -q.x, -q.y, -q.z);
-    return q.normalized();
-}
-
-static double wahbaResidualDeg(const Quat& q_s2b,
-                               const QVector3D* vb, const QVector3D* vs, int n)
-{
-    auto angBetweenDeg = [](const QVector3D& a, const QVector3D& b) -> double {
-        const double na = double(a.length()), nb = double(b.length());
-        if (na < 1e-9 || nb < 1e-9) return 0.0;
-        const double c = double(QVector3D::dotProduct(a, b)) / (na * nb);
-        const double cc = c > 1.0 ? 1.0 : (c < -1.0 ? -1.0 : c);
-        return std::acos(cc) * 180.0 / M_PI;
-    };
-    double worst = 0.0;
-    for (int k = 0; k < n; ++k) {
-        const QVector3D rotated = vec_rotate(vs[k].normalized(), q_s2b);
-        const double e = angBetweenDeg(rotated, vb[k].normalized());
-        if (e > worst) worst = e;
-    }
-    return worst;
-}
-
-struct SoftIronFit {
-    double M[3][3];
-    QVector3D offset;
-    double residual;
-    bool valid;
-};
-
-static SoftIronFit fitMagSoftIron(const QVector3D& sumMag,
-                                  const double outer[6],
-                                  int count)
-{
-    SoftIronFit out;
-    for (int i = 0; i < 3; ++i)
-        for (int j = 0; j < 3; ++j)
-            out.M[i][j] = (i == j) ? 1.0 : 0.0;
-    out.offset = QVector3D(0, 0, 0);
-    out.residual = 0.0;
-    out.valid = false;
-
-    if (count < 200) return out;
-    const double invN = 1.0 / double(count);
-    const double mx = double(sumMag.x()) * invN;
-    const double my = double(sumMag.y()) * invN;
-    const double mz = double(sumMag.z()) * invN;
-
-    double C[3][3];
-    C[0][0] = outer[0] * invN - mx * mx;
-    C[1][1] = outer[1] * invN - my * my;
-    C[2][2] = outer[2] * invN - mz * mz;
-    C[0][1] = C[1][0] = outer[3] * invN - mx * my;
-    C[0][2] = C[2][0] = outer[4] * invN - mx * mz;
-    C[1][2] = C[2][1] = outer[5] * invN - my * mz;
-
-    const double trC = C[0][0] + C[1][1] + C[2][2];
-    if (trC < 1e-9) return out;
-
-    double E[3][3], V[3][3];
-    for (int i = 0; i < 3; ++i)
-        for (int j = 0; j < 3; ++j)
-            E[i][j] = C[i][j];
-    jacobiSym3(E, V);
-
-    double lam[3] = { E[0][0], E[1][1], E[2][2] };
-    const double lamMax = std::max({ lam[0], lam[1], lam[2] });
-    const double lamMin = std::min({ lam[0], lam[1], lam[2] });
-    if (lamMin < 1e-9 * lamMax) return out;
-    if (lamMin <= 0.0) return out;
-
-    const double lamGeo = std::cbrt(std::max(1e-30, lam[0] * lam[1] * lam[2]));
-    double D[3];
-    for (int i = 0; i < 3; ++i) D[i] = std::sqrt(lamGeo / lam[i]);
-
-    for (int i = 0; i < 3; ++i)
-        for (int j = 0; j < 3; ++j) {
-            double s = 0.0;
-            for (int k = 0; k < 3; ++k)
-                s += V[i][k] * D[k] * V[j][k];
-            out.M[i][j] = s;
-        }
-    out.offset = QVector3D(float(mx), float(my), float(mz));
-    out.residual = std::sqrt(lamMax / std::max(1e-30, lamMin));
-    out.valid = true;
-    return out;
-}
-
-// Gravity direction as expressed in each body-segment's own frame for the
-// T-pose and N-pose reference.  Pre-computed once from SkeletonXsens's
-// default_seg_angles tables — the body frame is defined by those angles.
-// gravity_world = (0, 0, -1) in NWU; body = inv(default_seg_angles) · world.
-static QVector3D gravityInBodyFrame(const Quat& defAng)
-{
-    return vec_rotate(QVector3D(0.0f, 0.0f, -1.0f), defAng.inv());
-}
 
     void LocomotionSolver::reset()
     {
@@ -6388,460 +5973,161 @@ void NewSessionWizard::onCaptureTick()
     }
 
 
-    // ---------- CaptureN complete → finalise TRIAD/ecompass -----
+    // ---------- CaptureN complete → §174.4 q_align solver --------
+    //
+    // Spec reference:
+    //   §174.2 — Markley/Shepperd 4-D eigenvector quaternion averaging,
+    //            applied to the CaptureN samples to get q_S_avg_N per
+    //            segment.  The T-pose average is already stored in
+    //            m_result.tposeReference from the CaptureT handler.
+    //   §174.4 — q_align(i) = q_эталон_N(i) ⊗ conj(q_S_avg_N(i)) ⊗ conj(q_bs(i));
+    //            inv = conj for unit quaternions (spec §174.4 simplifies
+    //            inv(q_bs) → conj(q_bs)).  N-pose is Stage 1 per §174.6.
+    //   §174.5 — angle_resid = 2·acos(|q_resid.w|), q_resid = q_align ⊗ q_bs;
+    //            quality band via fox::body::calibrationQuality().
+    //
+    // No Wahba/TRIAD/SVD/procrustes/yaw-symmetry refinement: the spec
+    // gives a closed-form analytical formula for q_align, and the
+    // body→sensor alignment is the sole subject-specific calibration term.
+    // Acc / mag normalisation and gyro bias are simple T+N means used
+    // downstream by the EKF — not in §174 strictly, but reading them off
+    // the same captured stills costs nothing.
     if (m_phase != CalibPhase::CaptureN) return;
     m_captureTimer.stop();
     m_calibComplete = true;
     m_phase = CalibPhase::Settle;
     if (m_calibStatus) m_calibStatus->setText(Lang::t("calib_ok"));
-    testLog("[calib] N-pose capture complete, solving s2s…", m_test);
+    testLog("[calib] N-pose capture complete, solving q_align per §174.4…", m_test);
 
-    // ----- hipose apply_imu_calibration terms --------------------
-    //
-    // Acc/mag/gyro statistics are averaged across BOTH poses (double the
-    // samples → better bias estimate, and the mag norm should be consistent
-    // in either stance).  The sensor-to-body orientation (`s2s`) is where
-    // the two poses actually pay off:
-    //
-    //  * TRIAD when the body-frame gravity differs enough between poses
-    //    (arms and hands flip ~90° T→N, so gravity in the forearm frame
-    //    rotates from lateral to downward — two linearly-independent
-    //    observations, yaw-free solve).
-    //  * Single-pose ecompass fallback when gravity in the body frame is
-    //    nearly parallel in both poses (torso, legs, feet — upright in
-    //    both).  There's no extra info, so fall back to the mag-assisted
-    //    N-pose estimate.
-    const auto defAng_T = defaultSegAnglesFor("tpose");
-    const auto defAng_N = defaultSegAnglesFor("npose");
+    // §174.2 — pull N-pose quaternion samples (per segment) out of the
+    // shared snapshot buffer for Markley averaging.
+    std::array<std::vector<Quat>, kXsensSegmentCount> sampN;
+    for (auto& v : sampN) v.reserve(m_samples.size());
+    for (const auto& s : m_samples) {
+        for (int i = 0; i < kXsensSegmentCount; ++i) sampN[i].push_back(s[i]);
+    }
 
     std::array<Quat,      kXsensSegmentCount> s2s{};
+    std::array<double,    kXsensSegmentCount> residDeg{};
+    std::array<int,       kXsensSegmentCount> qualityBand{};
     std::array<double,    kXsensSegmentCount> magMagn{};
     std::array<double,    kXsensSegmentCount> accMagn{};
     std::array<QVector3D, kXsensSegmentCount> gyrBias{};
-    std::array<int,       kXsensSegmentCount> s2sMode{}; // 0=triad, 1=ecompass, 2=identity
-    std::array<double,    kXsensSegmentCount> s2sResidualN{};
     for (int i = 0; i < kXsensSegmentCount; ++i) {
-        s2s[i]     = Quat(1, 0, 0, 0);
-        magMagn[i] = 1.0;
-        accMagn[i] = 1.0;
-        gyrBias[i] = QVector3D(0, 0, 0);
-        s2sMode[i] = 2;
-        s2sResidualN[i] = 99.0;
+        s2s[i]         = Quat(1, 0, 0, 0);
+        residDeg[i]    = 99.0;
+        qualityBand[i] = fox::body::kCalibQualityInvalid;
+        magMagn[i]     = 1.0;
+        accMagn[i]     = 1.0;
+        gyrBias[i]     = QVector3D(0, 0, 0);
     }
 
-    auto clampBias = [](float vv) {
+    auto clampBias = [](float v) {
         const float kMax = 0.2f;
-        return vv > kMax ? kMax : (vv < -kMax ? -kMax : vv);
+        return v > kMax ? kMax : (v < -kMax ? -kMax : v);
     };
 
-    std::array<QVector3D, kXsensSegmentCount> gyrStdDevN{};
-    std::array<std::array<double, 9>, kXsensSegmentCount> magSoftMatN{};
-    std::array<QVector3D, kXsensSegmentCount>             magSoftOffN{};
-    std::array<bool,      kXsensSegmentCount>             magSoftOkN{};
     for (int i = 0; i < kXsensSegmentCount; ++i) {
-        gyrStdDevN[i] = QVector3D(0, 0, 0);
-        for (int k = 0; k < 9; ++k) magSoftMatN[i][k] = (k == 0 || k == 4 || k == 8) ? 1.0 : 0.0;
-        magSoftOffN[i] = QVector3D(0, 0, 0);
-        magSoftOkN[i] = false;
-    }
+        if (!fox::body::kSensorPresent[i]) continue;
+        if (sampN[i].size() < 10) continue;
 
-    for (int i = 0; i < kXsensSegmentCount; ++i) {
+        // §174.2 Markley quaternion average for N-pose.
+        const Quat qAvgN  = fox::quat_avg_markley(sampN[i]);
+        const Quat& q_bs  = fox::body::kSensorToBone[i].q_bs;
+        const Quat& qRefN = fox::body::kRefQuatN[i];
+
+        // §174.4 q_align — closed-form analytical alignment.
+        const Quat qAlign = quat_mult(
+            quat_mult(qRefN, qAvgN.conj()),
+            q_bs.conj()).normalized();
+        s2s[i] = qAlign;
+
+        // §174.5 quality: q_resid = q_align ⊗ q_bs.
+        const Quat qResid = quat_mult(qAlign, q_bs).normalized();
+        double absw = std::abs(qResid.w);
+        if (absw > 1.0) absw = 1.0;
+        residDeg[i]    = 2.0 * std::acos(absw) * 180.0 / M_PI;
+        qualityBand[i] = fox::body::calibrationQuality(residDeg[i]);
+
+        // T+N pose statistics for downstream filter tuning.
         const int cT = m_accumCountT[i];
         const int cN = m_accumCountN[i];
-        if (cT < 10 || cN < 10) continue;
-
-        const double invT = 1.0 / double(cT);
-        const double invN = 1.0 / double(cN);
-        const QVector3D meanA_T = m_accAccumT[i] * float(invT);
-        const QVector3D meanA_N = m_accAccumN[i] * float(invN);
-        const QVector3D meanG_T = m_gyrAccumT[i] * float(invT);
-        const QVector3D meanG_N = m_gyrAccumN[i] * float(invN);
-        const QVector3D meanM_T = m_magAccumT[i] * float(invT);
-        const QVector3D meanM_N = m_magAccumN[i] * float(invN);
-        if (meanA_T.length() < 1e-6 || meanA_N.length() < 1e-6 ||
-            meanM_N.length() < 1e-6) continue;
-
-        const int    cTot = cT + cN;
-        const double invTot = 1.0 / double(cTot);
-        accMagn[i] = (m_accMagAccumT[i] + m_accMagAccumN[i]) * invTot;
-        const QVector3D meanM_all = (m_magAccumT[i] + m_magAccumN[i]) * float(invTot);
-        magMagn[i] = double(meanM_all.length());
-
-        const QVector3D gSqT = m_gyrSqAccumT[i] * float(invT);
-        const QVector3D gSqN = m_gyrSqAccumN[i] * float(invN);
-        const QVector3D vT(std::max(0.0f, gSqT.x() - meanG_T.x()*meanG_T.x()),
-                           std::max(0.0f, gSqT.y() - meanG_T.y()*meanG_T.y()),
-                           std::max(0.0f, gSqT.z() - meanG_T.z()*meanG_T.z()));
-        const QVector3D vN(std::max(0.0f, gSqN.x() - meanG_N.x()*meanG_N.x()),
-                           std::max(0.0f, gSqN.y() - meanG_N.y()*meanG_N.y()),
-                           std::max(0.0f, gSqN.z() - meanG_N.z()*meanG_N.z()));
-        auto medianBiasTN = [](double mT, double mN) -> double {
-            if (std::abs(mT - mN) > 0.4) return std::abs(mT) < std::abs(mN) ? mT : mN;
-            return 0.5 * (mT + mN);
-        };
-        const double biasX = medianBiasTN(meanG_T.x(), meanG_N.x());
-        const double biasY = medianBiasTN(meanG_T.y(), meanG_N.y());
-        const double biasZ = medianBiasTN(meanG_T.z(), meanG_N.z());
-        gyrBias[i] = QVector3D(clampBias(float(biasX)),
-                               clampBias(float(biasY)),
-                               clampBias(float(biasZ)));
-        const QVector3D vAvg = (vT * float(cT) + vN * float(cN)) * float(invTot);
-        gyrStdDevN[i] = QVector3D(std::sqrt(vAvg.x()), std::sqrt(vAvg.y()), std::sqrt(vAvg.z()));
-
-        QVector3D magSumAll = m_magAccumT[i] + m_magAccumN[i];
-        double outerAll[6] = {0,0,0,0,0,0};
-        for (int k = 0; k < 6; ++k) {
-            outerAll[k] = m_magOuterAccumT[i][k] + m_magOuterAccumN[i][k];
-        }
-        const SoftIronFit si = fitMagSoftIron(magSumAll, outerAll, cTot);
-        if (si.valid && si.residual < 5.0) {
-            for (int r = 0; r < 3; ++r)
-                for (int c = 0; c < 3; ++c)
-                    magSoftMatN[i][r * 3 + c] = si.M[r][c];
-            magSoftOffN[i] = si.offset;
-            magSoftOkN[i] = true;
+        if (cT >= 10 && cN >= 10) {
+            const int    cTot   = cT + cN;
+            const double invTot = 1.0 / double(cTot);
+            accMagn[i] = (m_accMagAccumT[i] + m_accMagAccumN[i]) * invTot;
+            const QVector3D meanM_all = (m_magAccumT[i] + m_magAccumN[i])
+                                        * float(invTot);
+            magMagn[i] = double(meanM_all.length());
+            const QVector3D meanG_all = (m_gyrAccumT[i] + m_gyrAccumN[i])
+                                        * float(invTot);
+            gyrBias[i] = QVector3D(clampBias(meanG_all.x()),
+                                   clampBias(meanG_all.y()),
+                                   clampBias(meanG_all.z()));
         }
 
-        const QVector3D aT_s = meanA_T.normalized();
-        const QVector3D aN_s = meanA_N.normalized();
-        const QVector3D gT_b = gravityInBodyFrame(defAng_T[i]).normalized();
-        const QVector3D gN_b = gravityInBodyFrame(defAng_N[i]).normalized();
-        const float sep = QVector3D::crossProduct(gT_b, gN_b).length();
-
-        if (sep > 0.3f) {
-            const Quat q_s2b = triadSolve(gT_b, gN_b, aT_s, aN_s);
-            s2s[i] = q_s2b.inv().normalized();
-            s2sMode[i] = 0;
-            s2sResidualN[i] = triadResidualDeg(q_s2b, gT_b, gN_b, aT_s, aN_s);
-            if (m_test) {
-                std::cout << "[calib] " << kSegmentNames[i]
-                          << " TRIAD T+N sep=" << std::fixed << std::setprecision(3) << sep
-                          << " residual=" << std::setprecision(2) << s2sResidualN[i] << "°\n";
-            }
-        } else {
-            const QVector3D mNorm = meanM_N / float(meanM_N.length());
-            Quat qNed = ecompassNED(aN_s, mNorm);
-            const Quat nedToNwu(0, 1, 0, 0);
-            const Quat qNwu = quat_mult(nedToNwu, qNed).normalized();
-            s2s[i] = qNwu.inv().normalized();
-            s2sMode[i] = 1;
-            const QVector3D worldGravity(0.0f, 0.0f, -1.0f);
-            s2sResidualN[i] = ecompResidualDeg(qNwu, worldGravity, aN_s);
-            if (m_test) {
-                std::cout << "[calib] " << kSegmentNames[i]
-                          << " ecompass T+N residual=" << std::fixed << std::setprecision(2)
-                          << s2sResidualN[i] << "°\n";
-            }
+        if (m_test) {
+            std::cout << "[calib §174.4] " << std::left << std::setw(14)
+                      << kSegmentNames[i] << std::right
+                      << "  residual=" << std::fixed << std::setprecision(2)
+                      << residDeg[i] << "°"
+                      << "  quality=" << qualityBand[i] << "/5\n";
         }
-    }
-
-    {
-        const std::pair<int,int> pairsN[8] = {
-            { SEG_RShoulder,  SEG_LShoulder  }, { SEG_RUpperArm,  SEG_LUpperArm  },
-            { SEG_RForearm,   SEG_LForearm   }, { SEG_RHand,      SEG_LHand      },
-            { SEG_RUpperLeg,  SEG_LUpperLeg  }, { SEG_RLowerLeg,  SEG_LLowerLeg  },
-            { SEG_RFoot,      SEG_LFoot      }, { SEG_RToe,       SEG_LToe       },
-        };
-        for (const auto& pr : pairsN) {
-            if (s2sMode[pr.first] == 2 || s2sMode[pr.second] == 2) continue;
-            const Quat qR = s2s[pr.first];
-            const Quat qL = s2s[pr.second];
-            const Quat mYL = mirror_y_quat(qL);
-            const double dotMY = qR.w*mYL.w + qR.x*mYL.x + qR.y*mYL.y + qR.z*mYL.z;
-            const double dotPar = qR.w*qL.w + qR.x*qL.x + qR.y*qL.y + qR.z*qL.z;
-            const double devMirr = mirrorYDeviationDeg(qR, qL);
-            const double devPar  = parallelDeviationDeg(qR, qL);
-            const bool mirrLikely = (devMirr < 30.0) && (devMirr + 10.0 < devPar);
-            const bool parLikely  = (devPar  < 30.0) && (devPar  + 10.0 < devMirr);
-            if (!mirrLikely && !parLikely) {
-                if (m_test) {
-                    std::cout << "[calib] hemisphere-unify skipped " << kSegmentNames[pr.first]
-                              << "/" << kSegmentNames[pr.second]
-                              << " (no clear symmetry: devMirr=" << std::fixed << std::setprecision(1)
-                              << devMirr << "° devPar=" << devPar << "°)\n";
-                }
-                continue;
-            }
-            const bool needFlip = mirrLikely ? (dotMY < 0.0) : (dotPar < 0.0);
-            if (needFlip) {
-                s2s[pr.second] = Quat(-qL.w, -qL.x, -qL.y, -qL.z);
-                if (m_test) {
-                    std::cout << "[calib] hemisphere-unify L " << kSegmentNames[pr.second]
-                              << " via " << (mirrLikely ? "mirror-Y" : "parallel")
-                              << " (was opposite of R " << kSegmentNames[pr.first] << ")\n";
-                }
-            }
-        }
-    }
-
-    std::array<bool, kXsensSegmentCount> s2sFusedN{};
-    {
-        // Mount-detection T+N accel + T↔N axis cross product.  Для рук T- и
-        // N-позы дают сильно различающиеся гравитации (рука вниз vs вперёд),
-        // axis = aT × aN указывает body-lateral в сенсорной системе и хорошо
-        // различает mirror-Y vs parallel.  Для ног T- и N-позы близки (обе
-        // стоя), axis слабый — остаётся acc T+N path.
-        auto voteFromPairN = [&](const QVector3D& vR, const QVector3D& vL) -> std::pair<int, double> {
-            if (vR.length() < 1e-3f || vL.length() < 1e-3f) return {0, 0.0};
-            const QVector3D nR = vR.normalized();
-            const QVector3D nL = vL.normalized();
-            const QVector3D mY_nL(nL.x(), -nL.y(), nL.z());
-            const double mirrDot = double(QVector3D::dotProduct(nR, mY_nL));
-            const double parDot  = double(QVector3D::dotProduct(nR, nL));
-            if (std::abs(mirrDot) < 0.05 && std::abs(parDot) < 0.05) return {0, 0.0};
-            const int type   = (std::abs(mirrDot) >= std::abs(parDot)) ? 1 : 2;
-            const double sc  = std::abs(std::abs(mirrDot) - std::abs(parDot));
-            return {type, sc};
-        };
-        auto detectMountSymmetryN = [&](int rSeg, int lSeg, double* outScore = nullptr) -> int {
-            if (m_accumCountT[rSeg] < 10 || m_accumCountT[lSeg] < 10) {
-                if (outScore) *outScore = 0.0;
-                return 0;
-            }
-            const bool isLeg = (rSeg == SEG_RUpperLeg) || (rSeg == SEG_LUpperLeg)
-                            || (rSeg == SEG_RLowerLeg) || (rSeg == SEG_LLowerLeg);
-            const QVector3D aR_T = m_accAccumT[rSeg] / float(m_accumCountT[rSeg]);
-            const QVector3D aL_T = m_accAccumT[lSeg] / float(m_accumCountT[lSeg]);
-            auto voteT = voteFromPairN(aR_T, aL_T);
-
-            std::pair<int, double> voteN = {0, 0.0};
-            QVector3D aR_N(0, 0, 0), aL_N(0, 0, 0);
-            const bool haveN = (m_accumCountN[rSeg] >= 10 && m_accumCountN[lSeg] >= 10);
-            if (haveN) {
-                aR_N = m_accAccumN[rSeg] / float(m_accumCountN[rSeg]);
-                aL_N = m_accAccumN[lSeg] / float(m_accumCountN[lSeg]);
-                voteN = voteFromPairN(aR_N, aL_N);
-            }
-
-            // Axis vote T↔N — для рук работает (>~60° поза-разделение),
-            // для ног слабо (легs остаются вертикально в обеих позах).
-            std::pair<int, double> voteAx = {0, 0.0};
-            if (haveN && aR_T.length() > 1e-3f && aL_T.length() > 1e-3f
-                      && aR_N.length() > 1e-3f && aL_N.length() > 1e-3f) {
-                const QVector3D axR = QVector3D::crossProduct(aR_T.normalized(),
-                                                               aR_N.normalized());
-                const QVector3D axL = QVector3D::crossProduct(aL_T.normalized(),
-                                                               aL_N.normalized());
-                if (axR.length() > 0.3f && axL.length() > 0.3f) {
-                    voteAx = voteFromPairN(axR, axL);
-                }
-            }
-
-            double wT = 1.0, wN = 0.0, wAx = 0.0;
-            if (isLeg) {
-                wT = 0.4; wN = 0.6; wAx = 0.0;
-            } else if (voteAx.second > 0.05) {
-                wT = 0.4; wN = 0.0; wAx = 0.6;
-            }
-
-            double sMirr = 0.0, sPar = 0.0;
-            if (voteT.first == 1) sMirr += wT * voteT.second;
-            if (voteT.first == 2) sPar  += wT * voteT.second;
-            if (voteN.first == 1) sMirr += wN * voteN.second;
-            if (voteN.first == 2) sPar  += wN * voteN.second;
-            if (voteAx.first == 1) sMirr += wAx * voteAx.second;
-            if (voteAx.first == 2) sPar  += wAx * voteAx.second;
-
-            const double score = std::abs(sMirr - sPar);
-            if (outScore) *outScore = score;
-            if (sMirr > sPar && score > 0.10) return 1;
-            if (sPar > sMirr && score > 0.10) return 2;
-            return 0;
-        };
-        auto procrustesPairN = [&](int rSeg, int lSeg) {
-            if (s2sMode[rSeg] == 2 || s2sMode[lSeg] == 2) return;
-            double score = 0.0;
-            const int mType = detectMountSymmetryN(rSeg, lSeg, &score);
-            const Quat qR = s2s[rSeg];
-            const Quat qL = s2s[lSeg];
-            const double devMirr = mirrorYDeviationDeg(qR, qL);
-            const double devPar  = parallelDeviationDeg(qR, qL);
-            const bool trustVote = (score >= 0.5);
-            const bool useMirror = (mType == 1) ||
-                                   (mType == 0 && !trustVote && devMirr <= devPar);
-            const double dev = useMirror ? devMirr : devPar;
-            const char* sym = useMirror ? "mirror-Y" : "parallel";
-            if (m_test) {
-                std::cout << "[calib refine] pair " << kSegmentNames[rSeg]
-                          << "/" << kSegmentNames[lSeg]
-                          << " mount=" << (mType == 1 ? "mirror-Y" : mType == 2 ? "parallel" : "unknown")
-                          << " devMirr=" << std::fixed << std::setprecision(2) << devMirr << "°"
-                          << " devPar=" << devPar << "°"
-                          << " using=" << sym << "\n";
-            }
-            if (dev <= 3.0) return;
-            if (dev >= 60.0) {
-                if (m_test) {
-                    std::cout << "[calib refine] paired " << kSegmentNames[rSeg]
-                              << "/" << kSegmentNames[lSeg]
-                              << " " << sym << "_dev=" << std::fixed << std::setprecision(2) << dev
-                              << "° — too large, skipping (real asymmetry or sensor mount error)\n";
-                }
-                return;
-            }
-
-            if (s2sMode[rSeg] == 0 && s2sMode[lSeg] == 0) {
-                Quat counterpartL;
-                if (useMirror) counterpartL = mirror_y_quat(qL);
-                else           counterpartL = qL;
-                double dot = qR.w*counterpartL.w + qR.x*counterpartL.x
-                           + qR.y*counterpartL.y + qR.z*counterpartL.z;
-                if (dot < 0.0) {
-                    counterpartL = Quat(-counterpartL.w, -counterpartL.x,
-                                        -counterpartL.y, -counterpartL.z);
-                    dot = -dot;
-                }
-                const double wR = std::max(0.0, 1.0 - s2sResidualN[rSeg] / 30.0);
-                const double wL = std::max(0.0, 1.0 - s2sResidualN[lSeg] / 30.0);
-                const double wTot = wR + wL;
-                const double tR = (wTot > 1e-6) ? wL / wTot : 0.5;
-                const Quat qAvg = slerp_quat(qR, counterpartL, tR);
-                Quat qAvgForL;
-                if (useMirror) qAvgForL = Quat(qAvg.w, -qAvg.x, qAvg.y, -qAvg.z);
-                else            qAvgForL = qAvg;
-                s2s[rSeg] = qAvg;
-                s2s[lSeg] = qAvgForL;
-                s2sFusedN[rSeg] = s2sFusedN[lSeg] = true;
-                if (m_test) {
-                    std::cout << "[calib refine] paired " << kSegmentNames[rSeg]
-                              << "/" << kSegmentNames[lSeg]
-                              << " averaged " << sym << ", dev was " << std::fixed << std::setprecision(2)
-                              << dev << "° (residuals R=" << s2sResidualN[rSeg]
-                              << "° L=" << s2sResidualN[lSeg] << "°)\n";
-                }
-                return;
-            }
-
-            int srcSeg, dstSeg;
-            if (s2sMode[rSeg] == 0 && s2sMode[lSeg] != 0) { srcSeg = rSeg; dstSeg = lSeg; }
-            else if (s2sMode[lSeg] == 0 && s2sMode[rSeg] != 0) { srcSeg = lSeg; dstSeg = rSeg; }
-            else return;
-            const Quat& qSrc = s2s[srcSeg];
-            if (useMirror) s2s[dstSeg] = mirror_y_quat(qSrc);
-            else            s2s[dstSeg] = qSrc;
-            s2sFusedN[srcSeg] = s2sFusedN[dstSeg] = true;
-            if (m_test) {
-                std::cout << "[calib refine] copied " << sym << " from " << kSegmentNames[srcSeg]
-                          << " (triad) into " << kSegmentNames[dstSeg]
-                          << " (ecomp), dev was " << std::fixed << std::setprecision(2)
-                          << dev << "°\n";
-            }
-        };
-        procrustesPairN(SEG_RShoulder,  SEG_LShoulder);
-        procrustesPairN(SEG_RUpperArm,  SEG_LUpperArm);
-        procrustesPairN(SEG_RForearm,   SEG_LForearm);
-        procrustesPairN(SEG_RHand,      SEG_LHand);
-        procrustesPairN(SEG_RUpperLeg,  SEG_LUpperLeg);
-        procrustesPairN(SEG_RLowerLeg,  SEG_LLowerLeg);
-        procrustesPairN(SEG_RFoot,      SEG_LFoot);
-        procrustesPairN(SEG_RToe,       SEG_LToe);
-    }
-
-    {
-        auto symYawS2S = [&](int rSeg, int lSeg) {
-            if (s2sFusedN[rSeg] || s2sFusedN[lSeg]) return;
-            const int mR = s2sMode[rSeg];
-            const int mL = s2sMode[lSeg];
-            if (mR == 2 || mL == 2) return;
-            const bool bothTriad = (mR == 0 && mL == 0);
-            const bool bothEcomp = (mR == 1 && mL == 1);
-            if (!bothTriad && !bothEcomp) return;
-            const double guard = bothTriad ? 0.95 : 0.7;
-            const Quat& qR = s2s[rSeg];
-            const Quat& qL = s2s[lSeg];
-            const Quat yawR  = yaw_only_quat(qR);
-            const Quat yawL  = yaw_only_quat(qL);
-            const Quat yawLmir(yawL.w, 0.0, 0.0, -yawL.z);
-            const double d  = yawR.w * yawLmir.w + yawR.z * yawLmir.z;
-            if (std::abs(d) < guard) return;
-            const Quat tiltR = quat_mult(qR, yawR.inv()).normalized();
-            const Quat tiltL = quat_mult(qL, yawL.inv()).normalized();
-            const double sgn = d < 0 ? -1.0 : 1.0;
-            Quat yawAvg(0.5 * (yawR.w + sgn * yawLmir.w),
-                        0.0, 0.0,
-                        0.5 * (yawR.z + sgn * yawLmir.z));
-            const double yn2 = yawAvg.w*yawAvg.w + yawAvg.z*yawAvg.z;
-            if (yn2 < 1e-12) return;
-            const double yn = 1.0 / std::sqrt(yn2);
-            yawAvg.w *= yn; yawAvg.z *= yn;
-            const Quat yawAvgMir(yawAvg.w, 0.0, 0.0, -yawAvg.z);
-            s2s[rSeg] = quat_mult(yawAvg,    tiltR).normalized();
-            s2s[lSeg] = quat_mult(yawAvgMir, tiltL).normalized();
-        };
-        symYawS2S(SEG_RShoulder,  SEG_LShoulder);
-        symYawS2S(SEG_RUpperArm,  SEG_LUpperArm);
-        symYawS2S(SEG_RForearm,   SEG_LForearm);
-        symYawS2S(SEG_RHand,      SEG_LHand);
-        symYawS2S(SEG_RUpperLeg,  SEG_LUpperLeg);
-        symYawS2S(SEG_RLowerLeg,  SEG_LLowerLeg);
-        symYawS2S(SEG_RFoot,      SEG_LFoot);
-        symYawS2S(SEG_RToe,       SEG_LToe);
-    }
-
-    std::array<float, kXsensSegmentCount> segGainN{};
-    for (int i = 0; i < kXsensSegmentCount; ++i) {
-        const float noise = std::sqrt(float(gyrStdDevN[i].lengthSquared() / 3.0f));
-        float g = 0.7f;
-        if (noise < 0.4f)      g = 0.78f;
-        else if (noise > 2.5f) g = 0.62f;
-        else                   g = 0.78f - (noise - 0.4f) / 2.1f * 0.16f;
-        if (g < 0.62f) g = 0.62f;
-        if (g > 0.82f) g = 0.82f;
-        segGainN[i] = g;
     }
 
     m_rx->setAccNormalisation(accMagn);
+    m_rx->setMagNormalisation(magMagn);
     m_rx->setGyroBias(gyrBias);
-    int softIronCountN = 0;
-    for (int i = 0; i < kXsensSegmentCount; ++i) if (magSoftOkN[i]) ++softIronCountN;
-    if (softIronCountN >= 8) {
-        m_rx->setMagSoftIron(magSoftMatN, magSoftOffN);
-        if (m_test) {
-            std::cout << "[mag soft-iron] fitted for " << softIronCountN << "/"
-                      << int(kXsensSegmentCount) << " segments (T+N) — applied\n";
-        }
-    } else {
-        m_rx->setMagNormalisation(magMagn);
-        if (m_test) {
-            std::cout << "[mag soft-iron] only " << softIronCountN << "/"
-                      << int(kXsensSegmentCount) << " segments fitted in T+N — falling back to scalar mag_magn\n";
-        }
-    }
-    m_rx->setSegmentGain(segGainN);
-
     m_rx->setS2sAlignment(s2s);
 
-    if (m_test) {
+    // §174.5 — average residual + UI quality label.
+    {
+        double sumResid = 0.0;
+        int    nResid   = 0;
+        QStringList problemList;
         for (int i = 0; i < kXsensSegmentCount; ++i) {
-            const bool isArm = (i >= SEG_RUpperArm && i <= SEG_RHand)
-                            || (i >= SEG_LUpperArm && i <= SEG_LHand);
-            const bool isLeg = (i >= SEG_RUpperLeg && i <= SEG_LToe);
-            if (!isArm && !isLeg) continue;
-            const double absW = std::min(1.0, std::abs(s2s[i].w));
-            const double angleDeg = 2.0 * std::acos(absW) * 180.0 / M_PI;
-            if (angleDeg > 60.0) {
-                std::cout << "[calib] WARNING: " << kSegmentNames[i]
-                          << " s2s rotation = " << std::fixed << std::setprecision(1)
-                          << angleDeg << "deg (>60deg) — actor may not have held the pose, "
-                          << "sensor placement may be off, or recalibration is recommended\n";
+            if (!fox::body::kSensorPresent[i]) continue;
+            sumResid += residDeg[i];
+            ++nResid;
+            if (qualityBand[i] <= fox::body::kCalibQualityPoor) {
+                problemList << QString("%1(%2°)")
+                                .arg(QString::fromUtf8(kSegmentNames[i]))
+                                .arg(residDeg[i], 0, 'f', 1);
             }
         }
-        std::cout.flush();
+        const double avgResid = (nResid > 0) ? sumResid / double(nResid) : 99.0;
+        const int    band     = fox::body::calibrationQuality(avgResid);
+        const char*  label    = fox::body::calibrationQualityLabel(band);
+
+        if (m_calibQuality) {
+            QString qual = QString("Quality: %1/5 %2 (residual %3°)")
+                               .arg(band)
+                               .arg(QString::fromUtf8(label))
+                               .arg(avgResid, 0, 'f', 1);
+            if (!problemList.isEmpty())
+                qual += QString(" — issues: %1").arg(problemList.join(", "));
+            m_calibQuality->setText(qual);
+            m_calibQuality->setStyleSheet(
+                band >= fox::body::kCalibQualityGood
+                    ? "color:#2EC25A; font-weight:700;"
+                : band >= fox::body::kCalibQualityAdequate
+                    ? "color:#E0A030; font-weight:700;"
+                    : "color:#E04040; font-weight:700;");
+        }
     }
 
     if (m_test) {
-        static const char* kModeStr[3] = {"triad ", "ecomp ", "ident "};
         std::cout << std::fixed << std::setprecision(5);
-        std::cout << "[calib] hipose calibration terms (double-pose):\n";
+        std::cout << "[calib] §174.4 q_align stored (T+N statistics for acc/mag/gyr):\n";
         for (int i = 0; i < kXsensSegmentCount; ++i) {
+            if (!fox::body::kSensorPresent[i]) continue;
             std::cout << "        " << std::left << std::setw(14)
                       << kSegmentNames[i] << std::right
-                      << "  mode="   << kModeStr[s2sMode[i]]
                       << "  acc_magn=" << accMagn[i]
                       << "  mag_magn=" << magMagn[i]
                       << "  gyr_bias=(" << gyrBias[i].x() << ","
                                         << gyrBias[i].y() << ","
-                                        << gyrBias[i].z() << ") deg/s\n";
+                                        << gyrBias[i].z() << ") rad/s\n";
         }
         std::cout.flush();
     }

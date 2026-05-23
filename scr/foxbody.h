@@ -215,6 +215,79 @@ inline const std::array<SensorToBone, kSegmentCount> kSensorToBone = {{
       QVector3D( 0.06400f,  0.00000f, -0.01500f) },
 }};
 
+// ---------------------------------------------------------------------------
+//  §24.1 / §24.2 — reference bone-in-world quaternions for the two
+//  calibration poses (legacy male body model; female/robot variants belong
+//  to future PRs).  Used by §174.4 q_align computation:
+//      q_align(i) = kRefQuatN[i] ⊗ conj(q_S_avg(i)) ⊗ conj(q_bs(i)).
+//
+//  T-pose (arms horizontal) — every segment is identity in world frame:
+//  the body is upright, arms extend laterally along the standard MVN body
+//  axes, so the bone-to-world rotation matches the skeleton's reference
+//  pose with no per-segment correction.
+//
+//  N-pose (arms down at sides) — the arm chain (UpperArm, ForeArm, Hand)
+//  rotates 90° about ±X relative to the T-pose, so the bones point along
+//  −Z in world frame.  Right side rotates +90° about +X (→ +Y axis maps
+//  to +Z, so the T-pose lateral arm (−Y) maps to −Z = down).  Left side
+//  rotates +90° about −X (mirrored).  Spec §174.3 gives the example for
+//  RUpperArm verbatim: q_эталон_9 = (0.7071, 0.7071, 0, 0).
+// ---------------------------------------------------------------------------
+inline constexpr std::array<Quat, kSegmentCount> kRefQuatT = {{
+    /* 0  Pelvis    */ Quat(1, 0, 0, 0),
+    /* 1  L5        */ Quat(1, 0, 0, 0),
+    /* 2  L3        */ Quat(1, 0, 0, 0),
+    /* 3  T12       */ Quat(1, 0, 0, 0),
+    /* 4  T8        */ Quat(1, 0, 0, 0),
+    /* 5  Neck      */ Quat(1, 0, 0, 0),
+    /* 6  Head      */ Quat(1, 0, 0, 0),
+    /* 7  RShoulder */ Quat(1, 0, 0, 0),
+    /* 8  RUpperArm */ Quat(1, 0, 0, 0),
+    /* 9  RForeArm  */ Quat(1, 0, 0, 0),
+    /* 10 RHand     */ Quat(1, 0, 0, 0),
+    /* 11 LShoulder */ Quat(1, 0, 0, 0),
+    /* 12 LUpperArm */ Quat(1, 0, 0, 0),
+    /* 13 LForeArm  */ Quat(1, 0, 0, 0),
+    /* 14 LHand     */ Quat(1, 0, 0, 0),
+    /* 15 RUpperLeg */ Quat(1, 0, 0, 0),
+    /* 16 RLowerLeg */ Quat(1, 0, 0, 0),
+    /* 17 RFoot     */ Quat(1, 0, 0, 0),
+    /* 18 RToe      */ Quat(1, 0, 0, 0),
+    /* 19 LUpperLeg */ Quat(1, 0, 0, 0),
+    /* 20 LLowerLeg */ Quat(1, 0, 0, 0),
+    /* 21 LFoot     */ Quat(1, 0, 0, 0),
+    /* 22 LToe      */ Quat(1, 0, 0, 0),
+}};
+
+// Spec §24.2 — right arm chain: +90° about +X.  Left arm chain mirror:
+// +90° about −X (equivalent: −90° about +X).  Magnitude = √½ ≈ 0.7071068.
+inline constexpr double kRefSqrtHalf = 0.7071067811865475;
+inline constexpr std::array<Quat, kSegmentCount> kRefQuatN = {{
+    /* 0  Pelvis    */ Quat(1, 0, 0, 0),
+    /* 1  L5        */ Quat(1, 0, 0, 0),
+    /* 2  L3        */ Quat(1, 0, 0, 0),
+    /* 3  T12       */ Quat(1, 0, 0, 0),
+    /* 4  T8        */ Quat(1, 0, 0, 0),
+    /* 5  Neck      */ Quat(1, 0, 0, 0),
+    /* 6  Head      */ Quat(1, 0, 0, 0),
+    /* 7  RShoulder */ Quat(1, 0, 0, 0),
+    /* 8  RUpperArm */ Quat(kRefSqrtHalf,  kRefSqrtHalf, 0, 0),
+    /* 9  RForeArm  */ Quat(kRefSqrtHalf,  kRefSqrtHalf, 0, 0),
+    /* 10 RHand     */ Quat(kRefSqrtHalf,  kRefSqrtHalf, 0, 0),
+    /* 11 LShoulder */ Quat(1, 0, 0, 0),
+    /* 12 LUpperArm */ Quat(kRefSqrtHalf, -kRefSqrtHalf, 0, 0),
+    /* 13 LForeArm  */ Quat(kRefSqrtHalf, -kRefSqrtHalf, 0, 0),
+    /* 14 LHand     */ Quat(kRefSqrtHalf, -kRefSqrtHalf, 0, 0),
+    /* 15 RUpperLeg */ Quat(1, 0, 0, 0),
+    /* 16 RLowerLeg */ Quat(1, 0, 0, 0),
+    /* 17 RFoot     */ Quat(1, 0, 0, 0),
+    /* 18 RToe      */ Quat(1, 0, 0, 0),
+    /* 19 LUpperLeg */ Quat(1, 0, 0, 0),
+    /* 20 LLowerLeg */ Quat(1, 0, 0, 0),
+    /* 21 LFoot     */ Quat(1, 0, 0, 0),
+    /* 22 LToe      */ Quat(1, 0, 0, 0),
+}};
+
 // Stub offsets (pelvis→hip-joint, T8→shoulder-joint) used by the FK dummy chain.
 // Hip half-width ±0.08 m Y (spec §37.6: «таз: бёдра ±0.08 по Y, ширина таза 0.16 м»).
 // Shoulder half-width ±0.16 m Y (typical bi-acromial half on a 1.75 m subject;
