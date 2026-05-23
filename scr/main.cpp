@@ -1421,7 +1421,16 @@ void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
                       << "  m0_free=(" << m0Free.x() << "," << m0Free.y()
                       << "," << m0Free.z() << ") dip="
                       << (fb::kMagnet.inclinationDipRad * fb::constants::kRad2Deg) << "°"
-                      << "  (spec §51.1)\n" << std::setprecision(4);
+                      << "  (spec §51.1)\n";
+            // §51.6 — per-segment gate-relaxation multipliers (only the
+            // segments where loosening is meaningful are listed; the rest
+            // run at the strict 1.0× body baseline).
+            std::cout << "[mag-gate] arms ×" << fb::kMagGateRelax[8].angleMul
+                      << " (e_incl_arm)  head ×" << fb::kMagGateRelax[6].angleMul
+                      << " (skull)  feet ×" << fb::kMagGateRelax[17].angleMul
+                      << " (sole steel)  T8 ×" << fb::kMagGateRelax[4].angleMul
+                      << "  (spec §51.3 / §51.6)\n";
+            std::cout << std::setprecision(4);
             std::cout.flush();
         }
     }
@@ -5050,6 +5059,24 @@ void MocapReceiver::run()
                         default:                                        refNorm = 1.0f;                           break;
                     }
                     s.magNormReferenceLocal = refNorm;
+                    // §51.3 + §51.6 + §43.10 — per-segment gate-relaxation
+                    // multipliers.  Hands / head / feet read a noticeably
+                    // distorted field (skull plates, glove electronics, shoe
+                    // steel) so the strict 6° angle / 3.5° dip thresholds
+                    // close their magnetic gate almost permanently.  We
+                    // loosen the gate per kMagGateRelax (5× for arms, 4×
+                    // for head, etc.) and additionally scale by 7.9× when
+                    // the sensor uses the FOX_IMU_x3 chip (60× higher mag
+                    // noise density).  The actual model dip / declination
+                    // are unchanged — only the tolerance widens.
+                    if (targetSeg >= 0 && targetSeg < fox::body::kSegmentCount) {
+                        const auto& relax = fox::body::kMagGateRelax[targetSeg];
+                        const float chipMul = fox::body::magNoiseScaleForChip(
+                            fox::body::kImuChipPerSeg[targetSeg]);
+                        s.magDipGateRelax  = relax.dipMul   * chipMul;
+                        s.magAngGateRelax  = relax.angleMul * chipMul;
+                        s.magNormGateRelax = relax.normMul;
+                    }
                     FusionAhrsSetSettings(&ahrs, &s);
                     I.fusionReady[targetSeg] = true;
                 }

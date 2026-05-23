@@ -57,6 +57,16 @@ typedef struct {
     // hands ≈ 1.35 (glove electronics), feet ≈ 1.22 (sole metal).  When
     // 0 (default) the legacy single-norm gate at 1.0 is used.
     float            magNormReferenceLocal;
+    // Spec §51.3 + §51.6 — per-segment gate-relaxation multipliers (≥ 1).
+    // Multiply into KFA_MAG_DIP_GATE_DEG and KFA_MAG_ANG_GATE_DEG so the
+    // strict body thresholds (3.5° dip, 6° angle) can be loosened on
+    // sensors that read a distorted field — head (4×), arms (5×), feet
+    // (2×) etc.  Defaults of 0 mean "no relaxation" → strict baseline.
+    float            magDipGateRelax;
+    float            magAngGateRelax;
+    // Spec §51.3 normDiffFromModelMax × per-seg multiplier (≥ 1) for the
+    // norm gate.  Default 0 → fall back to KFA_MAG_NORM_GATE = 0.03.
+    float            magNormGateRelax;
 } FusionAhrsSettings;
 
 // ----------------------------------------------------------------------------

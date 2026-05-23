@@ -839,6 +839,87 @@ inline QVector3D referenceM0FreeFieldVec() {
 }
 
 // ---------------------------------------------------------------------------
+//  §51.6 / §43.10 — per-segment magnetic-gate relaxation table.
+//
+//  The base gate thresholds (kMagnet.angleDiffFromModelMaxDeg = 6°,
+//  dipDiffFromModelMaxDeg = 3.5°, normDiffFromModelMax = 0.03) target a
+//  body-mounted sensor far from external metal.  In practice the head,
+//  hands, feet and (to a lesser extent) the chest read a noticeably
+//  different field because of skull plates / glove electronics / shoe
+//  steel / sternum-mounted electronics — so the strict body threshold
+//  closes their magnetic gate almost permanently and their heading drifts
+//  off the sole inertial input.  This table relaxes the per-segment gate
+//  in proportion to the spec's FOX_Calib.e_* expectations.
+//
+//  Multipliers ≥ 1.  Caller multiplies them into the base thresholds.
+//  Default for non-distorted segments (Pelvis, legs, shoulders) = 1.0.
+// ---------------------------------------------------------------------------
+struct MagGateRelax {
+    float angleMul;     // multiplier on angleDiffFromModelMaxDeg (base 6°)
+    float dipMul;       // multiplier on dipDiffFromModelMaxDeg   (base 3.5°)
+    float normMul;      // multiplier on normDiffFromModelMax      (base 0.03)
+};
+
+inline constexpr std::array<MagGateRelax, kSegmentCount> kMagGateRelax = {{
+    /* 0  Pelvis    */ { 1.5f, 1.3f, 1.0f + 0.20f }, // e_norm_pelvis=0.20
+    /* 1  L5        */ { 1.0f, 1.0f, 1.0f },         // interpolated
+    /* 2  L3        */ { 1.0f, 1.0f, 1.0f },
+    /* 3  T12       */ { 1.0f, 1.0f, 1.0f },
+    /* 4  T8        */ { 1.5f, 1.3f, 1.0f },         // e_inclx_sternum / spine
+    /* 5  Neck      */ { 1.0f, 1.0f, 1.0f },
+    /* 6  Head      */ { 4.0f, 2.5f, 1.0f + 0.30f }, // e_norm_head=0.30
+    /* 7  RShoulder */ { 1.0f, 1.0f, 1.0f },         // close to torso
+    /* 8  RUpperArm */ { 5.0f, 5.0f, 1.0f },         // e_incl_arm=30° → ×5
+    /* 9  RForearm  */ { 5.0f, 5.0f, 1.0f },
+    /* 10 RHand     */ { 5.0f, 5.0f, 1.0f + 0.35f }, // e_norm_hands=0.35
+    /* 11 LShoulder */ { 1.0f, 1.0f, 1.0f },
+    /* 12 LUpperArm */ { 5.0f, 5.0f, 1.0f },
+    /* 13 LForearm  */ { 5.0f, 5.0f, 1.0f },
+    /* 14 LHand     */ { 5.0f, 5.0f, 1.0f + 0.35f },
+    /* 15 RUpperLeg */ { 1.0f, 1.0f, 1.0f },         // legs run cleaner
+    /* 16 RLowerLeg */ { 1.5f, 1.5f, 1.0f },         // some shin metal
+    /* 17 RFoot     */ { 2.0f, 2.0f, 1.0f + 0.22f }, // 0.1·e_mag_feet=0.22
+    /* 18 RToe      */ { 1.0f, 1.0f, 1.0f },         // interpolated
+    /* 19 LUpperLeg */ { 1.0f, 1.0f, 1.0f },
+    /* 20 LLowerLeg */ { 1.5f, 1.5f, 1.0f },
+    /* 21 LFoot     */ { 2.0f, 2.0f, 1.0f + 0.22f },
+    /* 22 LToe      */ { 1.0f, 1.0f, 1.0f },
+}};
+
+// ---------------------------------------------------------------------------
+//  §43.10 — per-segment IMU chip type.  The FOX_IMU_x3 chip (newest revision)
+//  has 60× higher magnetometer noise density (ndCoefficient = 0.25 vs 0.004
+//  for w2/x2).  Sensors using x3 need a substantially wider magnetic gate
+//  or they essentially never open it.  Default = ImuW2 for compatibility
+//  with existing deployments; override per segment in the table below as
+//  hardware information becomes available.
+// ---------------------------------------------------------------------------
+enum class ImuChipType : std::uint8_t { W2, X2, X3 };
+
+inline constexpr std::array<ImuChipType, kSegmentCount> kImuChipPerSeg = {{
+    /*  0..22 */
+    ImuChipType::W2, ImuChipType::W2, ImuChipType::W2, ImuChipType::W2,
+    ImuChipType::W2, ImuChipType::W2, ImuChipType::W2, ImuChipType::W2,
+    ImuChipType::W2, ImuChipType::W2, ImuChipType::W2, ImuChipType::W2,
+    ImuChipType::W2, ImuChipType::W2, ImuChipType::W2, ImuChipType::W2,
+    ImuChipType::W2, ImuChipType::W2, ImuChipType::W2, ImuChipType::W2,
+    ImuChipType::W2, ImuChipType::W2, ImuChipType::W2,
+}};
+
+// Magnetic noise ratio for the chip's measurement model.  ndCoefficient
+// scales the std-dev linearly; the gate threshold scales by the square
+// root because we compare a dip angle against a noise standard deviation.
+//   x3 / w2 = sqrt(0.25 / 0.004) ≈ 7.91
+inline float magNoiseScaleForChip(ImuChipType c) {
+    switch (c) {
+        case ImuChipType::X3: return 7.91f;
+        case ImuChipType::W2:
+        case ImuChipType::X2:
+        default: return 1.0f;
+    }
+}
+
+// ---------------------------------------------------------------------------
 //  §38.5 — skin artifact (Gauss-Markov soft-tissue model).  This is the
 //  «viscosity» of the IMU relative to the underlying bone.
 //      x_k = exp(-Δt/τ) · x_{k−1} + ε,  ε ~ N(0, σ²)

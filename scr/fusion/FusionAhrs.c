@@ -305,6 +305,9 @@ const FusionAhrsSettings fusionAhrsDefaultSettings = {
     .magDipModelDeg         = 78.0f,       // §51.6 e_dip_mag for body
     .magDeclinationDeg      = 0.0f,
     .magNormReferenceLocal  = 0.0f,        // 0 → use body baseline (1.0)
+    .magDipGateRelax        = 0.0f,        // 0 → use strict KFA_MAG_DIP_GATE_DEG
+    .magAngGateRelax        = 0.0f,        // 0 → use strict KFA_MAG_ANG_GATE_DEG
+    .magNormGateRelax       = 0.0f,        // 0 → use strict KFA_MAG_NORM_GATE
 };
 
 // ============================================================================
@@ -600,6 +603,19 @@ static bool MagGate(FusionAhrs *ahrs, FusionVector m) {
     const float mNorm = sqrtf(m.axis.x * m.axis.x + m.axis.y * m.axis.y + m.axis.z * m.axis.z);
     if (mNorm < 1e-6f) return false;
 
+    // Per-segment relaxation multipliers (spec §51.6 + §43.10).  When
+    // caller leaves them at 0 the strict body baselines apply unchanged;
+    // setting them ≥ 1 widens the gate for sensors that read a distorted
+    // field (hands / head / feet).  Multipliers apply only to the gate
+    // tolerance, not the model itself — the dip / declination expectations
+    // (78°, 0°) stay where they are.
+    const float dipRelax  = (ahrs->settings.magDipGateRelax  > 0.0f)
+                                ? ahrs->settings.magDipGateRelax  : 1.0f;
+    const float angRelax  = (ahrs->settings.magAngGateRelax  > 0.0f)
+                                ? ahrs->settings.magAngGateRelax  : 1.0f;
+    const float normRelax = (ahrs->settings.magNormGateRelax > 0.0f)
+                                ? ahrs->settings.magNormGateRelax : 1.0f;
+
     // Gate 1 — norm  (§51.3 normDiffFromModelMax = 0.03)
     // Reference norm is segment-specific (§51.6 — pelvis 1.0, head 1.3,
     // hands 1.35, feet 1.22).  Falls back to the body baseline (1.0) when
@@ -608,7 +624,7 @@ static bool MagGate(FusionAhrs *ahrs, FusionVector m) {
                               ? ahrs->settings.magNormReferenceLocal
                               : KFA_MAG_NORM_REF;
     const float normErr = fabsf(mNorm - refNorm) / refNorm;
-    if (normErr > KFA_MAG_NORM_GATE) return false;
+    if (normErr > KFA_MAG_NORM_GATE * normRelax) return false;
 
     // Gate 2 — dip.  Use the specific-force gravity convention (+Z up in
     // NWU): sensor-frame "up" = R⁻¹·(0,0,+1).  Dip = arcsin(-m̂·ĝ_up)
@@ -618,7 +634,8 @@ static bool MagGate(FusionAhrs *ahrs, FusionVector m) {
                              gUp.axis.y * m.axis.y +
                              gUp.axis.z * m.axis.z) / mNorm;       // m̂ · ĝ_up
     const float dipMeasDeg = RadToDeg(asinf(fmaxf(-1.0f, fminf(1.0f, -gDotMUnit))));
-    if (fabsf(dipMeasDeg - ahrs->settings.magDipModelDeg) > KFA_MAG_DIP_GATE_DEG) return false;
+    if (fabsf(dipMeasDeg - ahrs->settings.magDipModelDeg)
+            > KFA_MAG_DIP_GATE_DEG * dipRelax) return false;
 
     // Gate 3 — declination angle on the horizontal plane.
     // m_perp = m − (m·ĝ_up) · ĝ_up  (§43.14 doProjectMagOnHoriPlane=B1).
@@ -631,7 +648,8 @@ static bool MagGate(FusionAhrs *ahrs, FusionVector m) {
     const FusionVector mWorld = RotByQ(ahrs->q, mHoriz);
     // NWU: X = North → declination measured east-of-north as atan2(-Y, X)
     const float angDeg = RadToDeg(atan2f(-mWorld.axis.y, mWorld.axis.x));
-    if (fabsf(angDeg - ahrs->settings.magDeclinationDeg) > KFA_MAG_ANG_GATE_DEG) return false;
+    if (fabsf(angDeg - ahrs->settings.magDeclinationDeg)
+            > KFA_MAG_ANG_GATE_DEG * angRelax) return false;
     return true;
 }
 
