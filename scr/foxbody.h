@@ -215,6 +215,79 @@ inline const std::array<SensorToBone, kSegmentCount> kSensorToBone = {{
       QVector3D( 0.06400f,  0.00000f, -0.01500f) },
 }};
 
+// ---------------------------------------------------------------------------
+//  §24.1 / §24.2 — reference bone-in-world quaternions for the two
+//  calibration poses (legacy male body model; female/robot variants belong
+//  to future PRs).  Used by §174.4 q_align computation:
+//      q_align(i) = kRefQuatN[i] ⊗ conj(q_S_avg(i)) ⊗ conj(q_bs(i)).
+//
+//  T-pose (arms horizontal) — every segment is identity in world frame:
+//  the body is upright, arms extend laterally along the standard MVN body
+//  axes, so the bone-to-world rotation matches the skeleton's reference
+//  pose with no per-segment correction.
+//
+//  N-pose (arms down at sides) — the arm chain (UpperArm, ForeArm, Hand)
+//  rotates 90° about ±X relative to the T-pose, so the bones point along
+//  −Z in world frame.  Right side rotates +90° about +X (→ +Y axis maps
+//  to +Z, so the T-pose lateral arm (−Y) maps to −Z = down).  Left side
+//  rotates +90° about −X (mirrored).  Spec §174.3 gives the example for
+//  RUpperArm verbatim: q_эталон_9 = (0.7071, 0.7071, 0, 0).
+// ---------------------------------------------------------------------------
+inline constexpr std::array<Quat, kSegmentCount> kRefQuatT = {{
+    /* 0  Pelvis    */ Quat(1, 0, 0, 0),
+    /* 1  L5        */ Quat(1, 0, 0, 0),
+    /* 2  L3        */ Quat(1, 0, 0, 0),
+    /* 3  T12       */ Quat(1, 0, 0, 0),
+    /* 4  T8        */ Quat(1, 0, 0, 0),
+    /* 5  Neck      */ Quat(1, 0, 0, 0),
+    /* 6  Head      */ Quat(1, 0, 0, 0),
+    /* 7  RShoulder */ Quat(1, 0, 0, 0),
+    /* 8  RUpperArm */ Quat(1, 0, 0, 0),
+    /* 9  RForeArm  */ Quat(1, 0, 0, 0),
+    /* 10 RHand     */ Quat(1, 0, 0, 0),
+    /* 11 LShoulder */ Quat(1, 0, 0, 0),
+    /* 12 LUpperArm */ Quat(1, 0, 0, 0),
+    /* 13 LForeArm  */ Quat(1, 0, 0, 0),
+    /* 14 LHand     */ Quat(1, 0, 0, 0),
+    /* 15 RUpperLeg */ Quat(1, 0, 0, 0),
+    /* 16 RLowerLeg */ Quat(1, 0, 0, 0),
+    /* 17 RFoot     */ Quat(1, 0, 0, 0),
+    /* 18 RToe      */ Quat(1, 0, 0, 0),
+    /* 19 LUpperLeg */ Quat(1, 0, 0, 0),
+    /* 20 LLowerLeg */ Quat(1, 0, 0, 0),
+    /* 21 LFoot     */ Quat(1, 0, 0, 0),
+    /* 22 LToe      */ Quat(1, 0, 0, 0),
+}};
+
+// Spec §24.2 — right arm chain: +90° about +X.  Left arm chain mirror:
+// +90° about −X (equivalent: −90° about +X).  Magnitude = √½ ≈ 0.7071068.
+inline constexpr double kRefSqrtHalf = 0.7071067811865475;
+inline constexpr std::array<Quat, kSegmentCount> kRefQuatN = {{
+    /* 0  Pelvis    */ Quat(1, 0, 0, 0),
+    /* 1  L5        */ Quat(1, 0, 0, 0),
+    /* 2  L3        */ Quat(1, 0, 0, 0),
+    /* 3  T12       */ Quat(1, 0, 0, 0),
+    /* 4  T8        */ Quat(1, 0, 0, 0),
+    /* 5  Neck      */ Quat(1, 0, 0, 0),
+    /* 6  Head      */ Quat(1, 0, 0, 0),
+    /* 7  RShoulder */ Quat(1, 0, 0, 0),
+    /* 8  RUpperArm */ Quat(kRefSqrtHalf,  kRefSqrtHalf, 0, 0),
+    /* 9  RForeArm  */ Quat(kRefSqrtHalf,  kRefSqrtHalf, 0, 0),
+    /* 10 RHand     */ Quat(kRefSqrtHalf,  kRefSqrtHalf, 0, 0),
+    /* 11 LShoulder */ Quat(1, 0, 0, 0),
+    /* 12 LUpperArm */ Quat(kRefSqrtHalf, -kRefSqrtHalf, 0, 0),
+    /* 13 LForeArm  */ Quat(kRefSqrtHalf, -kRefSqrtHalf, 0, 0),
+    /* 14 LHand     */ Quat(kRefSqrtHalf, -kRefSqrtHalf, 0, 0),
+    /* 15 RUpperLeg */ Quat(1, 0, 0, 0),
+    /* 16 RLowerLeg */ Quat(1, 0, 0, 0),
+    /* 17 RFoot     */ Quat(1, 0, 0, 0),
+    /* 18 RToe      */ Quat(1, 0, 0, 0),
+    /* 19 LUpperLeg */ Quat(1, 0, 0, 0),
+    /* 20 LLowerLeg */ Quat(1, 0, 0, 0),
+    /* 21 LFoot     */ Quat(1, 0, 0, 0),
+    /* 22 LToe      */ Quat(1, 0, 0, 0),
+}};
+
 // Stub offsets (pelvis→hip-joint, T8→shoulder-joint) used by the FK dummy chain.
 // Hip half-width ±0.08 m Y (spec §37.6: «таз: бёдра ±0.08 по Y, ширина таза 0.16 м»).
 // Shoulder half-width ±0.16 m Y (typical bi-acromial half on a 1.75 m subject;
@@ -839,5 +912,110 @@ inline int lumpOf(int jointIdx) {
 inline int ergoTypeOf(int jointIdx) {
     return (jointIdx >= 0 && jointIdx < kJointCount) ? int(kErgoHandler[jointIdx]) : 0;
 }
+
+// ---------------------------------------------------------------------------
+//  §1699-1722 — FoxSPC sensor-placement classifier (sklearn RBF-SVM).
+//  17 classes × 315 features.  Class index order is alphabetical (the order
+//  the ONNX `label` output emits — see §1719).
+// ---------------------------------------------------------------------------
+constexpr int kSpcClassCount   = 17;
+constexpr int kSpcFeatureCount = 315;
+
+inline constexpr std::array<const char*, kSpcClassCount> kSensorPlacementClasses = {
+    "Head", "LeftFoot", "LeftForeArm", "LeftHand", "LeftLowerLeg",
+    "LeftShoulder", "LeftUpperArm", "LeftUpperLeg", "Pelvis",
+    "RightFoot", "RightForeArm", "RightHand", "RightLowerLeg",
+    "RightShoulder", "RightUpperArm", "RightUpperLeg", "T8",
+};
+
+// §1719 — class index → 23-segment SEG_* (matches main.h enum + foxbody segment
+// ordering).  Pelvis=0, T8=4, Head=6 etc.
+inline constexpr std::array<int, kSpcClassCount> kClassToSeg = {
+    /* 0  Head          */  6,
+    /* 1  LeftFoot      */ 21,
+    /* 2  LeftForeArm   */ 13,
+    /* 3  LeftHand      */ 14,
+    /* 4  LeftLowerLeg  */ 20,
+    /* 5  LeftShoulder  */ 11,
+    /* 6  LeftUpperArm  */ 12,
+    /* 7  LeftUpperLeg  */ 19,
+    /* 8  Pelvis        */  0,
+    /* 9  RightFoot     */ 17,
+    /* 10 RightForeArm  */  9,
+    /* 11 RightHand     */ 10,
+    /* 12 RightLowerLeg */ 16,
+    /* 13 RightShoulder */  7,
+    /* 14 RightUpperArm */  8,
+    /* 15 RightUpperLeg */ 15,
+    /* 16 T8            */  4,
+};
+
+// Inverse mapping: SEG_* → class index, or −1 for segments without an IMU
+// (L5, L3, T12, Neck, RToe, LToe — see kSensorPresent).
+inline constexpr std::array<int, kSegmentCount> kSegToClass = {
+    /* 0  Pelvis    */  8,
+    /* 1  L5        */ -1,
+    /* 2  L3        */ -1,
+    /* 3  T12       */ -1,
+    /* 4  T8        */ 16,
+    /* 5  Neck      */ -1,
+    /* 6  Head      */  0,
+    /* 7  RShoulder */ 13,
+    /* 8  RUpperArm */ 14,
+    /* 9  RForeArm  */ 10,
+    /* 10 RHand     */ 11,
+    /* 11 LShoulder */  5,
+    /* 12 LUpperArm */  6,
+    /* 13 LForeArm  */  2,
+    /* 14 LHand     */  3,
+    /* 15 RUpperLeg */ 15,
+    /* 16 RLowerLeg */ 12,
+    /* 17 RFoot     */  9,
+    /* 18 RToe      */ -1,
+    /* 19 LUpperLeg */  7,
+    /* 20 LLowerLeg */  4,
+    /* 21 LFoot     */  1,
+    /* 22 LToe      */ -1,
+};
+
+// FoxSPC feature spec (§1700–1716).  315 features defined by:
+//   epoch  ∈ { calibration, leftArmRaise, rightArmRaise,
+//              leftLegRaise, rightLegRaise }      — 5 epochs
+//   signal ∈ { Acc, Gyr }                          — 2 sensor channels
+//   axis   ∈ { x, y, z, xAbs, yAbs, zAbs, Normxyz } — 7 virtual axes
+//   band   ∈ { none, freqBand0.5To4.0,
+//              freqBand4.5To10.0, freqBand10.0To-1.0 } — 4 bands
+//   stat   — see SpcStat below
+enum class SpcEpoch  : std::uint8_t {
+    Calibration, LeftArmRaise, RightArmRaise, LeftLegRaise, RightLegRaise
+};
+enum class SpcSignal : std::uint8_t { Acc, Gyr };
+enum class SpcAxis   : std::uint8_t { X, Y, Z, XAbs, YAbs, ZAbs, Normxyz };
+enum class SpcBand   : std::uint8_t {
+    None, Band0p5To4, Band4p5To10, Band10ToNyq
+};
+// §1703 + §1704 statistics — combined enum for the parser.
+enum class SpcStat : std::uint8_t {
+    Mean, Sum, Std, Var, Rms, Max, MaxIdx, Skew, Kurtosis,
+    SameAxisInterSensorCorrMax,    SameAxisInterSensorCorrAbsMax,
+    SameAxisInterSensorCorrSum,    SameAxisInterSensorCorrAbsSum,
+    SameSensorInterAxisCorrMax,    SameSensorInterAxisCorrAbsMax,
+    SameSensorInterAxisCorrSum,    SameSensorInterAxisCorrAbsSum,
+};
+
+struct SpcFeatureSpec {
+    SpcEpoch  epoch;
+    SpcSignal signal;
+    SpcAxis   axis;
+    SpcBand   band;
+    SpcStat   stat;
+};
+
+// Defined in foxbody.cpp: parses kFeatureNames into SpcFeatureSpec, then
+// derives per-feature min/max from spec §1705 typical ranges.
+extern const std::array<const char*,     kSpcFeatureCount> kFeatureNames;
+extern const std::array<SpcFeatureSpec,  kSpcFeatureCount> kFeatureSpecs;
+extern const std::array<float,           kSpcFeatureCount> kFeatureMin;
+extern const std::array<float,           kSpcFeatureCount> kFeatureMax;
 
 }  // namespace fox::body

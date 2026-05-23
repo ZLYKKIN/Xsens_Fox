@@ -14,6 +14,7 @@
 #include <QtGui/QVector3D>
 
 #include <cmath>
+#include <vector>
 
 namespace fox {
 
@@ -137,6 +138,20 @@ QVector3D angular_velocity_from_quat(const Quat& dq, double dtSec);
 // diagonal candidate (numerically stable when one component is near zero).
 // Result is canonicalised to w ≥ 0 and normalised.
 Quat matrix_to_quat_sheppard(const Matrix3& R);
+
+// Spec §174.2 — Shepard / Markley 4-D eigenvector quaternion average.
+//   M = Σ q_k q_kᵀ  (4×4 symmetric, accumulated over `samples`);
+//   q_avg = principal eigenvector of M, canonicalised to w ≥ 0.
+// Stable across hemispheres and outperforms the naïve sum/normalise mean for
+// quaternion spreads beyond a few degrees.  Returns identity if `samples`
+// is empty.
+Quat quat_avg_markley(const std::vector<Quat>& samples);
+
+// Spec §174.2 helper — Jacobi eigendecomposition of a 4×4 symmetric matrix.
+// On return: A's diagonal holds eigenvalues, U holds the eigenvectors in
+// columns.  Used by quat_avg_markley; exposed because the same matrix
+// shape comes up in other quaternion-averaging contexts.
+void jacobiSym4(double A[4][4], double U[4][4]);
 
 // Spec §40 — fractional power of a unit quaternion via log/exp:
 //     q^t = exp( t · log(q) ).
