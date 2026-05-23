@@ -1681,6 +1681,26 @@ void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
        << "  contact=" << loco.contactFracSec() << "s"
        << std::setprecision(4) << "\n";
 
+    // §1127 / §12.1 — body centre of mass.  Only useful when segCenters
+    // are valid (FK has run at least once).  Drawn from the contact
+    // detector's cached pelvis position to avoid a full FK re-trace.
+    if (glovesEnabled) {
+        const QVector3D cop = cr.active.empty()
+            ? QVector3D(0, 0, 0)
+            : [&cr]() {
+                  QVector3D sum(0, 0, 0); double w = 0.0;
+                  for (const auto& c : cr.active) {
+                      sum += c.p_world * float(c.probability);
+                      w += c.probability;
+                  }
+                  return (w > 0.0) ? (sum / float(w)) : QVector3D(0, 0, 0);
+              }();
+        ss << "[CoP]  active=" << cr.active.size()
+           << "  centre=(" << std::setprecision(3) << cop.x()
+           << "," << cop.y() << "," << cop.z() << ")"
+           << std::setprecision(4) << "\n";
+    }
+
     if (!cr.active.empty()) {
         ss << "[zupt-wls] active=" << cr.active.size();
         for (const auto& c : cr.active) {
