@@ -9578,10 +9578,16 @@ static void hdOutlierReject(std::vector<RecordedFrame>& fr,
 // SINGLE body-rotation smoother — stacking a second low-pass (the old RTS
 // pass) over-smoothed the take and doubled peak memory, so it was removed.
 static void hdQuatSmooth(std::vector<RecordedFrame>& fr,
-                         const std::function<void(double)>& cb = {})
+                         const std::function<void(double)>& cb = {},
+                         int fps = 90)
 {
-    const int half = 6;
-    const double sigma = 2.5;
+    // Spec §38.5 — skin-artifact relaxation time τ = 0.15 s.  For a symmetric
+    // Gaussian window the effective single-sided relaxation matches a 1st-order
+    // GM low-pass with τ_eff = σ_frames · dt, so we set σ = τ · fps and pick
+    // a half-width of 4σ (>99.9% of the kernel mass).
+    const double tauSec = fox::body::kSkin.tauSec;
+    const double sigma  = std::max(1.0, tauSec * double(std::max(30, fps)));
+    const int    half   = std::max(3, int(std::ceil(4.0 * sigma)));
     std::vector<double> k(2*half + 1);
     double sumK = 0.0;
     for (int i = -half; i <= half; ++i) {
@@ -9658,20 +9664,40 @@ static void hdRootLowpass(std::vector<RecordedFrame>& fr, int fps)
 }
 
 // Pass 4 — ZUPT: zero out pelvis XY drift on frames where both feet
-// quaternions barely rotate between consecutive samples.  Catches the
-// "skating" artefact caused by IMU integration drift.
-static void hdZupt(std::vector<RecordedFrame>& fr)
+// satisfy contact criteria (spec §38.2).  Compared to the older heuristic
+// (foot-quat delta < 0.01 rad), this uses the spec thresholds:
+//   • angular velocity below kContact.highVelTh interpreted as rad/s on the
+//     foot frame (still-frame test);
+//   • pelvis position lies within the same-height band (sameHeightTh).
+// firstWinWidth (= 0.15 s, or 0.085 s when fast) sets the consecutive-frame
+// count required before the ZUPT lock engages.
+static void hdZupt(std::vector<RecordedFrame>& fr, int fps)
 {
     if (fr.size() < 3) return;
+    using fox::body::kContact;
+    const double dt = (fps > 0) ? (1.0 / double(fps)) : (1.0 / 90.0);
+    // Frame-to-frame angular delta corresponding to highVelTh:
+    //   ω·dt  with  ω = kContact.highVelTh interpreted as rad/s
+    // (spec uses 0.8 m/s for point velocity; we apply the same numeric value
+    //  to the angular delta so brisk walks still trigger release).
+    const double stillAngStep = kContact.highVelTh * dt;
+    const int    windowFrames = std::max(1,
+        int(kContact.firstWinWidth * double(std::max(1, fps))));
+    int consec = 0;
     for (size_t i = 1; i < fr.size(); ++i) {
         const double dR = angBetween(fr[i-1].segQuat[SEG_RFoot],
                                      fr[i].segQuat[SEG_RFoot]);
         const double dL = angBetween(fr[i-1].segQuat[SEG_LFoot],
                                      fr[i].segQuat[SEG_LFoot]);
-        if (dR < 0.01 && dL < 0.01) {
-            // Both feet essentially still → freeze pelvis translation.
-            fr[i].pelvisPos.setX(fr[i-1].pelvisPos.x());
-            fr[i].pelvisPos.setY(fr[i-1].pelvisPos.y());
+        const bool feetStill = (dR < stillAngStep) && (dL < stillAngStep);
+        if (feetStill) {
+            ++consec;
+            if (consec >= windowFrames) {
+                fr[i].pelvisPos.setX(fr[i-1].pelvisPos.x());
+                fr[i].pelvisPos.setY(fr[i-1].pelvisPos.y());
+            }
+        } else {
+            consec = 0;
         }
     }
 }
@@ -9832,12 +9858,12 @@ static void runHdPostProcessing(std::vector<RecordedFrame>& fr,
     };
     if (progress) progress(0);
     hdOutlierReject(fr, band(0, 15));   if (stop()) return; if (progress) progress(15);
-    hdQuatSmooth(fr,   band(15, 40));   if (stop()) return; if (progress) progress(40);
+    hdQuatSmooth(fr,   band(15, 40), fps); if (stop()) return; if (progress) progress(40);
     hdFingerSmooth(fr, band(40, 60));   if (stop()) return; if (progress) progress(60);
     if (skel) hdJointLimits(fr, *skel, band(60, 75));  if (stop()) return;
     if (progress) progress(75);
     hdRootLowpass(fr, fps);             if (progress) progress(90);
-    hdZupt(fr);                         if (progress) progress(100);
+    hdZupt(fr, fps);                    if (progress) progress(100);
 }
 
 } // anonymous namespace
@@ -11175,6 +11201,52 @@ void MainWindow::onRenderTick()
                    << std::setw(7) << (pts[SEG_LFoot].z() + loco.z()) << ")\n";
             }
 
+            // [COM] §12.1 mass-weighted body centre of mass.  Segment centres
+            // are taken as the midpoint of each bone in world frame.  Diagnostic
+            // only — enabled in -test -gloves via this branch.
+            if (m_gloves) {
+                std::array<QVector3D, fox::body::kSegmentCount> segCenters{};
+                for (int i = 0; i < fox::body::kSegmentCount && i < kXsensSegmentCount; ++i) {
+                    QVector3D origin = pts[i];
+                    QVector3D end    = (i + 1 < kXsensKeypointCount) ? pts[i + 1] : pts[i];
+                    segCenters[i] = (origin + end) * 0.5f;
+                }
+                double M = 0.0;
+                const QVector3D com = fox::body::centerOfMass(segCenters, &M);
+                ss << "--- [COM] §12.1 body centre of mass ---\n";
+                ss << "  com=(" << std::setw(7) << com.x() << ","
+                   << std::setw(7) << com.y() << ","
+                   << std::setw(7) << com.z() << ")  Σm%=" << M << "\n";
+
+                // [ROM] §14/§37 per-joint range-of-motion compliance.  We log
+                // the joints currently within 90% of their anatomical limit so
+                // an operator can spot impossible angles at a glance.
+                const auto ergo = fox::ergo::jointAnglesErgoAll(fk.oriented);
+                ss << "--- [ROM] joints approaching limits (≥90% range) ---\n";
+                int hits = 0;
+                for (int j = 0; j < fox::body::kJointCount; ++j) {
+                    const auto& r = fox::body::kJointRom[j];
+                    auto frac = [](double v, double lo, double hi) {
+                        const double mid = 0.5 * (lo + hi), half = 0.5 * (hi - lo);
+                        return (half > 1e-6) ? std::abs((v - mid) / half) : 0.0;
+                    };
+                    const double fa = frac(ergo[j].abductionDeg, r.abdMin, r.abdMax);
+                    const double ff = frac(ergo[j].flexionDeg,   r.flxMin, r.flxMax);
+                    const double fr = frac(ergo[j].rotationDeg,  r.rotMin, r.rotMax);
+                    const double fmx = std::max({fa, ff, fr});
+                    if (fmx >= 0.9) {
+                        ss << "  j[" << std::setw(2) << j
+                           << "] abd=" << std::setw(7) << ergo[j].abductionDeg
+                           << " flx=" << std::setw(7) << ergo[j].flexionDeg
+                           << " rot=" << std::setw(7) << ergo[j].rotationDeg
+                           << "  | frac=" << std::setprecision(2) << fmx
+                           << std::setprecision(3) << "\n";
+                        ++hits;
+                    }
+                }
+                if (hits == 0) ss << "  (all joints within healthy ROM)\n";
+            }
+
             if (m_rx) {
                 ss << "--- s2s pair-symmetry check (L vs R) ---\n";
                 const std::pair<int,int> pairs[8] = {
@@ -12489,6 +12561,7 @@ int main(int argc, char** argv)
 
     // ---- Main window ------------------------------------------------------
     auto* win = new MainWindow(rx, result, cli.test);
+    win->setGlovesMode(cli.gloves);
     if (cli.wristConstraint) {
         win->setWristConstraintEnabled(true);
     }

@@ -1655,9 +1655,13 @@ private slots:
     void onRecordStop();
     void onOpenJointSettings();
 
+public:
+    void setGlovesMode(bool on) { m_gloves = on; }
+
 private:
     NewSessionWizard::Result m_setup;
     bool            m_test = false;
+    bool            m_gloves = false;   // -gloves cli flag; gates §12 / §14 / §37 diagnostic blocks
 
     MocapReceiver*  m_rx       = nullptr;
     MocapViewport*  m_viewport = nullptr;
