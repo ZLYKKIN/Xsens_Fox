@@ -913,4 +913,109 @@ inline int ergoTypeOf(int jointIdx) {
     return (jointIdx >= 0 && jointIdx < kJointCount) ? int(kErgoHandler[jointIdx]) : 0;
 }
 
+// ---------------------------------------------------------------------------
+//  §1699-1722 — FoxSPC sensor-placement classifier (sklearn RBF-SVM).
+//  17 classes × 315 features.  Class index order is alphabetical (the order
+//  the ONNX `label` output emits — see §1719).
+// ---------------------------------------------------------------------------
+constexpr int kSpcClassCount   = 17;
+constexpr int kSpcFeatureCount = 315;
+
+inline constexpr std::array<const char*, kSpcClassCount> kSensorPlacementClasses = {
+    "Head", "LeftFoot", "LeftForeArm", "LeftHand", "LeftLowerLeg",
+    "LeftShoulder", "LeftUpperArm", "LeftUpperLeg", "Pelvis",
+    "RightFoot", "RightForeArm", "RightHand", "RightLowerLeg",
+    "RightShoulder", "RightUpperArm", "RightUpperLeg", "T8",
+};
+
+// §1719 — class index → 23-segment SEG_* (matches main.h enum + foxbody segment
+// ordering).  Pelvis=0, T8=4, Head=6 etc.
+inline constexpr std::array<int, kSpcClassCount> kClassToSeg = {
+    /* 0  Head          */  6,
+    /* 1  LeftFoot      */ 21,
+    /* 2  LeftForeArm   */ 13,
+    /* 3  LeftHand      */ 14,
+    /* 4  LeftLowerLeg  */ 20,
+    /* 5  LeftShoulder  */ 11,
+    /* 6  LeftUpperArm  */ 12,
+    /* 7  LeftUpperLeg  */ 19,
+    /* 8  Pelvis        */  0,
+    /* 9  RightFoot     */ 17,
+    /* 10 RightForeArm  */  9,
+    /* 11 RightHand     */ 10,
+    /* 12 RightLowerLeg */ 16,
+    /* 13 RightShoulder */  7,
+    /* 14 RightUpperArm */  8,
+    /* 15 RightUpperLeg */ 15,
+    /* 16 T8            */  4,
+};
+
+// Inverse mapping: SEG_* → class index, or −1 for segments without an IMU
+// (L5, L3, T12, Neck, RToe, LToe — see kSensorPresent).
+inline constexpr std::array<int, kSegmentCount> kSegToClass = {
+    /* 0  Pelvis    */  8,
+    /* 1  L5        */ -1,
+    /* 2  L3        */ -1,
+    /* 3  T12       */ -1,
+    /* 4  T8        */ 16,
+    /* 5  Neck      */ -1,
+    /* 6  Head      */  0,
+    /* 7  RShoulder */ 13,
+    /* 8  RUpperArm */ 14,
+    /* 9  RForeArm  */ 10,
+    /* 10 RHand     */ 11,
+    /* 11 LShoulder */  5,
+    /* 12 LUpperArm */  6,
+    /* 13 LForeArm  */  2,
+    /* 14 LHand     */  3,
+    /* 15 RUpperLeg */ 15,
+    /* 16 RLowerLeg */ 12,
+    /* 17 RFoot     */  9,
+    /* 18 RToe      */ -1,
+    /* 19 LUpperLeg */  7,
+    /* 20 LLowerLeg */  4,
+    /* 21 LFoot     */  1,
+    /* 22 LToe      */ -1,
+};
+
+// FoxSPC feature spec (§1700–1716).  315 features defined by:
+//   epoch  ∈ { calibration, leftArmRaise, rightArmRaise,
+//              leftLegRaise, rightLegRaise }      — 5 epochs
+//   signal ∈ { Acc, Gyr }                          — 2 sensor channels
+//   axis   ∈ { x, y, z, xAbs, yAbs, zAbs, Normxyz } — 7 virtual axes
+//   band   ∈ { none, freqBand0.5To4.0,
+//              freqBand4.5To10.0, freqBand10.0To-1.0 } — 4 bands
+//   stat   — see SpcStat below
+enum class SpcEpoch  : std::uint8_t {
+    Calibration, LeftArmRaise, RightArmRaise, LeftLegRaise, RightLegRaise
+};
+enum class SpcSignal : std::uint8_t { Acc, Gyr };
+enum class SpcAxis   : std::uint8_t { X, Y, Z, XAbs, YAbs, ZAbs, Normxyz };
+enum class SpcBand   : std::uint8_t {
+    None, Band0p5To4, Band4p5To10, Band10ToNyq
+};
+// §1703 + §1704 statistics — combined enum for the parser.
+enum class SpcStat : std::uint8_t {
+    Mean, Sum, Std, Var, Rms, Max, MaxIdx, Skew, Kurtosis,
+    SameAxisInterSensorCorrMax,    SameAxisInterSensorCorrAbsMax,
+    SameAxisInterSensorCorrSum,    SameAxisInterSensorCorrAbsSum,
+    SameSensorInterAxisCorrMax,    SameSensorInterAxisCorrAbsMax,
+    SameSensorInterAxisCorrSum,    SameSensorInterAxisCorrAbsSum,
+};
+
+struct SpcFeatureSpec {
+    SpcEpoch  epoch;
+    SpcSignal signal;
+    SpcAxis   axis;
+    SpcBand   band;
+    SpcStat   stat;
+};
+
+// Defined in foxbody.cpp: parses kFeatureNames into SpcFeatureSpec, then
+// derives per-feature min/max from spec §1705 typical ranges.
+extern const std::array<const char*,     kSpcFeatureCount> kFeatureNames;
+extern const std::array<SpcFeatureSpec,  kSpcFeatureCount> kFeatureSpecs;
+extern const std::array<float,           kSpcFeatureCount> kFeatureMin;
+extern const std::array<float,           kSpcFeatureCount> kFeatureMax;
+
 }  // namespace fox::body

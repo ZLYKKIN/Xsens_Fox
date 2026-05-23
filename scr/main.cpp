@@ -13,6 +13,10 @@
 #include "foxcoupling.h"  // Post-FK biomech-coupling (spec §40 / §45–§48)
 #include "foxergo.h"      // Ergonomic joint-angle decomposition (spec §30)
 
+// ONNX Runtime — sensor-placement classifier (FoxSPC, spec §1699-1722).
+// Used by NewSessionWizard to verify which body segment each IMU is on.
+#include <onnxruntime_cxx_api.h>
+
 #include <QtCore/QCommandLineOption>
 #include <QtCore/QCommandLineParser>
 #include <QtCore/QDebug>
@@ -4287,6 +4291,18 @@ static const Tr kTr[] = {
     {"calib_n_prepare",    "Теперь N-поза — приготовьтесь (12с неподвижно)…", "Now N-pose — prepare (12s still)…"},
     {"calib_n_capture",    "N-поза — не двигайтесь 12с",        "N-pose — hold still 12s"},
     {"calib_pose_empty",   "Калибровка позы не получила стабильных данных (актёр двигался или сенсоры не передают). Качество будет низким — рекомендуется повторить калибровку.", "Pose calibration captured no stable data (actor moved or sensors not streaming). Quality will be poor — recommend recalibrating."},
+
+    // FoxSPC auto-mapping classifier (spec §1699-1722).
+    {"asl_loading_failed", "FoxSPC: модель размещения датчиков не загрузилась — авто-проверка отключена",
+                           "FoxSPC: placement model failed to load — auto-verification disabled"},
+    {"asl_no_data",        "FoxSPC: недостаточно данных для авто-проверки размещения (нужны движения рук и ног)",
+                           "FoxSPC: insufficient motion data for placement check (move arms / legs)"},
+    {"asl_ok",             "FoxSPC: размещение датчиков подтверждено (%1/%2)",
+                           "FoxSPC: placement verified (%1/%2)"},
+    {"asl_mismatch",       "FoxSPC: возможно неверное размещение — датчик %1 похож на %2 (p=%3)",
+                           "FoxSPC: possible misplacement — sensor %1 looks like %2 (p=%3)"},
+    {"asl_low_confidence", "FoxSPC: низкая уверенность модели — рекомендуется проверить размещение датчиков вручную",
+                           "FoxSPC: low model confidence — recommend manual placement check"},
     {"still",              "СТОИТЕ СПОКОЙНО",                   "STILL"},
     {"moving",             "ДВИЖЕНИЕ",                          "MOVING"},
     {"suit_connected",     "костюм подключён",                  "suit connected"},
@@ -4541,8 +4557,513 @@ static QIcon makeFlagIcon(const char* code)
 }
 
 // ============================================================================
+//  §1699-1722 — FoxSPC sensor-placement classifier
+//
+//  Loads the scikit-learn RBF-SVM exported to fox_sensor_placement_classifier.onnx
+//  and runs inference per physical sensor.  The 315-feature vector follows
+//  spec §1700–1716 (5 calibration epochs × Acc/Gyr × 7 virtual axes × stat).
+//
+//  In PR #51 only the "calibration" epoch (~stationary T+N capture) provides
+//  real data; the arm/leg-raise epochs are unpopulated, so features for those
+//  epochs fall to the lower clamp of the §1705 min/max scaling.  The
+//  classifier's confidence will reflect that — `analyzePlacement` only
+//  surfaces a mismatch warning when max(p) exceeds a threshold AND disagrees
+//  with the operator's physical sensor → segment mapping.
+// ============================================================================
+namespace spc {
+
+#ifdef _WIN32
+using PathChar = wchar_t;
+static std::wstring toOrtPath(const QString& p) { return p.toStdWString(); }
+#else
+using PathChar = char;
+static std::string  toOrtPath(const QString& p) { return p.toStdString(); }
+#endif
+
+// Window length used for FFT — clamped to the actual captured window.
+constexpr int kMinWindow = 32;
+
+// Real-DFT magnitude (Cooley-Tukey would be faster but the windows here are
+// ≤300 samples and FoxSPC runs once per calibration; clarity > throughput).
+static std::vector<float> realDftMag(const std::vector<float>& x)
+{
+    const int N = int(x.size());
+    if (N < 2) return {};
+    std::vector<float> mag(N / 2 + 1, 0.0f);
+    for (int k = 0; k <= N / 2; ++k) {
+        double re = 0.0, im = 0.0;
+        for (int n = 0; n < N; ++n) {
+            const double th = -2.0 * M_PI * double(k) * double(n) / double(N);
+            re += double(x[n]) * std::cos(th);
+            im += double(x[n]) * std::sin(th);
+        }
+        mag[k] = float(std::sqrt(re * re + im * im));
+    }
+    return mag;
+}
+
+// Pull the window of axis-data out of a sensor buffer.  `axis` is the
+// 7-valued SpcAxis (signed x/y/z, |x|/|y|/|z|, or Normxyz).
+static std::vector<float> axisWindow(
+    const NewSessionWizard::RawImuBuf& buf, fox::body::SpcSignal sig,
+    fox::body::SpcAxis ax, int s, int e)
+{
+    const auto& src = (sig == fox::body::SpcSignal::Acc) ? buf.acc : buf.gyr;
+    if (s < 0 || e <= s || e > int(src.size())) return {};
+    std::vector<float> out;
+    out.reserve(e - s);
+    for (int i = s; i < e; ++i) {
+        const QVector3D& v = src[i];
+        switch (ax) {
+            case fox::body::SpcAxis::X:    out.push_back(v.x()); break;
+            case fox::body::SpcAxis::Y:    out.push_back(v.y()); break;
+            case fox::body::SpcAxis::Z:    out.push_back(v.z()); break;
+            case fox::body::SpcAxis::XAbs: out.push_back(std::abs(v.x())); break;
+            case fox::body::SpcAxis::YAbs: out.push_back(std::abs(v.y())); break;
+            case fox::body::SpcAxis::ZAbs: out.push_back(std::abs(v.z())); break;
+            case fox::body::SpcAxis::Normxyz:
+                out.push_back(std::sqrt(v.x()*v.x() + v.y()*v.y() + v.z()*v.z()));
+                break;
+        }
+    }
+    return out;
+}
+
+// Slice the FFT magnitude vector to a Hz band [fLo, fHi] @ sampling rate fs.
+static std::vector<float> bandSlice(
+    const std::vector<float>& mag, int N, double fLo, double fHi, double fs)
+{
+    if (mag.empty() || N <= 1) return {};
+    const int kLo = std::max(0, int(std::round(fLo * double(N) / fs)));
+    const int kHi = std::min(int(mag.size()) - 1,
+                             (fHi <= 0.0) ? int(mag.size()) - 1
+                                          : int(std::round(fHi * double(N) / fs)));
+    if (kHi <= kLo) return {};
+    return std::vector<float>(mag.begin() + kLo, mag.begin() + kHi + 1);
+}
+
+// §1703 — basic statistics over a 1-D sample window (time-domain or |FFT|).
+static float stat_mean(const std::vector<float>& v) {
+    if (v.empty()) return 0.0f;
+    double s = 0.0;
+    for (float x : v) s += x;
+    return float(s / double(v.size()));
+}
+static float stat_sum(const std::vector<float>& v) {
+    double s = 0.0; for (float x : v) s += x; return float(s);
+}
+static float stat_std(const std::vector<float>& v) {
+    if (v.empty()) return 0.0f;
+    const double m = stat_mean(v);
+    double s = 0.0;
+    for (float x : v) { const double d = x - m; s += d * d; }
+    return float(std::sqrt(s / double(v.size())));
+}
+static float stat_var(const std::vector<float>& v) {
+    const float s = stat_std(v); return s * s;
+}
+static float stat_rms(const std::vector<float>& v) {
+    if (v.empty()) return 0.0f;
+    double s = 0.0; for (float x : v) s += double(x) * double(x);
+    return float(std::sqrt(s / double(v.size())));
+}
+static float stat_max(const std::vector<float>& v) {
+    if (v.empty()) return 0.0f;
+    float m = v[0]; for (float x : v) if (x > m) m = x; return m;
+}
+static float stat_maxIdx(const std::vector<float>& v) {
+    if (v.empty()) return 0.0f;
+    int idx = 0; for (int i = 1; i < int(v.size()); ++i) if (v[i] > v[idx]) idx = i;
+    return float(idx) / float(v.size());
+}
+static float stat_skew(const std::vector<float>& v) {
+    if (v.size() < 3) return 0.0f;
+    const double m = stat_mean(v);
+    double m2 = 0.0, m3 = 0.0;
+    for (float x : v) { const double d = x - m; m2 += d*d; m3 += d*d*d; }
+    m2 /= double(v.size());
+    m3 /= double(v.size());
+    if (m2 < 1e-12) return 0.0f;
+    return float(m3 / std::pow(m2, 1.5));
+}
+static float stat_kurt(const std::vector<float>& v) {
+    if (v.size() < 4) return 0.0f;
+    const double m = stat_mean(v);
+    double m2 = 0.0, m4 = 0.0;
+    for (float x : v) { const double d = x - m; m2 += d*d; m4 += d*d*d*d; }
+    m2 /= double(v.size());
+    m4 /= double(v.size());
+    if (m2 < 1e-12) return -3.0f;
+    return float(m4 / (m2 * m2) - 3.0);
+}
+
+// §1704 — Pearson correlation between two equal-length windows.
+static float pearson(const std::vector<float>& a, const std::vector<float>& b) {
+    const int n = std::min(int(a.size()), int(b.size()));
+    if (n < 2) return 0.0f;
+    double ma = 0.0, mb = 0.0;
+    for (int i = 0; i < n; ++i) { ma += a[i]; mb += b[i]; }
+    ma /= n; mb /= n;
+    double sab = 0.0, saa = 0.0, sbb = 0.0;
+    for (int i = 0; i < n; ++i) {
+        const double da = a[i] - ma, db = b[i] - mb;
+        sab += da * db; saa += da * da; sbb += db * db;
+    }
+    if (saa < 1e-12 || sbb < 1e-12) return 0.0f;
+    return float(sab / std::sqrt(saa * sbb));
+}
+
+// Resolve epoch start/end indices in `buf` for a given SpcEpoch.
+static std::pair<int, int> epochWindow(
+    const NewSessionWizard::RawImuBuf& buf, fox::body::SpcEpoch e)
+{
+    using fox::body::SpcEpoch;
+    const NewSessionWizard::RawImuBuf::Win* w = nullptr;
+    switch (e) {
+        case SpcEpoch::Calibration:   w = &buf.epochCalibration; break;
+        case SpcEpoch::LeftArmRaise:  w = &buf.epochLeftArm;     break;
+        case SpcEpoch::RightArmRaise: w = &buf.epochRightArm;    break;
+        case SpcEpoch::LeftLegRaise:  w = &buf.epochLeftLeg;     break;
+        case SpcEpoch::RightLegRaise: w = &buf.epochRightLeg;    break;
+    }
+    return { w->start, w->end };
+}
+
+// Compute one feature value for target sensor `t` over all sensors `bufs`.
+static float computeFeature(
+    int t,
+    const std::array<NewSessionWizard::RawImuBuf, kXsensSegmentCount>& bufs,
+    const fox::body::SpcFeatureSpec& f)
+{
+    constexpr double kFs = 60.0;  // post-downsample sampling rate (§1701)
+    using fox::body::SpcStat;
+    using fox::body::SpcBand;
+    using fox::body::SpcAxis;
+
+    auto wT = epochWindow(bufs[t], f.epoch);
+    if (wT.first < 0) return 0.0f;
+    std::vector<float> target = axisWindow(bufs[t], f.signal, f.axis,
+                                            wT.first, wT.second);
+    if (int(target.size()) < kMinWindow) return 0.0f;
+
+    // Frequency-band features run statistics on the |FFT| magnitude
+    // restricted to the band.  Time-domain features stay on `target` itself.
+    std::vector<float> work = target;
+    if (f.band != SpcBand::None) {
+        const int N = int(target.size());
+        std::vector<float> mag = realDftMag(target);
+        double fLo = 0.0, fHi = 0.0;
+        switch (f.band) {
+            case SpcBand::Band0p5To4:   fLo = 0.5;  fHi = 4.0;  break;
+            case SpcBand::Band4p5To10:  fLo = 4.5;  fHi = 10.0; break;
+            case SpcBand::Band10ToNyq:  fLo = 10.0; fHi = kFs / 2.0; break;
+            default: break;
+        }
+        work = bandSlice(mag, N, fLo, fHi, kFs);
+        if (work.empty()) return 0.0f;
+    }
+
+    switch (f.stat) {
+        case SpcStat::Mean:     return stat_mean(work);
+        case SpcStat::Sum:      return stat_sum(work);
+        case SpcStat::Std:      return stat_std(work);
+        case SpcStat::Var:      return stat_var(work);
+        case SpcStat::Rms:      return stat_rms(work);
+        case SpcStat::Max:      return stat_max(work);
+        case SpcStat::MaxIdx:   return stat_maxIdx(work);
+        case SpcStat::Skew:     return stat_skew(work);
+        case SpcStat::Kurtosis: return stat_kurt(work);
+        case SpcStat::SameAxisInterSensorCorrMax:
+        case SpcStat::SameAxisInterSensorCorrAbsMax:
+        case SpcStat::SameAxisInterSensorCorrSum:
+        case SpcStat::SameAxisInterSensorCorrAbsSum: {
+            // §1704.1-4 cross-sensor correlation on the same axis.
+            // We only correlate same-length windows; mismatched epochs (e.g.,
+            // arm-raise window present on some sensors but not others) are
+            // skipped, biasing those features toward 0.
+            float maxC = -2.0f, maxAbsC = 0.0f, sumC = 0.0f, sumAbsC = 0.0f;
+            int n = 0;
+            for (int s = 0; s < kXsensSegmentCount; ++s) {
+                if (s == t) continue;
+                if (!fox::body::kSensorPresent[s]) continue;
+                auto wS = epochWindow(bufs[s], f.epoch);
+                if (wS.first < 0) continue;
+                std::vector<float> other = axisWindow(bufs[s], f.signal, f.axis,
+                                                      wS.first, wS.second);
+                const int nm = std::min(int(target.size()), int(other.size()));
+                if (nm < kMinWindow) continue;
+                std::vector<float> a(target.begin(), target.begin() + nm);
+                std::vector<float> b(other.begin(),   other.begin()  + nm);
+                const float c = pearson(a, b);
+                if (c > maxC)        maxC    = c;
+                if (std::abs(c) > maxAbsC) maxAbsC = std::abs(c);
+                sumC    += c;
+                sumAbsC += std::abs(c);
+                ++n;
+            }
+            if (n == 0) return 0.0f;
+            if (f.stat == SpcStat::SameAxisInterSensorCorrMax)    return maxC;
+            if (f.stat == SpcStat::SameAxisInterSensorCorrAbsMax) return maxAbsC;
+            if (f.stat == SpcStat::SameAxisInterSensorCorrSum)    return sumC;
+            return sumAbsC;
+        }
+        case SpcStat::SameSensorInterAxisCorrMax:
+        case SpcStat::SameSensorInterAxisCorrAbsMax:
+        case SpcStat::SameSensorInterAxisCorrSum:
+        case SpcStat::SameSensorInterAxisCorrAbsSum: {
+            // §1704.5-8 cross-axis correlation within the same sensor.
+            // For target axis A, correlate against the two other axes B,C ∈ {x,y,z}\{A}.
+            const SpcAxis allAxes[3] = { SpcAxis::X, SpcAxis::Y, SpcAxis::Z };
+            SpcAxis selfAxis = f.axis;
+            if (selfAxis == SpcAxis::XAbs)    selfAxis = SpcAxis::X;
+            if (selfAxis == SpcAxis::YAbs)    selfAxis = SpcAxis::Y;
+            if (selfAxis == SpcAxis::ZAbs)    selfAxis = SpcAxis::Z;
+            if (selfAxis == SpcAxis::Normxyz) selfAxis = SpcAxis::X;
+            float maxC = -2.0f, maxAbsC = 0.0f, sumC = 0.0f, sumAbsC = 0.0f;
+            int n = 0;
+            for (SpcAxis other : allAxes) {
+                if (other == selfAxis) continue;
+                std::vector<float> b = axisWindow(bufs[t], f.signal, other,
+                                                   wT.first, wT.second);
+                const int nm = std::min(int(target.size()), int(b.size()));
+                if (nm < kMinWindow) continue;
+                std::vector<float> a(target.begin(), target.begin() + nm);
+                b.resize(nm);
+                const float c = pearson(a, b);
+                if (c > maxC) maxC = c;
+                if (std::abs(c) > maxAbsC) maxAbsC = std::abs(c);
+                sumC += c;
+                sumAbsC += std::abs(c);
+                ++n;
+            }
+            if (n == 0) return 0.0f;
+            if (f.stat == SpcStat::SameSensorInterAxisCorrMax)    return maxC;
+            if (f.stat == SpcStat::SameSensorInterAxisCorrAbsMax) return maxAbsC;
+            if (f.stat == SpcStat::SameSensorInterAxisCorrSum)    return sumC;
+            return sumAbsC;
+        }
+    }
+    return 0.0f;
+}
+
+// Build the 315-d feature vector for a target physical sensor and clamp to [0,1].
+static std::array<float, fox::body::kSpcFeatureCount> extractFeatures315(
+    int target,
+    const std::array<NewSessionWizard::RawImuBuf, kXsensSegmentCount>& bufs)
+{
+    std::array<float, fox::body::kSpcFeatureCount> out{};
+    for (int i = 0; i < fox::body::kSpcFeatureCount; ++i) {
+        const float raw = computeFeature(target, bufs, fox::body::kFeatureSpecs[i]);
+        const float lo  = fox::body::kFeatureMin[i];
+        const float hi  = fox::body::kFeatureMax[i];
+        const float den = (hi > lo) ? (hi - lo) : 1.0f;
+        float n = (raw - lo) / den;
+        if (n < 0.0f) n = 0.0f;
+        if (n > 1.0f) n = 1.0f;
+        out[i] = n;
+    }
+    return out;
+}
+
+// §1721 — Hungarian (Kuhn-Munkres) linear-assignment on a 17×17 cost matrix.
+// Minimises sum of cost[s][assigned[s]] subject to one-to-one matching.
+// Cost is the per-row matrix passed in; we use -log p_s,c so maximising
+// log-probability becomes minimising cost.  Square matrix only (n = 17).
+static std::array<int, fox::body::kSpcClassCount> hungarian17(
+    const std::array<std::array<float, fox::body::kSpcClassCount>,
+                     fox::body::kSpcClassCount>& cost)
+{
+    constexpr int N = fox::body::kSpcClassCount;
+    std::array<double, N + 1> u{}, v{};
+    std::array<int,    N + 1> p{}, way{};
+    for (int i = 1; i <= N; ++i) {
+        p[0] = i;
+        int j0 = 0;
+        std::array<double, N + 1> minv;  minv.fill(1e30);
+        std::array<bool,   N + 1> used;  used.fill(false);
+        do {
+            used[j0] = true;
+            const int i0 = p[j0];
+            double delta = 1e30;
+            int j1 = 0;
+            for (int j = 1; j <= N; ++j) {
+                if (used[j]) continue;
+                const double cur = double(cost[i0 - 1][j - 1]) - u[i0] - v[j];
+                if (cur < minv[j]) { minv[j] = cur; way[j] = j0; }
+                if (minv[j] < delta) { delta = minv[j]; j1 = j; }
+            }
+            for (int j = 0; j <= N; ++j) {
+                if (used[j]) { u[p[j]] += delta; v[j] -= delta; }
+                else         { minv[j] -= delta; }
+            }
+            j0 = j1;
+        } while (p[j0] != 0);
+        do {
+            const int j1 = way[j0];
+            p[j0] = p[j1];
+            j0    = j1;
+        } while (j0 != 0);
+    }
+    std::array<int, N> assign{};
+    for (int j = 1; j <= N; ++j) {
+        if (p[j] >= 1 && p[j] <= N) assign[p[j] - 1] = j - 1;
+    }
+    return assign;
+}
+
+// Wraps Ort::Env / Session.  Failure to load is non-fatal — calibration still
+// completes via §174.4 q_align; only the placement-verification advisory is
+// suppressed when the model isn't available.
+struct PlacementClassifier {
+    Ort::Env env{ORT_LOGGING_LEVEL_WARNING, "fox_kfa_spc"};
+    std::optional<Ort::Session> session;
+    bool ready = false;
+
+    void load(const QString& modelPath, bool log) {
+        try {
+            Ort::SessionOptions opts;
+            opts.SetIntraOpNumThreads(1);
+            opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+            const auto p = toOrtPath(modelPath);
+            session.emplace(env, p.c_str(), opts);
+            ready = true;
+            if (log) {
+                std::cout << "[FoxSPC] model loaded: "
+                          << modelPath.toStdString() << "\n";
+            }
+        } catch (const std::exception& ex) {
+            ready = false;
+            if (log) {
+                std::cout << "[FoxSPC] load failed: " << ex.what() << "\n";
+            }
+        }
+    }
+
+    // Run inference on a single 315-d feature vector.  Returns 17 class
+    // probabilities (empty on failure).  Caller checks ready first.
+    std::array<float, fox::body::kSpcClassCount> classify(
+        const std::array<float, fox::body::kSpcFeatureCount>& x)
+    {
+        std::array<float, fox::body::kSpcClassCount> probs{};
+        if (!ready || !session) return probs;
+        try {
+            Ort::MemoryInfo mem = Ort::MemoryInfo::CreateCpu(
+                OrtArenaAllocator, OrtMemTypeDefault);
+            std::array<int64_t, 2> shape{1, fox::body::kSpcFeatureCount};
+            std::vector<float> data(x.begin(), x.end());
+            Ort::Value input = Ort::Value::CreateTensor<float>(
+                mem, data.data(), data.size(), shape.data(), shape.size());
+
+            const char* inNames[]  = {"X"};
+            const char* outNames[] = {"label", "probabilities"};
+            auto outs = session->Run(Ort::RunOptions{nullptr},
+                                     inNames, &input, 1,
+                                     outNames, 2);
+            if (outs.size() < 2) return probs;
+            float* p = outs[1].GetTensorMutableData<float>();
+            for (int i = 0; i < fox::body::kSpcClassCount; ++i) probs[i] = p[i];
+        } catch (const std::exception&) {
+            // Single inference failures don't deserve a stderr spam — just
+            // return zeros, the caller already gates on max(p).
+        }
+        return probs;
+    }
+};
+
+// Run the full placement check on per-sensor IMU buffers.
+//   * Extract 17 × 315-d feature vectors (one per IMU).
+//   * Classify each through ONNX → 17 probability distributions.
+//   * Hungarian-assign 17 sensors to 17 segments (max sum of log p).
+//   * Compare with the operator's physical mapping (sensor s ↔ SEG_s).
+// Returns a UI summary string ready to drop into m_placementInfo.
+struct PlacementReport {
+    bool        haveModel = false;
+    bool        haveData  = false;
+    int         verified  = 0;
+    int         total     = 0;
+    QStringList mismatches;       // human-readable warnings
+    float       avgMaxP   = 0.0f; // diagnostic
+};
+
+static PlacementReport analyzePlacement(
+    PlacementClassifier& clf,
+    const std::array<NewSessionWizard::RawImuBuf, kXsensSegmentCount>& bufs,
+    bool testLog)
+{
+    PlacementReport rep;
+    rep.haveModel = clf.ready;
+    if (!clf.ready) return rep;
+
+    // Probability matrix p[s][c] for the 17 sensored segments.
+    std::array<std::array<float, fox::body::kSpcClassCount>,
+               fox::body::kSpcClassCount> probs{};
+    std::array<int, fox::body::kSpcClassCount> probRow{};   // maps row → SEG_*
+    int row = 0;
+    int dataRows = 0;
+    for (int s = 0; s < kXsensSegmentCount; ++s) {
+        if (!fox::body::kSensorPresent[s]) continue;
+        const auto wC = bufs[s].epochCalibration;
+        if (wC.start >= 0 && (wC.end - wC.start) >= kMinWindow) ++dataRows;
+        auto feat = extractFeatures315(s, bufs);
+        probs[row] = clf.classify(feat);
+        probRow[row] = s;
+        ++row;
+    }
+    rep.haveData = (dataRows > 0);
+    if (row == 0) return rep;
+
+    // Hungarian on -log p (high prob → low cost).
+    std::array<std::array<float, fox::body::kSpcClassCount>,
+               fox::body::kSpcClassCount> cost{};
+    for (int r = 0; r < row; ++r) {
+        for (int c = 0; c < fox::body::kSpcClassCount; ++c) {
+            const float p = std::max(probs[r][c], 1e-6f);
+            cost[r][c] = -std::log(p);
+        }
+    }
+    auto assign = hungarian17(cost);
+
+    float sumMax = 0.0f;
+    for (int r = 0; r < row; ++r) {
+        const int seg = probRow[r];
+        const int expectedClass = fox::body::kSegToClass[seg];
+        const int assignedClass = assign[r];
+        const float maxP = *std::max_element(probs[r].begin(), probs[r].end());
+        sumMax += maxP;
+
+        if (testLog) {
+            std::cout << "[FoxSPC] sensor " << std::setw(2) << seg
+                      << " (" << kSegmentNames[seg] << ") → class "
+                      << assignedClass << " ("
+                      << fox::body::kSensorPlacementClasses[assignedClass]
+                      << ") max_p=" << std::fixed << std::setprecision(3) << maxP
+                      << "  expected=" << expectedClass << "\n";
+        }
+
+        if (assignedClass == expectedClass) {
+            ++rep.verified;
+        } else if (maxP > 0.4f) {
+            rep.mismatches << QString("%1→%2 (p=%3)")
+                                .arg(QString::fromUtf8(kSegmentNames[seg]))
+                                .arg(QString::fromUtf8(
+                                    fox::body::kSensorPlacementClasses[assignedClass]))
+                                .arg(maxP, 0, 'f', 2);
+        }
+        ++rep.total;
+    }
+    rep.avgMaxP = (row > 0) ? sumMax / float(row) : 0.0f;
+    return rep;
+}
+
+}  // namespace spc
+
+// ============================================================================
 //  NewSessionWizard
 // ============================================================================
+
+// FoxSPC classifier instance — module-scope so the Ort::Env outlives the
+// wizard's stack frame (Ort::Session keeps a non-owning pointer into Env).
+static spc::PlacementClassifier g_placementClf;
 
 NewSessionWizard::NewSessionWizard(MocapReceiver* rx, bool testMode, QWidget* parent)
     : QDialog(parent), m_rx(rx), m_test(testMode)
@@ -4550,6 +5071,17 @@ NewSessionWizard::NewSessionWizard(MocapReceiver* rx, bool testMode, QWidget* pa
     setModal(true);
     setWindowTitle(Lang::t("app_title"));
     setMinimumSize(760, 640);
+
+    // §1699-1722 — load FoxSPC ONNX model once per wizard launch.  We resolve
+    // the model relative to the running .exe (CMake stages it into build/bin/);
+    // a missing model is non-fatal and just disables the placement check.
+    if (!g_placementClf.ready) {
+        const QString modelPath =
+            QCoreApplication::applicationDirPath()
+            + "/fox_sensor_placement_classifier.onnx";
+        g_placementClf.load(modelPath, m_test);
+    }
+    m_liveSpcEnabled = g_placementClf.ready;
 
     buildPages();
 
@@ -5170,6 +5702,13 @@ void NewSessionWizard::buildPages()
         m_calibQuality->setStyleSheet("color:#9B9B9B; font-size:9pt;");
         m_calibQuality->setWordWrap(true);
 
+        // FoxSPC placement-check result (spec §1699-1722) — populated by
+        // analyzePlacement() after the §174.4 q_align block.
+        m_placementInfo = new QLabel(p);
+        m_placementInfo->setAlignment(Qt::AlignCenter);
+        m_placementInfo->setStyleSheet("color:#9B9B9B; font-size:9pt;");
+        m_placementInfo->setWordWrap(true);
+
         m_btnCalibBegin = new QPushButton(p);
         m_btnCalibBegin->setObjectName("primary");
         m_btnCalibBegin->setMinimumHeight(42);
@@ -5199,6 +5738,7 @@ void NewSessionWizard::buildPages()
         hostLay->addWidget(m_stillLabel);
         hostLay->addWidget(m_calibStatus);
         hostLay->addWidget(m_calibQuality);
+        hostLay->addWidget(m_placementInfo);
         hostLay->addSpacing(12);
         hostLay->addWidget(m_btnCalibBegin, 0, Qt::AlignHCenter);
 
@@ -5621,6 +6161,18 @@ void NewSessionWizard::onCalibrationBegin()
     }
     m_fingerAccumCount = 0;
 
+    // §1700 — reset FoxSPC raw IMU buffers + epoch markers for a fresh run.
+    for (auto& buf : m_imuBuf) {
+        buf.acc.clear();
+        buf.gyr.clear();
+        buf.epochCalibration  = RawImuBuf::Win{-1, -1};
+        buf.epochLeftArm      = RawImuBuf::Win{-1, -1};
+        buf.epochRightArm     = RawImuBuf::Win{-1, -1};
+        buf.epochLeftLeg      = RawImuBuf::Win{-1, -1};
+        buf.epochRightLeg     = RawImuBuf::Win{-1, -1};
+    }
+    m_imuBufDecim = 0;
+
     // Bind pointer aliases to the T-pose buffers (CaptureT writes through
     // these so the capture loop stays pose-agnostic).
     m_accAccum    = &m_accAccumT;
@@ -5718,6 +6270,28 @@ void NewSessionWizard::onCaptureTick()
 
     constexpr double kStillRad = 0.025;
     const bool still = second < kStillRad;
+
+    // §1701 — accumulate 60 Hz Acc / Gyr time-series for FoxSPC.  240→60 Hz
+    // decimation is a 4:1 take-every-fourth-sample.  The "calibration" epoch
+    // covers the union of CaptureT + CaptureN windows; arm/leg-raise epochs
+    // are unpopulated in PR #51 (no dedicated wizard phase yet), so their
+    // feature values fall to the lower min-max clamp and the classifier
+    // either votes them off via Hungarian or surfaces low-confidence.
+    if (m_liveSpcEnabled
+        && (m_phase == CalibPhase::CaptureT || m_phase == CalibPhase::CaptureN)) {
+        if (++m_imuBufDecim >= 4) {
+            m_imuBufDecim = 0;
+            for (int i = 0; i < kXsensSegmentCount; ++i) {
+                if (!fr.segValid[i]) continue;
+                m_imuBuf[i].acc.push_back(fr.accSensor[i]);
+                m_imuBuf[i].gyr.push_back(fr.gyrSensor[i]);
+                if (m_imuBuf[i].epochCalibration.start < 0) {
+                    m_imuBuf[i].epochCalibration.start = int(m_imuBuf[i].acc.size()) - 1;
+                }
+                m_imuBuf[i].epochCalibration.end = int(m_imuBuf[i].acc.size());
+            }
+        }
+    }
 
     if (still) {
         m_samples.push_back(snap);
@@ -6130,6 +6704,45 @@ void NewSessionWizard::onCaptureTick()
                                         << gyrBias[i].z() << ") rad/s\n";
         }
         std::cout.flush();
+    }
+
+    // §1699-1722 — run FoxSPC sensor-placement classifier on the calibration
+    // epoch (T+N stillness data captured above).  Result is shown next to the
+    // §174.5 quality label; classifier failure or insufficient motion data is
+    // surfaced as a non-fatal advisory line.
+    if (m_placementInfo) {
+        if (!m_liveSpcEnabled || !g_placementClf.ready) {
+            m_placementInfo->setText(Lang::t("asl_loading_failed"));
+            m_placementInfo->setStyleSheet("color:#9B9B9B;");
+        } else {
+            const spc::PlacementReport rep = spc::analyzePlacement(
+                g_placementClf, m_imuBuf, m_test);
+            QString msg;
+            QString style = "color:#9B9B9B;";
+            if (!rep.haveData) {
+                msg   = Lang::t("asl_no_data");
+            } else if (rep.avgMaxP < 0.35f) {
+                msg   = Lang::t("asl_low_confidence");
+                style = "color:#E0A030; font-weight:700;";
+            } else if (rep.mismatches.isEmpty()) {
+                msg   = Lang::t("asl_ok").arg(rep.verified).arg(rep.total);
+                style = "color:#2EC25A; font-weight:700;";
+            } else {
+                const QString first = rep.mismatches.first();
+                const QStringList parts = first.split(QRegularExpression("[ →(=)]"),
+                                                       Qt::SkipEmptyParts);
+                QString a = parts.value(0);
+                QString b = parts.value(1);
+                QString p = parts.value(2);
+                msg   = Lang::t("asl_mismatch").arg(a).arg(b).arg(p);
+                if (rep.mismatches.size() > 1) {
+                    msg += QString(" (+%1)").arg(rep.mismatches.size() - 1);
+                }
+                style = "color:#E0A030; font-weight:700;";
+            }
+            m_placementInfo->setText(msg);
+            m_placementInfo->setStyleSheet(style);
+        }
     }
 
     // ----- Multi-snapshot reference + L/R symmetry (in N-pose) -----

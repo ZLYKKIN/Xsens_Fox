@@ -993,7 +993,10 @@ private:
     //   → CaptureN (accumulate again)
     //   → Settle (push s2s into receiver, wait for FusionAhrs to converge)
     //   → Done (goNext())
-    enum class CalibPhase { Idle, PrepT, CaptureT, SettleT, PrepN, CaptureN, Settle, Done };
+    // §174.6 calibration state machine; LiveSpc is the optional FoxSPC
+    // sensor-placement verification window that runs after the N-pose
+    // settle-and-snapshot phase finishes.
+    enum class CalibPhase { Idle, PrepT, CaptureT, SettleT, PrepN, CaptureN, Settle, LiveSpc, Done };
     CalibPhase m_phase = CalibPhase::Idle;
 
     // Per-pose accumulators (acc_magn, gyr_bias, mag_magn) — T and N.
@@ -1032,6 +1035,35 @@ private:
     std::array<int,       kXsensSegmentCount>* m_accumCount  = nullptr;
 
     class QLabel* m_calibQuality = nullptr;
+    class QLabel* m_placementInfo = nullptr;  // FoxSPC verification result
+
+public:
+    // ---- §1699-1722 — FoxSPC sensor-placement classifier ------------------
+    // Per-physical-sensor raw 60 Hz Acc / Gyr buffers, populated during the
+    // optional LiveSpc phase that follows CaptureN.  The classifier consumes
+    // these 5 epochs (calibration / leftArmRaise / rightArmRaise / leftLegRaise
+    // / rightLegRaise — auto-segmented by Gyr-norm peak detection) to verify
+    // which body segment each IMU is on.  All five epoch buffers may overlap
+    // in time; auto-segmentation just slices the LiveSpc window.  Struct is
+    // public because the spc:: free functions read it; the array itself is
+    // private below.
+    struct RawImuBuf {
+        std::vector<QVector3D> acc;    // m/s², sensor frame, 60 Hz
+        std::vector<QVector3D> gyr;    // rad/s, sensor frame, 60 Hz
+        // Epoch window indices into acc/gyr arrays (start, end exclusive).
+        // -1, -1 means epoch was not detected.
+        struct Win { int start = -1; int end = -1; };
+        Win epochCalibration{};
+        Win epochLeftArm{};
+        Win epochRightArm{};
+        Win epochLeftLeg{};
+        Win epochRightLeg{};
+    };
+
+private:
+    std::array<RawImuBuf, kXsensSegmentCount> m_imuBuf{};
+    int  m_imuBufDecim    = 0;  // round-robin counter for 240→60 Hz downsample
+    bool m_liveSpcEnabled = true;  // toggled off when ONNX session fails to load
 
     // Page 5 (ready)
     class QLabel*        m_readyTitle = nullptr;
