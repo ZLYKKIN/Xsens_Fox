@@ -9,6 +9,7 @@
 
 #include "main.h"
 #include "foxwire.h"   // MVN MXTP byte encoders (extracted, unit-tested)
+#include "foxbody.h"   // Biomechanical model tables from FOX_KFA spec §24/§37/§38
 
 #include <QtCore/QCommandLineOption>
 #include <QtCore/QCommandLineParser>
@@ -312,88 +313,123 @@ void SkeletonXsens::buildDefaultAngles()
 
 void SkeletonXsens::buildLengths(const ActorConfig& actor)
 {
-    // 27 entries in segment order (start->end).
+    // Segment lengths come from the reverse-engineered FOX_KFA model
+    // (spec §37.6 — fox::body::kBoneVec at reference height 1.75 m), with
+    // per-region scale factors derived from the user's actor measurements.
     //
-    // Two corrections on top of the first pass:
-    //   1. "shoulder" segment was 0.259·h/2 ≈ 22 cm — that was the
-    //       bi-acromial half-width (T8 → acromion lateral distance).  In
-    //       SkeletonXsens it sits INSIDE the arm chain (scapula→shoulder
-    //       joint→upper arm start), and hipose's default is 0.10 m — we
-    //       now scale that default by (h / 1.75).
-    //   2. "foot" & "toe": foot was 0.039·h (≈ 6.8 cm, nonsense) and the
-    //       whole user-supplied foot length went to the TOE bone.  Real
-    //       anatomy splits heel-to-ball ≈ 60 % of foot length, ball-to-tip
-    //       ≈ 40 %.  Using the user's foot-length directly now.
-    //   3. Spine and small stubs are now scaled by trunk ratio (h/1.75)
-    //       so tall/short actors don't inherit the hipose h=1.75 defaults.
-    const double h  = actor.heightCm      / 100.0;
-    const double fl = actor.footLengthCm  / 100.0;
-    const double trunkScale = h / 1.75;   // spine & stubs scale with height
+    // Layout — 27 bones in seg_start_pts/seg_end_pts order (buildTopology()):
+    //   [0..5]   spine: Pelvis→L5, L5→L3, L3→T12, T12→T8, T8→Neck, Neck→Head
+    //   [6]      Head → top-of-head (vertex)
+    //   [7..11]  R arm: scap-stub, gleno-humeral inner offset, upper-arm, forearm, hand
+    //   [12..16] L arm (mirror)
+    //   [17..21] R leg: pelvis-stub, upper-leg, lower-leg, foot, toe
+    //   [22..26] L leg (mirror)
+    //
+    // Per-segment lengths = |kBoneVec[i]| × regionScale.  Anthropometric
+    // overrides (trunkLengthCm, armSpanCm, legLengthCm, footLengthCm,
+    // hipWidthCm, shoulderWidthCm) tighten the regional scale when supplied
+    // by the actor; otherwise we use heightScale = h / 1.75 (spec §17.3).
+    namespace fb = fox::body;
 
-    double armScale = 1.0;
+    const double h  = actor.heightCm     / 100.0;
+    const double fl = actor.footLengthCm / 100.0;
+    const double heightScale = (h > 1e-3) ? (h / fb::kRefHeightM) : 1.0;
+
+    // --- arm scale: prefer arm-span if given, else fall back to heightScale.
+    // Reference arm-from-acromion = |shoulder lateral| + upper-arm + forearm + hand
+    //   = 0.140 + 0.300 + 0.245 + 0.183 = 0.868 m at h=1.75.  Full arm-span =
+    //   2·arm + shoulder-width 0.32 m ≈ 2.06 m (matches anthropometric tables).
+    double armScale = heightScale;
     if (actor.armSpanCm > 0.0) {
-        const double bodyWidthM = 0.30 * (h / 1.75);
-        const double armPerSideM = std::max(0.10,
-            (actor.armSpanCm / 100.0 - bodyWidthM) * 0.5);
-        const double defArmM = 0.44 * h;
-        armScale = (defArmM > 1e-6) ? (armPerSideM / defArmM) : 1.0;
+        constexpr double refSpanM = 2.0 * (0.140 + 0.300 + 0.245 + 0.183) + 0.32;
+        armScale = std::max(0.30, actor.armSpanCm / 100.0) / refSpanM;
     }
-    double legScale = 1.0;
+
+    // --- leg scale: prefer leg-length if given (hip joint to floor), else height.
+    // Reference leg = upper-leg + lower-leg + ankle-height-stub
+    //   = 0.4165 + 0.4063 + 0.08 (approx ankle to floor) ≈ 0.903 m at h=1.75.
+    double legScale = heightScale;
     if (actor.legLengthCm > 0.0) {
-        const double legPerSideM = std::max(0.20, actor.legLengthCm / 100.0);
-        const double defLegM = 0.491 * h;
-        legScale = (defLegM > 1e-6) ? (legPerSideM / defLegM) : 1.0;
+        constexpr double refLegM = 0.4165 + 0.4063 + 0.08;
+        legScale = std::max(0.30, actor.legLengthCm / 100.0) / refLegM;
     }
-    // FIX issue 5: hip width / shoulder width / trunk length.
-    // hip stub L[17]/L[22] = pelvis → hip joint (полширины таза).
-    // scapular stub L[7]/L[16] = T8 → плечевой сустав (полширины плеч).
-    // trunk segments L[0..5] = pelvis→neck (6 vertebrae).
+
+    // --- foot scale: user's footLengthCm replaces the spec foot length.
+    // Spec heel-to-ball = 0.161 m, ball-to-tip = 0.066 m (≈ 71 / 29 split).
+    double heelToBallM, ballToTipM;
+    {
+        const double specFoot = double(fb::kBoneVec[fb::kSEG_RFoot].length());
+        const double specToe  = double(fb::kBoneVec[18].length());
+        if (fl > 0.05) {
+            const double frac = specFoot / (specFoot + specToe);   // ≈ 0.709
+            heelToBallM = fl * frac;
+            ballToTipM  = fl * (1.0 - frac);
+        } else {
+            heelToBallM = specFoot * heightScale;
+            ballToTipM  = specToe  * heightScale;
+        }
+    }
+
+    // --- hip & shoulder half-widths: user override or spec defaults.
     const double pelvisHalfM = (actor.hipWidthCm > 0.0)
-        ? std::max(0.05, actor.hipWidthCm / 200.0)
-        : 0.10 * trunkScale;
+        ? std::max(0.04, actor.hipWidthCm / 200.0)
+        : double(fb::kHipHalfY) * heightScale;
     const double scapHalfM = (actor.shoulderWidthCm > 0.0)
         ? std::max(0.05, actor.shoulderWidthCm / 200.0)
-        : 0.05 * trunkScale;
-    // Дефолтная сумма длин spine + head = 0.55h (по hipose).  Если actor
-    // ввёл свою длину туловища, нормируем 6 сегментов spine по этому
-    // значению (head→top-of-head не масштабируется — это часть черепа).
-    const double trunkSegScale = (actor.trunkLengthCm > 0.0)
-        ? std::max(0.30, actor.trunkLengthCm / 100.0) / (0.55 * h)
-        : trunkScale;
+        : double(fb::kShoulderHalfY) * heightScale;
+
+    // --- trunk: optional total-trunk-length override rescales the spine bones.
+    // Spec spine = 0.098+0.108+0.099+0.098+0.138+0.092 = 0.633 m at h=1.75.
+    double trunkScale = heightScale;
+    if (actor.trunkLengthCm > 0.0) {
+        constexpr double refTrunkM = 0.098 + 0.108 + 0.099 + 0.098 + 0.138 + 0.092;
+        trunkScale = std::max(0.40, actor.trunkLengthCm / 100.0) / refTrunkM;
+    }
+
+    // Helper: length of a spec bone vector at the appropriate regional scale.
+    auto spineLen = [&](int s) { return float(fb::kBoneVec[s].length() * trunkScale); };
+    auto armLen   = [&](int s) { return float(fb::kBoneVec[s].length() * armScale);   };
+    auto legLen   = [&](int s) { return float(fb::kBoneVec[s].length() * legScale);   };
+
+    // Gleno-humeral inner offset: spec doesn't model this as a separate bone
+    // (its arm chain attaches the shoulder joint directly to the upper-arm
+    // start); Fox keeps a small ~0.10 m stub so the rendered skeleton has a
+    // visible scapular offset.  Scale with trunk so it stays proportional.
+    const double inShoulderOffsetM = 0.10 * trunkScale;
 
     const std::array<float, kXsensSegmentCountWithDummies> L = {
-        // ----- spine + head -----
-        float(0.10 * trunkSegScale),  // pelvis → L5
-        float(0.10 * trunkSegScale),  // L5 → L3
-        float(0.10 * trunkSegScale),  // L3 → T12
-        float(0.15 * trunkSegScale),  // T12 → T8
-        float(0.10 * trunkSegScale),  // T8 → neck
-        float(0.05 * trunkSegScale),  // neck → head
-        float(0.130 * h),             // head → top-of-head (vertex)
+        // ----- spine + head ----- (§37.6 magnitudes)
+        spineLen(0),                     // [0] Pelvis → L5      (0.098 m @ ref)
+        spineLen(1),                     // [1] L5 → L3          (0.108)
+        spineLen(2),                     // [2] L3 → T12         (0.099)
+        spineLen(3),                     // [3] T12 → T8         (0.098)
+        spineLen(4),                     // [4] T8 → Neck        (0.138)
+        spineLen(5),                     // [5] Neck → Head      (0.092)
+        spineLen(6),                     // [6] Head → vertex    (0.170)
         // ----- right arm -----
-        float(scapHalfM),             // T8 → R-scapular stub
-        float(0.10 * trunkScale),
-        float(0.186 * h * armScale),
-        float(0.146 * h * armScale),
-        float(0.108 * h * armScale),
+        float(scapHalfM),                // [7]  scap stub (T8 → acromion lateral)
+        float(inShoulderOffsetM),        // [8]  gleno-humeral inner offset
+        armLen(8),                       // [9]  RUpperArm → elbow  (0.300)
+        armLen(9),                       // [10] RForeArm → wrist   (0.245)
+        armLen(10),                      // [11] RHand → finger tip (0.183)
         // ----- left arm (mirror) -----
-        float(scapHalfM),             // T8 → L-scapular stub
-        float(0.10 * trunkScale),
-        float(0.186 * h * armScale),
-        float(0.146 * h * armScale),
-        float(0.108 * h * armScale),
+        float(scapHalfM),                // [12]
+        float(inShoulderOffsetM),        // [13]
+        armLen(12),                      // [14] LUpperArm
+        armLen(13),                      // [15] LForearm
+        armLen(14),                      // [16] LHand
         // ----- right leg -----
-        float(pelvisHalfM),           // pelvis stub  (pelvis → hip joint)
-        float(0.245 * h * legScale),  // upper leg    (hip    → knee)
-        float(0.246 * h * legScale),  // lower leg    (knee   → ankle)
-        float(0.60  * fl),            // foot (heel → ball, ~60 % of foot length)
-        float(0.40  * fl),            // toe  (ball → tip,  ~40 % of foot length)
+        float(pelvisHalfM),              // [17] pelvis stub  (pelvis → hip joint)
+        legLen(15),                      // [18] RUpperLeg → knee     (0.4165)
+        legLen(16),                      // [19] RLowerLeg → ankle    (0.4063)
+        float(heelToBallM),              // [20] RFoot (heel → ball)
+        float(ballToTipM),               // [21] RToe  (ball → tip)
         // ----- left leg (mirror) -----
         float(pelvisHalfM),
-        float(0.245 * h * legScale),
-        float(0.246 * h * legScale),
-        float(0.60  * fl),
-        float(0.40  * fl),
+        legLen(19),                      // [23] LUpperLeg
+        legLen(20),                      // [24] LLowerLeg
+        float(heelToBallM),
+        float(ballToTipM),
     };
     m_len = L;
 }

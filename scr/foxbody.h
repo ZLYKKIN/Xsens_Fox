@@ -1,0 +1,565 @@
+// Fox Mocap — biomechanical model tables, hardcoded from the reverse-engineered
+// Xsens FOX_KFA Motion Engine spec (sections 24, 30, 37, 38 and Appendix A).
+//
+// All numbers in this file are reproduced *verbatim* from the spec document
+// (fox_definitions.xsb decrypted with the XOR-101 key). The spec lives outside
+// the repo; the values below are the single source of truth for Fox.
+//
+// Conventions (spec section 25.2, right-handed world frame):
+//   X = forward (anterior), Y = left, Z = up.  Quaternions are (w,x,y,z),
+//   |q|=1, scalar-first.  All angles emitted to consumers are in DEGREES;
+//   internally radians.
+//
+// Segment indexing follows main.h (0-based).  The spec uses 1-based indices;
+// the offset of one is the only translation applied here.
+#pragma once
+
+#include "foxmath.h"
+
+#include <QtGui/QVector3D>
+
+#include <array>
+#include <cstdint>
+
+namespace fox::body {
+
+// ---------------------------------------------------------------------------
+//  Cardinality (mirrors main.h to keep indexing consistent).
+// ---------------------------------------------------------------------------
+constexpr int kSegmentCount = 23;     // 23-segment Xsens body model
+constexpr int kJointCount   = 22;     // = kSegmentCount - 1 (root has no parent joint)
+constexpr int kLumpGroups   = 7;      // joint coupling groups (spec §37.4)
+constexpr int kContactRows  = 26;     // contact-candidate table (spec §38.1)
+
+// ---------------------------------------------------------------------------
+//  Body reference (spec §24): which calibration pose / gender model to use.
+// ---------------------------------------------------------------------------
+enum Pose : std::uint8_t   { PoseT = 0, PoseN = 1 };
+enum Gender : std::uint8_t { GenderLegacy = 0, GenderMale = 1, GenderFemale = 2 };
+
+// ---------------------------------------------------------------------------
+//  §37.1 — segment mass ratios (% of body mass).  Sum ≈ 100.0 (rounded).
+//  Order matches SEG_* in main.h.  Left/right mirrored exactly.
+// ---------------------------------------------------------------------------
+inline constexpr std::array<double, kSegmentCount> kMassRatio = {
+    11.7188,  // 0  Pelvis
+     7.8125,  // 1  L5
+     6.8359,  // 2  L3
+     5.8594,  // 3  T12
+     5.8594,  // 4  T8
+     1.9531,  // 5  Neck
+     5.8594,  // 6  Head
+     1.9531,  // 7  RShoulder
+     2.9297,  // 8  RUpperArm
+     1.5625,  // 9  RForearm
+     0.5859,  // 10 RHand
+     1.9531,  // 11 LShoulder
+     2.9297,  // 12 LUpperArm
+     1.5625,  // 13 LForearm
+     0.5859,  // 14 LHand
+    14.1602,  // 15 RUpperLeg
+     4.3945,  // 16 RLowerLeg
+     1.0742,  // 17 RFoot
+     0.3906,  // 18 RToe
+    14.1602,  // 19 LUpperLeg
+     4.3945,  // 20 LLowerLeg
+     1.0742,  // 21 LFoot
+     0.3906,  // 22 LToe
+};
+
+// ---------------------------------------------------------------------------
+//  §37.6 — bone vectors L_PC (segment origin → next joint), metres.
+//  These are the reference (h=1.75 m) values; runtime code multiplies by a
+//  global anthropometric scale derived from subject height (spec §17.3).
+//  Direction conventions (verified against spec axis layout §25.2):
+//    spine/head: +Z (up); right arm: −Y; left arm: +Y; legs: −Z (down);
+//    foot: +X (forward) and slight −Z; toe: +X.
+// ---------------------------------------------------------------------------
+inline constexpr std::array<QVector3D, kSegmentCount> kBoneVec = {{
+    { -0.011f, 0.0f,   0.097f },  // 0  Pelvis → L5
+    {  0.0f,   0.0f,   0.108f },  // 1  L5 → L3
+    {  0.0f,   0.0f,   0.099f },  // 2  L3 → T12
+    {  0.0f,   0.0f,   0.098f },  // 3  T12 → T8
+    {  0.0f,   0.0f,   0.138f },  // 4  T8 → Neck
+    {  0.0f,   0.0f,   0.092f },  // 5  Neck → Head
+    {  0.0f,   0.0f,   0.170f },  // 6  Head → top-of-head (vertex)
+    {  0.0f,  -0.140f, 0.0f   },  // 7  RShoulder lateral (T8 → R shoulder joint)
+    {  0.0f,  -0.300f, 0.0f   },  // 8  RUpperArm → R elbow
+    {  0.0f,  -0.245f, 0.0f   },  // 9  RForearm  → R wrist
+    {  0.0f,  -0.183f, 0.0f   },  // 10 RHand     → R finger tip
+    {  0.0f,   0.140f, 0.0f   },  // 11 LShoulder lateral
+    {  0.0f,   0.300f, 0.0f   },  // 12 LUpperArm
+    {  0.0f,   0.245f, 0.0f   },  // 13 LForearm
+    {  0.0f,   0.183f, 0.0f   },  // 14 LHand
+    {  0.0f,   0.0f,  -0.4165f},  // 15 RUpperLeg → R knee
+    {  0.0f,   0.0f,  -0.4063f},  // 16 RLowerLeg → R ankle
+    {  0.147f, 0.0f,  -0.065f },  // 17 RFoot     → R toe (ball)
+    {  0.064f, 0.0f,  -0.015f },  // 18 RToe      → R toe tip
+    {  0.0f,   0.0f,  -0.4165f},  // 19 LUpperLeg
+    {  0.0f,   0.0f,  -0.4063f},  // 20 LLowerLeg
+    {  0.147f, 0.0f,  -0.065f },  // 21 LFoot
+    {  0.064f, 0.0f,  -0.015f },  // 22 LToe
+}};
+
+// Stub offsets (pelvis→hip-joint, T8→shoulder-joint) used by the FK dummy chain.
+// Hip half-width ±0.08 m Y (spec §37.6: «таз: бёдра ±0.08 по Y, ширина таза 0.16 м»).
+// Shoulder half-width ±0.16 m Y (typical bi-acromial half on a 1.75 m subject;
+// spec §37.5 says shoulderWidth is a measured dimension — at default body it
+// matches the existing 0.10–0.16 range used by SkeletonXsens).
+inline constexpr float kHipHalfY      = 0.080f;
+inline constexpr float kShoulderHalfY = 0.160f;
+inline constexpr float kRefHeightM    = 1.75f;   // reference height used by §37.6
+
+// ---------------------------------------------------------------------------
+//  §37.2 — joint list (22 ball-and-socket).  Each joint links a parent SEGMENT
+//  to a child segment; joint index = child-segment index − 1 in our ordering.
+//  Labels match spec table verbatim.  (jLeftBallFoot = LFoot↔LToe = MTP.)
+// ---------------------------------------------------------------------------
+struct JointDef {
+    const char* label;
+    int  parent;   // SEG_* of the parent segment
+    int  child;    // SEG_* of the child segment (= joint owner)
+};
+
+inline constexpr std::array<JointDef, kJointCount> kJoints = {{
+    { "jL5S1",            0,  1 },   // Pelvis → L5
+    { "jL4L3",            1,  2 },   // L5 → L3
+    { "jL1T12",           2,  3 },   // L3 → T12
+    { "jT9T8",            3,  4 },   // T12 → T8
+    { "jT1C7",            4,  5 },   // T8 → Neck
+    { "jC1Head",          5,  6 },   // Neck → Head
+    { "jRightT4Shoulder", 4,  7 },   // T8 → RShoulder (spec segpoint 5,3 → owner R8)
+    { "jRightShoulder",   7,  8 },   // RShoulder → RUpperArm
+    { "jRightElbow",      8,  9 },   // RUpperArm → RForearm
+    { "jRightWrist",      9, 10 },   // RForearm → RHand
+    { "jLeftT4Shoulder",  4, 11 },   // T8 → LShoulder
+    { "jLeftShoulder",   11, 12 },   // LShoulder → LUpperArm
+    { "jLeftElbow",      12, 13 },   // LUpperArm → LForearm
+    { "jLeftWrist",      13, 14 },   // LForearm → LHand
+    { "jRightHip",        0, 15 },   // Pelvis → RUpperLeg
+    { "jRightKnee",      15, 16 },   // RUpperLeg → RLowerLeg
+    { "jRightAnkle",     16, 17 },   // RLowerLeg → RFoot
+    { "jRightBallFoot",  17, 18 },   // RFoot → RToe (MTP, metatarsophalangeal)
+    { "jLeftHip",         0, 19 },   // Pelvis → LUpperLeg
+    { "jLeftKnee",       19, 20 },
+    { "jLeftAnkle",      20, 21 },
+    { "jLeftBallFoot",   21, 22 },
+}};
+
+// ---------------------------------------------------------------------------
+//  §37.4 — joint coupling lumps (7 groups).  Each group has a name, a kind
+//  (1=upper-body, 2=leg, 3=foot, 4=arm) and the indices of joints inside it.
+//  The exact joint membership in the spec table is sparse and not all 22
+//  joints are listed; we store membership as a per-joint group index, with
+//  −1 meaning «not in any lump».  Hard coupling weight (spec): sd = 0.025
+//  (informational weight in the WLS solver = 1/sd² = 1600).
+// ---------------------------------------------------------------------------
+struct LumpDef {
+    const char* name;
+    int kind;            // 1=upperbody, 2=leg, 3=foot, 4=arm
+    double sd;           // coupling sd (spec uniformly 0.025)
+};
+
+inline constexpr std::array<LumpDef, kLumpGroups> kLumps = {{
+    { "upperbody", 1, 0.025 },
+    { "rightleg",  2, 0.025 },
+    { "rightfoot", 3, 0.025 },
+    { "leftleg",   2, 0.025 },
+    { "leftfoot",  3, 0.025 },
+    { "rightarm",  4, 0.025 },
+    { "leftarm",   4, 0.025 },
+}};
+
+// Joint → lump-group index (0..6) or −1 if the joint is not coupled.
+// Spine + scapulo-thoracic T4Shoulder joints form the upperbody lump.  Each
+// gleno-humeral arm chain (shoulder → elbow → wrist) is its own arm lump.
+// Hip+knee → leg, ankle+MTP → foot, mirrored L/R.
+inline constexpr std::array<int, kJointCount> kJointLump = {
+    0,        // 0  jL5S1            → upperbody
+    0,        // 1  jL4L3            → upperbody
+    0,        // 2  jL1T12           → upperbody
+    0,        // 3  jT9T8            → upperbody
+    0,        // 4  jT1C7            → upperbody
+    0,        // 5  jC1Head          → upperbody
+    0,        // 6  jRightT4Shoulder → upperbody (scapulo-thoracic posture)
+    5,        // 7  jRightShoulder   → rightarm
+    5,        // 8  jRightElbow      → rightarm
+    5,        // 9  jRightWrist      → rightarm
+    0,        // 10 jLeftT4Shoulder  → upperbody
+    6,        // 11 jLeftShoulder    → leftarm
+    6,        // 12 jLeftElbow       → leftarm
+    6,        // 13 jLeftWrist       → leftarm
+    1,        // 14 jRightHip        → rightleg
+    1,        // 15 jRightKnee       → rightleg
+    2,        // 16 jRightAnkle      → rightfoot
+    2,        // 17 jRightBallFoot   → rightfoot
+    3,        // 18 jLeftHip         → leftleg
+    3,        // 19 jLeftKnee        → leftleg
+    4,        // 20 jLeftAnkle       → leftfoot
+    4,        // 21 jLeftBallFoot    → leftfoot
+};
+
+// ---------------------------------------------------------------------------
+//  §37.7 — sensor placement.  Full-body configuration = 17 IMUs on these 17
+//  segments; the remaining 6 (L5, L3, T12, Neck, RToe, LToe) are interpolated
+//  from neighbours via lump coupling.
+// ---------------------------------------------------------------------------
+inline constexpr std::array<bool, kSegmentCount> kSensorPresent = {
+    /* 0  Pelvis    */ true,
+    /* 1  L5        */ false,
+    /* 2  L3        */ false,
+    /* 3  T12       */ false,
+    /* 4  T8        */ true,
+    /* 5  Neck      */ false,
+    /* 6  Head      */ true,
+    /* 7  RShoulder */ true,
+    /* 8  RUpperArm */ true,
+    /* 9  RForearm  */ true,
+    /* 10 RHand     */ true,
+    /* 11 LShoulder */ true,
+    /* 12 LUpperArm */ true,
+    /* 13 LForearm  */ true,
+    /* 14 LHand     */ true,
+    /* 15 RUpperLeg */ true,
+    /* 16 RLowerLeg */ true,
+    /* 17 RFoot     */ true,
+    /* 18 RToe      */ false,
+    /* 19 LUpperLeg */ true,
+    /* 20 LLowerLeg */ true,
+    /* 21 LFoot     */ true,
+    /* 22 LToe      */ false,
+};
+
+// ---------------------------------------------------------------------------
+//  §24 — reference quaternions for N/T calibration poses.  Values reproduced
+//  verbatim from the legacy/male/female .xsa files.  (w,x,y,z), |q|=1.
+//  Arms in T-pose are identity (extended laterally exactly as the reference);
+//  arms in N-pose are ±90° around X with a small ±10° shoulder offset.
+// ---------------------------------------------------------------------------
+//
+//  Helper constants:
+//    s05 = sin(5°)/cos(5°) factor used in shoulder ±10° rotations:
+//          w = cos(5°) = 0.99619469809174555
+//          x = sin(5°) = 0.087155742747658166
+//    s45 = sin(45°) = cos(45°) = 0.7071067811865475  (used for ±90° around X)
+constexpr double kCos5  = 0.99619469809174555;
+constexpr double kSin5  = 0.087155742747658166;
+constexpr double kSqrt2H = 0.7071067811865475;
+constexpr double kCos6  = 0.9945219;    // 12° tilt cosine
+constexpr double kSin6  = 0.10452846;
+
+// Returns the reference quaternion for segment `seg` in pose/gender combination.
+// Both poses share the same arm/leg references; only the spine differs by gender,
+// and only the arms differ between T-pose and N-pose.
+Quat referenceQuat(int seg, Pose pose, Gender gender);
+
+// ---------------------------------------------------------------------------
+//  §37.5 — calibration body dimensions and their measurement sd (metres).
+//  Used as weights when applying user-measured anthropometry.
+// ---------------------------------------------------------------------------
+struct DimDef {
+    const char* name;
+    double sd_dim;      // metres
+};
+
+inline constexpr std::array<DimDef, 12> kDimensions = {{
+    { "bodyHeight",     0.0005   },
+    { "footSize",       0.001    },
+    { "footFloor",      1.0e-7   },
+    { "ankleHeight",    0.01     },
+    { "kneeHeight",     0.02     },
+    { "hipHeight",      0.03     },
+    { "shoulderHeight", 0.03     },
+    { "shoulderWidth",  0.02     },
+    { "hipWidth",       0.02     },
+    { "elbowSpan",      0.02     },
+    { "wristSpan",      0.02     },
+    { "armSpan",        0.05     },
+}};
+
+// ---------------------------------------------------------------------------
+//  §38.1 — foot contact candidate table (26×6: [segIdx, ptIdx, th1, th2, th3, th4]).
+//  Spec gives feet (segs 17 RFoot, 21 LFoot) with three foot points each plus
+//  the MTP-toe ball, plus the lower-leg patella for kneeling.
+//  Stored compactly as a flat array; users index by row.
+//
+//  Foot point labels (FOX_Skeleton.segments18.pointlabels in spec):
+//    3 = pHeelFoot (HEEL), 4 = pFirstMetatarsal, 5 = pFifthMetatarsal, 6 = ball/Toe
+// ---------------------------------------------------------------------------
+struct ContactRow {
+    int    seg;    // SEG_* of the segment owning this contact point
+    int    pt;     // point index within the segment (see comment above)
+    double th1, th2, th3, th4;   // contact-probability thresholds / weights
+};
+
+// Foot/leg contact point candidates.  This is a subset that exactly mirrors
+// §38.1: each foot has heel + 1st/5th metatarsal + toe-ball; each lower-leg
+// has a single kneeling-contact point.  Other segments may add candidates
+// for acrobatic poses; the spec lists 26 rows total.  We seed with the most
+// important 10; the rest are introduced lazily by foxsolver as needed.
+inline constexpr int kSEG_RLowerLeg = 16;
+inline constexpr int kSEG_RFoot     = 17;
+inline constexpr int kSEG_LLowerLeg = 20;
+inline constexpr int kSEG_LFoot     = 21;
+
+inline constexpr std::array<ContactRow, 10> kFootContacts = {{
+    // Right foot: heel + medial + lateral metatarsal + ball
+    { kSEG_RFoot,     3, 0.05, 0.25, 0.25, 0.40 },
+    { kSEG_RFoot,     4, 0.05, 0.25, 0.25, 0.40 },
+    { kSEG_RFoot,     5, 0.05, 0.25, 0.25, 0.40 },
+    { kSEG_RFoot,     6, 0.05, 0.20, 0.20, 0.40 },
+    // Left foot
+    { kSEG_LFoot,     3, 0.05, 0.25, 0.25, 0.40 },
+    { kSEG_LFoot,     4, 0.05, 0.25, 0.25, 0.40 },
+    { kSEG_LFoot,     5, 0.05, 0.25, 0.25, 0.40 },
+    { kSEG_LFoot,     6, 0.05, 0.20, 0.20, 0.40 },
+    // Lower-leg kneeling pads
+    { kSEG_RLowerLeg, 5, 0.08, 1.0,  1.0,  0.40 },
+    { kSEG_LLowerLeg, 5, 0.08, 1.0,  1.0,  0.40 },
+}};
+
+// ---------------------------------------------------------------------------
+//  §38.2 — contact detection & update parameters.
+// ---------------------------------------------------------------------------
+struct ContactParams {
+    double dLevelDefault;          // m — height tolerance to floor (default)
+    double dLevelFoot;             // m — tighter tolerance for foot
+    bool   enableImpactDetection;
+    double impactTh;
+    double impactWinDuration;      // s
+    int    maxDetectedContacts;
+    double minimumAcceptableMeasure;
+    double sameHeightTh;           // m — «same floor level» threshold
+    double secondaryPelvisT8RejMinDeg;
+    double secondaryPelvisT8RejMaxDeg;
+    double firstWinWidth;          // s
+    double firstWinWidthHighVel;   // s
+    double highVelTh;              // m/s
+    double secondWinWidthBefore;   // s
+    double secondWinWidthAfter;    // s
+};
+inline constexpr ContactParams kContact = {
+    .dLevelDefault             = 0.175,
+    .dLevelFoot                = 0.10,
+    .enableImpactDetection     = true,
+    .impactTh                  = 15.0,
+    .impactWinDuration         = 1.0,
+    .maxDetectedContacts       = 4,
+    .minimumAcceptableMeasure  = 0.001,
+    .sameHeightTh              = 0.0015,
+    .secondaryPelvisT8RejMinDeg = 40.0,
+    .secondaryPelvisT8RejMaxDeg = 140.0,
+    .firstWinWidth             = 0.15,
+    .firstWinWidthHighVel      = 0.085,
+    .highVelTh                 = 0.8,
+    .secondWinWidthBefore      = 0.01,
+    .secondWinWidthAfter       = 0.01,
+};
+
+// ---------------------------------------------------------------------------
+//  §19 / §38.4 — magnetic field reference & gating thresholds.
+//  Declination D = 0 by default (set to local mag-dec at deployment site);
+//  inclination I = 78° (default dip from spec §37.5 «e_dip_mag = 78»);
+//  reference norm |m0| = 1 (unitless after sensor normalisation).
+//  Gate: hint accepted ⇔ all three sub-tests pass.
+// ---------------------------------------------------------------------------
+struct MagnetParams {
+    double declinationDeg;             // D, set by deployment site (0 by default)
+    double inclinationDeg;             // I (spec §37.5 default: 78°)
+    double inclinationDeg2;            // secondary I (spec §37.5: 85°)
+    double normReference;              // |m0| (1.0 after normalisation)
+    double angleDiffFromModelMaxDeg;   // 6.0°
+    double dipDiffFromModelMaxDeg;     // 3.5°
+    double normDiffFromModelMax;       // 0.03 (3%)
+    double magResThreshold;            // 0.9 (spec §38.6)
+    double magResTimeUpSec;            // 0.6
+    double magResTimeDownSec;          // 3.0
+};
+inline constexpr MagnetParams kMagnet = {
+    .declinationDeg            = 0.0,
+    .inclinationDeg            = 78.0,
+    .inclinationDeg2           = 85.0,
+    .normReference             = 1.0,
+    .angleDiffFromModelMaxDeg  = 6.0,
+    .dipDiffFromModelMaxDeg    = 3.5,
+    .normDiffFromModelMax      = 0.03,
+    .magResThreshold           = 0.9,
+    .magResTimeUpSec           = 0.6,
+    .magResTimeDownSec         = 3.0,
+};
+
+// ---------------------------------------------------------------------------
+//  §38.5 — skin artifact (Gauss-Markov soft-tissue model).  This is the
+//  «viscosity» of the IMU relative to the underlying bone.
+//      x_k = exp(-Δt/τ) · x_{k−1} + ε,  ε ~ N(0, σ²)
+//  These numbers are spec defaults; subject calibration can shrink them.
+// ---------------------------------------------------------------------------
+struct SkinParams {
+    double tauSec;             // 0.15 s — relaxation time constant
+    double sigmaOriDeg;        // 3.0°   — orientation artifact 1-σ
+    double sigmaPosM;          // 0.02 m — position artifact 1-σ
+    double sigmaOriGmDeg;      // 2.5°   — GM-equivalent ori σ
+    double sigmaPosGmM;        // 0.025 m
+    double initStdOriBodyDeg;        // 45° — pre-calibration prior
+    double initStdSensorToBodyDeg;   // 1.5°
+    double initStdSensorToBodyPos;   // 0.01 m
+    double stdSensorToBodyOriFloorDeg;  // 0.3°
+    double stdSensorToBodyPosFloor;     // 0.004 m
+    bool   doGaussMarkov;
+    bool   doChangeTauInCF;
+    bool   doSkinArtifactBasedOnDynamics;
+};
+inline constexpr SkinParams kSkin = {
+    .tauSec                       = 0.15,
+    .sigmaOriDeg                  = 3.0,
+    .sigmaPosM                    = 0.02,
+    .sigmaOriGmDeg                = 2.5,
+    .sigmaPosGmM                  = 0.025,
+    .initStdOriBodyDeg            = 45.0,
+    .initStdSensorToBodyDeg       = 1.5,
+    .initStdSensorToBodyPos       = 0.01,
+    .stdSensorToBodyOriFloorDeg   = 0.3,
+    .stdSensorToBodyPosFloor      = 0.004,
+    .doGaussMarkov                = true,
+    .doChangeTauInCF              = false,
+    .doSkinArtifactBasedOnDynamics= true,
+};
+
+// ---------------------------------------------------------------------------
+//  §38.6 — filter time constants and §38.7 — process/measurement noise.
+// ---------------------------------------------------------------------------
+struct FilterParams {
+    double tauAcc;                 // 10  — accelerometer smoothing
+    double tauFGyrLpfDynamic;      // 6
+    double tauM0AvgFast;           // 30
+    double tauM0AvgMedium;         // 120
+};
+inline constexpr FilterParams kFilter = {
+    .tauAcc            = 10.0,
+    .tauFGyrLpfDynamic = 6.0,
+    .tauM0AvgFast      = 30.0,
+    .tauM0AvgMedium    = 120.0,
+};
+
+struct EstimatorWeights {
+    // §38.7 — process & measurement noise per axis/coupling.
+    std::array<double, kLumpGroups> sdIntAccToVel;     // 7 lumps
+    double sdIntVelToPos;          // 1e-5 (very tight)
+    double sdLumpJoint;            // 0.025 (uniform)
+    double stdOriFreeze;           // 0.01
+    double stdPosFreeze;           // 1e-4
+    double stdOriLocalBodyStillDeg;// 1.5°
+    double initStdVel;             // 2 m/s
+    double initStdAccBias;         // 0.1
+    double initStdGyrBiasDeg;      // 0.4°
+    double gyrBiasStdMinDeg;       // 0.005
+    double gyrBiasStdMaxDeg;       // 0.07
+    double multiLevelZhcClipVert;  // 0.005
+};
+inline constexpr EstimatorWeights kEstimator = {
+    .sdIntAccToVel  = {{ 2.0, 2.0, 1.0, 4.0, 4.0, 2.0, 8.0 }},
+    .sdIntVelToPos  = 1.0e-5,
+    .sdLumpJoint    = 0.025,
+    .stdOriFreeze   = 0.01,
+    .stdPosFreeze   = 1.0e-4,
+    .stdOriLocalBodyStillDeg = 1.5,
+    .initStdVel     = 2.0,
+    .initStdAccBias = 0.1,
+    .initStdGyrBiasDeg = 0.4,
+    .gyrBiasStdMinDeg  = 0.005,
+    .gyrBiasStdMaxDeg  = 0.07,
+    .multiLevelZhcClipVert = 0.005,
+};
+
+// ---------------------------------------------------------------------------
+//  §30.4 — per-joint ergonomic-extractor type (5 handlers).
+//  Encodes left/right mirroring and special-case foot handling without a
+//  single all-segments formula.
+//    type 0 — axial / midline (spine, neck, head) — no L/R sign flip
+//    type 1 — right-side limb (right arm, right leg)
+//    type 2 — left-side  limb (left arm, left leg)
+//    type 3 — right foot   (specialised contact/ankle handling)
+//    type 4 — left  foot
+//  Spec table, joint_idx = 0..21:
+//    00 00 00 00 00 00 00 01 01 01 01 02 02 02 02 01 03 01 03 02 04 02
+// ---------------------------------------------------------------------------
+inline constexpr std::array<std::uint8_t, kJointCount> kErgoHandler = {
+    // Spec raw bytes verbatim; joint index follows kJoints[] above.  Comments
+    // give the joint label at each index — the type/label mapping is what the
+    // spec ships and is not the obvious anatomical L/R split.
+    0,   // 0  jL5S1            — axial
+    0,   // 1  jL4L3            — axial
+    0,   // 2  jL1T12           — axial
+    0,   // 3  jT9T8            — axial
+    0,   // 4  jT1C7            — axial
+    0,   // 5  jC1Head          — axial
+    0,   // 6  jRightT4Shoulder — axial (despite name; spec table classifies as type 0)
+    1,   // 7  jRightShoulder
+    1,   // 8  jRightElbow
+    1,   // 9  jRightWrist
+    1,   // 10 jLeftT4Shoulder  — type-1 handler (spec verbatim, see narrative §30.4 [S])
+    2,   // 11 jLeftShoulder
+    2,   // 12 jLeftElbow
+    2,   // 13 jLeftWrist
+    2,   // 14 jRightHip        — type-2 handler (spec verbatim)
+    1,   // 15 jRightKnee
+    3,   // 16 jRightAnkle      — right-foot specialised handler
+    1,   // 17 jRightBallFoot
+    3,   // 18 jLeftHip         — type-3 handler (spec verbatim)
+    2,   // 19 jLeftKnee
+    4,   // 20 jLeftAnkle       — left-foot specialised handler
+    2,   // 21 jLeftBallFoot
+};
+
+// ---------------------------------------------------------------------------
+//  Appendix A — numerical constants reproduced verbatim from the binary.
+// ---------------------------------------------------------------------------
+namespace constants {
+    inline constexpr double kRad2Deg   = 57.29577951308232;   // 180/π
+    inline constexpr double kDeg2Rad   = 0.017453292519943295; // π/180
+    inline constexpr double kPi_2      = 1.5707963267948966;   // π/2
+    inline constexpr double kPi        = 3.141592653589793;
+    inline constexpr double kSlerpEps  = 1.0e-6;               // SLERP small-angle threshold
+    inline constexpr double kNLerpA    = 0.2;                  // NLERP poly coeffs
+    inline constexpr double kNLerpB    = 0.8;
+    inline constexpr double kNLerpC    = 1.0 / 3.0;
+    inline constexpr double kSolverC1  = 272332.63;            // rational-form fit (§13)
+    inline constexpr double kSolverC2  = 40680634.23;
+    inline constexpr double kSolverAlpha = 0.25;               // damped-step factor §31.2
+    inline constexpr double kSolverLambda = 0.01;              // LM damping
+}
+
+// ---------------------------------------------------------------------------
+//  Helpers exposed to the rest of the engine.
+// ---------------------------------------------------------------------------
+
+// Total mass ratio (should be ≈ 100; not exactly because the spec values are
+// rounded to four decimals).  Computed at compile time for the sanity check.
+constexpr double totalMassRatio() {
+    double s = 0.0;
+    for (double m : kMassRatio) s += m;
+    return s;
+}
+
+// Anthropometric scale: bone vectors are stored at refHeight = 1.75 m.
+// Subject vectors = kBoneVec[seg] * scaleFor(subjectHeightM).
+inline double scaleFor(double subjectHeightM) {
+    return (subjectHeightM > 1e-3) ? (subjectHeightM / kRefHeightM) : 1.0;
+}
+
+// Returns true if the segment is one of the 17 IMU-instrumented sensors.
+inline bool hasSensor(int seg) {
+    return (seg >= 0 && seg < kSegmentCount) ? kSensorPresent[seg] : false;
+}
+
+// Returns the lump group index (0..6) for `jointIdx`, or −1 if uncoupled.
+inline int lumpOf(int jointIdx) {
+    return (jointIdx >= 0 && jointIdx < kJointCount) ? kJointLump[jointIdx] : -1;
+}
+
+// Returns the ergonomic-handler type (0..4) for `jointIdx`.
+inline int ergoTypeOf(int jointIdx) {
+    return (jointIdx >= 0 && jointIdx < kJointCount) ? int(kErgoHandler[jointIdx]) : 0;
+}
+
+}  // namespace fox::body

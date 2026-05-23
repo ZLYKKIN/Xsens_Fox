@@ -76,6 +76,10 @@ add_executable(fox_mocap WIN32
     scr/main.h
     scr/foxmath.cpp
     scr/foxmath.h
+    scr/foxbody.cpp
+    scr/foxbody.h
+    scr/foxergo.cpp
+    scr/foxergo.h
     scr/foxwire.cpp
     scr/foxwire.h
     scr/resources.qrc
