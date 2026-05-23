@@ -344,14 +344,39 @@ public:
     }
 
     // Predict step: x ← a·x, P ← a²·P + σ_eta².  Called every IMU frame.
-    void predict(int seg, double dt) {
+    //
+    // `omegaRad` is the segment's angular-rate magnitude in rad/s.  When
+    // kSkin.doSkinArtifactBasedOnDynamics is on (spec §38.5) we shorten τ
+    // on dynamic frames so the GM model relaxes towards the new sensor
+    // attitude faster.  Mapping: τ_eff = τ_slow → τ_fast as
+    //     blend = 1 − exp(−ω / tauMotionRefRad)
+    // i.e. ω = 0 → τ_eff = τ_slow (0.30 s, slow drift);
+    //      ω = 1 rad/s → blend ≈ 0.63 → τ_eff ≈ 0.14 s (≈ base 0.15 s);
+    //      ω ≥ 3 rad/s → blend ≈ 1 → τ_eff = τ_fast (0.05 s).
+    //
+    // The 0 default keeps existing call sites that don't have ω available
+    // on the canonical 0.15 s τ — same behaviour as before this PR.
+    void predict(int seg, double dt, double omegaRad = 0.0) {
         if (seg < 0 || seg >= fb::kSegmentCount) return;
         if (!m_inited) reset();
-        const double a = std::exp(-dt / fb::kSkin.tauSec);
+        double tauEff = fb::kSkin.tauSec;
+        if (fb::kSkin.doSkinArtifactBasedOnDynamics && omegaRad > 0.0) {
+            const double ref   = std::max(1e-6, fb::kSkin.tauMotionRefRad);
+            const double blend = 1.0 - std::exp(-omegaRad / ref);
+            tauEff = fb::kSkin.tauSlowSec
+                   + blend * (fb::kSkin.tauFastSec - fb::kSkin.tauSlowSec);
+        }
+        m_tauLast[seg] = tauEff;
+        const double a = std::exp(-dt / std::max(1e-6, tauEff));
         m_x[seg]   = m_x[seg] * float(a);
         const double sigmaOriRad = fb::kSkin.sigmaOriDeg * kD2R;
         const double sigmaEta2   = sigmaOriRad * sigmaOriRad * (1.0 - a * a);
         m_var[seg] = a * a * m_var[seg] + sigmaEta2;
+    }
+
+    double tauLast(int seg) const {
+        if (seg < 0 || seg >= fb::kSegmentCount) return fb::kSkin.tauSec;
+        return m_tauLast[seg] > 0.0 ? m_tauLast[seg] : fb::kSkin.tauSec;
     }
 
     // Update step: feed an orientation-residual measurement r (radians, 3D
@@ -401,6 +426,7 @@ private:
     bool m_inited = false;
     std::array<QVector3D, fb::kSegmentCount> m_x{};      // drift vector (rad)
     std::array<double,    fb::kSegmentCount> m_var{};    // variance (rad²)
+    std::array<double,    fb::kSegmentCount> m_tauLast{};// last τ used per seg
 };
 
 // ----------------------------------------------------------------------------
@@ -1177,8 +1203,17 @@ public:
         if (ctx.sensorMeas && ctx.sensorPresent) {
             dg = m_solver.solve(orient, *ctx.sensorMeas, *ctx.sensorPresent,
                                 m_skin, cr.active);
+            // §38.5 — feed per-segment angular-rate magnitude into the GM
+            // predict step so τ shortens on dynamic frames (faster artifact
+            // relaxation) and lengthens on stationary ones (slower drift).
             for (int i = 0; i < fb::kSegmentCount; ++i) {
-                if ((*ctx.sensorPresent)[i]) m_skin.predict(i, dt);
+                if (!(*ctx.sensorPresent)[i]) continue;
+                const double omegaNorm = m_havePrev
+                    ? std::sqrt(double(omega[i].x()) * double(omega[i].x()) +
+                                double(omega[i].y()) * double(omega[i].y()) +
+                                double(omega[i].z()) * double(omega[i].z()))
+                    : 0.0;
+                m_skin.predict(i, dt, omegaNorm);
             }
         }
 
@@ -1352,6 +1387,11 @@ void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
     }
 
     if (glovesEnabled) {
+        // §38.5 / §50.1 — per-segment skin drift magnitude (degrees) and the
+        // adaptive τ in use (seconds).  Only segments above 0.05° drift are
+        // listed to keep the line short.  τ varies between kSkin.tauFastSec
+        // (= 0.05 s when ω ≥ 3 rad/s) and kSkin.tauSlowSec (= 0.30 s when
+        // ω ≈ 0); the base 0.15 s is the τ at ω ≈ 1 rad/s.
         ss << "[skin]";
         for (int i = 0; i < fb::kSegmentCount; ++i) {
             if (!fb::kSensorPresent[i]) continue;
@@ -1361,7 +1401,8 @@ void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
                                          double(x.z()*x.z())) * kR2D;
             if (mag > 0.05) {
                 ss << " seg" << i << "=" << std::setprecision(2) << mag
-                   << "° " << std::setprecision(4);
+                   << "°τ=" << std::setprecision(3) << skin.tauLast(i) << "s"
+                   << std::setprecision(4);
             }
         }
         ss << "\n";

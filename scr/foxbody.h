@@ -845,7 +845,7 @@ inline QVector3D referenceM0FreeFieldVec() {
 //  These numbers are spec defaults; subject calibration can shrink them.
 // ---------------------------------------------------------------------------
 struct SkinParams {
-    double tauSec;             // 0.15 s — relaxation time constant
+    double tauSec;             // 0.15 s — base relaxation time constant
     double sigmaOriDeg;        // 3.0°   — orientation artifact 1-σ
     double sigmaPosM;          // 0.02 m — position artifact 1-σ
     double sigmaOriGmDeg;      // 2.5°   — GM-equivalent ori σ
@@ -858,6 +858,15 @@ struct SkinParams {
     bool   doGaussMarkov;
     bool   doChangeTauInCF;
     bool   doSkinArtifactBasedOnDynamics;
+    // §38.5 doSkinArtifactBasedOnDynamics — adaptive τ.  Spec implies the
+    // GM time constant shortens with high body dynamics (τ → 0.05 s on
+    // peak motion, the artifact has to track and relax fast) and lengthens
+    // when the segment is still (τ → 0.30 s, slow drift dominated by
+    // gravity loading).  We interpolate between the two on per-sensor
+    // motion energy ω in rad/s, normalised by tauMotionRefRad.
+    double tauFastSec;         // 0.05  s — τ at peak motion energy
+    double tauSlowSec;         // 0.30  s — τ at full rest
+    double tauMotionRefRad;    // 1.0 rad/s — soft-clip for ω normalisation
 };
 inline constexpr SkinParams kSkin = {
     .tauSec                       = 0.15,
@@ -873,6 +882,9 @@ inline constexpr SkinParams kSkin = {
     .doGaussMarkov                = true,
     .doChangeTauInCF              = false,
     .doSkinArtifactBasedOnDynamics= true,
+    .tauFastSec                   = 0.05,
+    .tauSlowSec                   = 0.30,
+    .tauMotionRefRad              = 1.0,
 };
 
 // ---------------------------------------------------------------------------
