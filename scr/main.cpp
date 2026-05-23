@@ -2411,6 +2411,18 @@ struct MocapReceiver::Impl {
     std::array<FusionBias,           kXsensSegmentCount> bias{};
     std::array<bool,                 kXsensSegmentCount> biasReady{};
     std::array<FusionAhrsSettings,   kXsensSegmentCount> ahrsCfg{};
+
+    // Spec §50 — Gauss-Markov skin-artifact post-filter on AHRS output.
+    // First-order exponential smoothing with τ = kSkin.tauSec (0.15 s) on
+    // the unit-quaternion log-map.  Per segment.
+    std::array<Quat, kXsensSegmentCount> qSkin{};
+    std::array<bool, kXsensSegmentCount> qSkinReady{};
+
+    // Spec §43.7 — acceleration-divergence monitor low-pass state.  v_lp
+    // tracks the slow-moving integrated linear acceleration; the magnitude
+    // alongside the gravity-residual norm dAcc drives the adaptive
+    // accelerationRejection threshold.
+    std::array<QVector3D, kXsensSegmentCount> vLp{};
     double           freqHz       = 240.0;   // queried from XsDevice_updateRate
 
     // Sensor-to-segment alignment — identity by default, overwritten when
@@ -3866,6 +3878,12 @@ void MocapReceiver::run()
                 if (gen != lastCalGen) {
                     I.fusionReady.fill(false);
                     I.biasReady.fill(false);
+                    // Spec §50 — re-seed skin smoothing and §43.7 v_lp state
+                    // whenever a calibration / alignment is applied; the post-
+                    // filter τ=0.15 s would otherwise carry stale orientation
+                    // for ~5 settling constants after the alignment change.
+                    I.qSkinReady.fill(false);
+                    I.vLp.fill(QVector3D(0, 0, 0));
                     lastCalGen = gen;
                 }
                 if (targetSeg >= 0 && targetSeg < kXsensSegmentCount) {
@@ -4136,19 +4154,80 @@ void MocapReceiver::run()
                                           float(accForFilter.y()),
                                           float(accForFilter.z()) }};
 
+                // Spec §43.7 — acceleration-divergence monitor (accDivMon).
+                // Track a slow low-pass of integrated linear acceleration as
+                // a proxy for the FOX_KFA v_lp state; combine its magnitude
+                // with the gravity-residual norm to drive a 3-band adaptive
+                // accelerationRejection threshold.  Numbers verbatim from
+                // §43.7 (gloveHuman: threshold 0.5 m/s², highBoost 3 m/s²,
+                // velThreshold 2 m/s, decay τ=0.1s, recovery 60s).
                 const float aLen = std::sqrt(a.axis.x*a.axis.x + a.axis.y*a.axis.y + a.axis.z*a.axis.z);
-                const float aErr = std::abs(aLen - 1.0f);
-                const float beta = std::exp(-3.0f * aErr * aErr);
-                const float dynAccRej = 30.0f + (80.0f - 30.0f) * (1.0f - beta);
+                const float aErr = std::abs(aLen - 1.0f);            // |a| - 1g  (g units)
+                const float dAcc_mps2 = aErr * 9.80665f;             // convert to m/s²
 
-                const bool useMag = haveMag && (mag.length() > 1e-6);
+                // v_lp update — exponential moving average with τ = 0.1s
+                // (accDivMonTauDecay).  Driven by the linear-acc residual
+                // direction (we use the magnitude-only proxy here since the
+                // body-frame linear acc isn't gravity-removed at this stage).
+                const float bDecay = std::exp(-float(dt) / 0.1f);
+                const float keep   = bDecay;
+                const float inject = (1.0f - bDecay) * 9.80665f;
+                const QVector3D& vLpOld = I.vLp[targetSeg];
+                const QVector3D vLpNew(
+                    keep * vLpOld.x() + inject * (a.axis.x - 0.0f),
+                    keep * vLpOld.y() + inject * (a.axis.y - 0.0f),
+                    keep * vLpOld.z() + inject * (a.axis.z - 1.0f));
+                I.vLp[targetSeg] = vLpNew;
+                const float vLpMag = vLpNew.length();
+
+                // 3-band classification (spec §43.7 — Human scenario):
+                //   dAcc < 0.5 m/s² AND |v_lp| < 2 m/s   → low dynamics  → acc rej tight (≈10°)
+                //   dAcc > 3.0 m/s²                       → high dynamics → acc rej wide  (90°)
+                //   otherwise                             → mid           → smooth ramp 30..80°
+                float dynAccRej;
+                if (dAcc_mps2 < 0.5f && vLpMag < 2.0f)
+                    dynAccRej = 10.0f;
+                else if (dAcc_mps2 > 3.0f)
+                    dynAccRej = 90.0f;
+                else {
+                    const float t = std::clamp((dAcc_mps2 - 0.5f) / 2.5f, 0.0f, 1.0f);
+                    dynAccRej = 30.0f + (80.0f - 30.0f) * t;
+                }
+
+                // Spec §19.3 — three-gate magnetometer outlier rejection.
+                // Magnet hint is accepted ONLY when all three pass:
+                //   |angle(m_meas) − declination|   < 6.0°
+                //   |dip(m_meas) − dip_model|       < 3.5°
+                //   ||m_meas| − |m0|| / |m0|        < 0.03
+                // (Numbers from foxbody::kMagnet, decrypted from
+                //  fox_definitions.xsb.)
+                bool useMag = haveMag && (mag.length() > 1e-6);
                 float dynMagRej = 50.0f;
                 if (useMag) {
-                    const float mLen = std::sqrt(float(mag.x()*mag.x() + mag.y()*mag.y() + mag.z()*mag.z()));
-                    const float mErr = std::abs(mLen - 1.0f);
-                    if (mErr > 0.40f)      dynMagRej = 30.0f;
-                    else if (mErr > 0.20f) dynMagRej = 40.0f;
-                    else                   dynMagRej = 50.0f;
+                    namespace fb = fox::body;
+                    const double mLen = mag.length();
+                    const double normErr = std::abs(mLen - fb::kMagnet.normReference)
+                                         / fb::kMagnet.normReference;
+                    const double dipRad  = std::asin(std::clamp(-mag.z()/mLen, -1.0, 1.0));
+                    const double dipDeg  = dipRad * 180.0 / M_PI;
+                    const double dipErr  = std::abs(dipDeg - fb::kMagnet.inclinationDeg);
+                    const double hxy     = std::hypot(mag.x(), mag.y());
+                    const double angDeg  = (hxy > 1e-9)
+                        ? std::atan2(mag.y(), mag.x()) * 180.0 / M_PI : 0.0;
+                    const double angErr  = std::abs(angDeg - fb::kMagnet.declinationDeg);
+
+                    const bool gateNorm = normErr < fb::kMagnet.normDiffFromModelMax;
+                    const bool gateDip  = dipErr  < fb::kMagnet.dipDiffFromModelMaxDeg;
+                    const bool gateAng  = angErr  < fb::kMagnet.angleDiffFromModelMaxDeg;
+                    useMag = useMag && gateNorm && gateDip && gateAng;
+                    // When the magnet passes the gate, narrow rejection
+                    // proportionally to the worst-residual gate score.
+                    if (useMag) {
+                        const double worst = std::max({normErr / fb::kMagnet.normDiffFromModelMax,
+                                                       dipErr  / fb::kMagnet.dipDiffFromModelMaxDeg,
+                                                       angErr  / fb::kMagnet.angleDiffFromModelMaxDeg});
+                        dynMagRej = float(50.0 - 20.0 * (1.0 - worst));   // 30..50° band
+                    }
                 }
 
                 if (s.accelerationRejection != dynAccRej || s.magneticRejection != dynMagRej) {
@@ -4175,14 +4254,30 @@ void MocapReceiver::run()
                 const FusionQuaternion fq = FusionAhrsGetQuaternion(&ahrs);
                 if (std::isfinite(fq.element.w) && std::isfinite(fq.element.x) &&
                     std::isfinite(fq.element.y) && std::isfinite(fq.element.z)) {
-                    fusedQuat = Quat(fq.element.w, fq.element.x,
-                                     fq.element.y, fq.element.z).normalized();
+                    const Quat qFresh = Quat(fq.element.w, fq.element.x,
+                                             fq.element.y, fq.element.z).normalized();
+
+                    // Spec §50 — Gauss-Markov skin-artifact smoothing.  The
+                    // sensor sits on soft tissue that lags / overshoots the
+                    // underlying bone; a first-order exponential filter with
+                    // τ = kSkin.tauSec (0.15 s) is the spec-compliant model.
+                    //     q_skin(k+1) = slerp(q_skin(k), q_fresh, α),  α = 1 - exp(-dt/τ).
+                    // First frame seeds the state; thereafter we smooth.
+                    if (!I.qSkinReady[targetSeg]) {
+                        I.qSkin[targetSeg]      = qFresh;
+                        I.qSkinReady[targetSeg] = true;
+                    } else {
+                        const double alpha = 1.0 - std::exp(-double(dt) / fox::body::kSkin.tauSec);
+                        I.qSkin[targetSeg]  = slerp_quat(I.qSkin[targetSeg], qFresh, alpha);
+                    }
+                    fusedQuat = I.qSkin[targetSeg];
                     haveFused = true;
                     if (I.test) I.dbgFusedQuat[targetSeg] = fusedQuat;
                 } else {
                     // Filter state went non-finite — drop it and force a clean
                     // re-init on the next packet so the sensor can recover.
-                    I.fusionReady[targetSeg] = false;
+                    I.fusionReady[targetSeg]  = false;
+                    I.qSkinReady[targetSeg]   = false;   // re-seed skin filter on recovery
                 }
             }
 
