@@ -766,8 +766,16 @@ inline constexpr ContactParams kContact = {
 // ---------------------------------------------------------------------------
 struct MagnetParams {
     double declinationDeg;             // D, set by deployment site (0 by default)
-    double inclinationDeg;             // I (spec §37.5 default: 78°)
-    double inclinationDeg2;            // secondary I (spec §37.5: 85°)
+    double inclinationDeg;             // I body-override (spec §37.5: e_dip_mag = 78°)
+    double inclinationDeg2;            // secondary I (spec §37.5: e_dip_mag2 = 85°)
+    // §51.1 reference dip of the FREE-FIELD model (m0DefDipAngleRad).  Signed
+    // in spec convention (negative = field points down in NWU+Z-up).  Stored
+    // alongside the +78° body override so a reader can see both side by side.
+    // Note: the FusionAhrs library expects the positive-magnitude form for its
+    // gate (FusionAhrs.c:316 takes cos(dip) and uses -sin(dip)·1 for m0.z), so
+    // we keep `inclinationDeg = +78` as the value piped in; `inclinationDipRad`
+    // is documentation + reference for the Python parity test.
+    double inclinationDipRad;          // −1.1750679 (= −67.328°, free-field)
     double normReference;              // |m0| (1.0 after normalisation)
     double angleDiffFromModelMaxDeg;   // 6.0°
     double dipDiffFromModelMaxDeg;     // 3.5°
@@ -780,6 +788,7 @@ inline constexpr MagnetParams kMagnet = {
     .declinationDeg            = 0.0,
     .inclinationDeg            = 78.0,
     .inclinationDeg2           = 85.0,
+    .inclinationDipRad         = -1.1750679,
     .normReference             = 1.0,
     .angleDiffFromModelMaxDeg  = 6.0,
     .dipDiffFromModelMaxDeg    = 3.5,
@@ -788,6 +797,46 @@ inline constexpr MagnetParams kMagnet = {
     .magResTimeUpSec           = 0.6,
     .magResTimeDownSec         = 3.0,
 };
+
+// §51.1 — reference magnetic-field vector m0 in the world frame, NWU with
+// Z = up.  The textbook formula
+//     m0 = (cos(D)·cos(I), -sin(D)·cos(I), sin(I))
+// uses the signed dip I (negative in the Northern hemisphere where the field
+// points down).  Our FusionAhrs library, in contrast, expects the
+// positive-magnitude form because its internal RebuildM0() writes
+//     m0.z = -sin(|dip|)
+// to obtain the same downward-pointing component.  Both conventions agree on
+// the vector direction; this helper returns whichever the caller asks for.
+//
+// `dipDeg` is the dip ANGLE (signed; positive when the field points UP in
+// NWU, negative when it points DOWN — i.e. spec convention, opposite of the
+// inclination MAGNITUDE the body override stores).
+inline QVector3D referenceM0Vec(double dipDeg, double declinationDeg) {
+    // Inline π/180 — the `constants` namespace is declared later in the
+    // file and would otherwise create a forward-reference hazard.
+    constexpr double kD2R = 0.017453292519943295;
+    const double dipR = dipDeg * kD2R;
+    const double decR = declinationDeg * kD2R;
+    const double cI = std::cos(dipR);
+    const double sI = std::sin(dipR);
+    return QVector3D(float(cI * std::cos(decR)),
+                     float(-cI * std::sin(decR)),
+                     float(sI));
+}
+
+// Convenience: the body-override m0 vector that FusionAhrs actually uses
+// internally (positive 78° dip → m0.z = -sin(78°) = -0.978).
+inline QVector3D referenceM0BodyVec() {
+    return referenceM0Vec(-kMagnet.inclinationDeg, kMagnet.declinationDeg);
+}
+
+// Convenience: the free-field m0 vector matching the spec literal
+// inclinationDipRad = −1.175 (m0.z = sin(−1.175) = −0.923).
+inline QVector3D referenceM0FreeFieldVec() {
+    constexpr double kR2D = 57.29577951308232;
+    return referenceM0Vec(kMagnet.inclinationDipRad * kR2D,
+                          kMagnet.declinationDeg);
+}
 
 // ---------------------------------------------------------------------------
 //  §38.5 — skin artifact (Gauss-Markov soft-tissue model).  This is the

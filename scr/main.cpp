@@ -1259,6 +1259,19 @@ void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
                       << " Hz"
                       << "  dt=" << fb::constants::kSampleDtSec << " s"
                       << "  (spec §41.1)\n";
+            // §51.1 — magnetic reference vector (NWU, Z up).  Body sensors run
+            // against the 78° override (m0.z ≈ -0.978); the free-field 67.3°
+            // reference is shown alongside so the calibration of the EKF
+            // magnetic-gate is auditable.
+            const QVector3D m0Body = fb::referenceM0BodyVec();
+            const QVector3D m0Free = fb::referenceM0FreeFieldVec();
+            std::cout << "[mag]    m0_body=(" << std::setprecision(3)
+                      << m0Body.x() << "," << m0Body.y() << "," << m0Body.z()
+                      << ") dip=" << fb::kMagnet.inclinationDeg << "°"
+                      << "  m0_free=(" << m0Free.x() << "," << m0Free.y()
+                      << "," << m0Free.z() << ") dip="
+                      << (fb::kMagnet.inclinationDipRad * fb::constants::kRad2Deg) << "°"
+                      << "  (spec §51.1)\n" << std::setprecision(4);
             std::cout.flush();
         }
     }
