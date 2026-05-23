@@ -4136,8 +4136,16 @@ void MocapReceiver::run()
                     FusionBiasInitialise(&biasRef);
                     FusionBiasSettings bs = fusionBiasDefaultSettings;
                     bs.sampleRate          = float(std::max(60.0, I.freqHz));
-                    bs.stationaryThreshold = 1.5f;
-                    bs.stationaryPeriod    = 1.0f;
+                    // Spec §43.12 — ZRU (zero rotation update).  When |ω - b_g|
+                    // stays below movementRedefThresholdDeg = 0.3°/s for the
+                    // hold window (5 s in the FOX_KFA spec, matching the
+                    // omegaRedef* ramp constants), the bias filter is allowed
+                    // to absorb the residual.  Previous settings (1.5°/s /
+                    // 1 s) were 5× looser and let the bias drift on
+                    // intermediate motion.  Per-axis threshold mirrors how
+                    // xio FusionBias evaluates the gate.
+                    bs.stationaryThreshold = 0.3f;     // §43.12 movementRedefThresholdDeg
+                    bs.stationaryPeriod    = 5.0f;     // §43.12 hold-window seconds
                     FusionBiasSetSettings(&biasRef, &bs);
                     I.biasReady[targetSeg] = true;
                 }
