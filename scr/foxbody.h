@@ -1180,6 +1180,16 @@ namespace constants {
     inline constexpr double kSolverC2  = 40680634.23;
     inline constexpr double kSolverAlpha = 0.25;               // damped-step factor §31.2
     inline constexpr double kSolverLambda = 0.01;              // LM damping
+
+    // Spec §41.1 — fox_definitions.xsb FOX_FE.gravity = 9.812687 m/s² (vector
+    // (0, 0, -9.812687) with Z = up).  This is the gravity magnitude the
+    // pose-engine EKF/MNK uses internally; the ISO standard 9.80665 m/s² is
+    // still used at the sensor-IMU layer (calibrated-IMU → G unit conversion)
+    // because raw-IMU output is denominated in standard g.
+    inline constexpr double kGravityMs2 = 9.812687;
+    // Spec §41.1 — FOX_FE.SampleRate = 240 Hz → dt = 1/240 ≈ 4.17 ms.
+    inline constexpr double kSampleRateHz = 240.0;
+    inline constexpr double kSampleDtSec  = 1.0 / kSampleRateHz;
 }
 
 // ---------------------------------------------------------------------------

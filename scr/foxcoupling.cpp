@@ -69,6 +69,19 @@ Diagnostics& diagnostics() {
 // ----------------------------------------------------------------------------
 void applySpineRhythm(std::array<Quat, fox::body::kSegmentCount>& orient)
 {
+    // Spec §45.5 + §45.1 — per-joint angular fractions of the Pelvis→T8
+    // rotation, with c_spine[4] = 0.35 attenuating the lumbar AXIAL TWIST.
+    //
+    //     theta_full   = log( qT8 ⊗ conj(qPelvis) )
+    //     theta_j (X,Y) = (c_spine[j] / W_sum) · theta_full.(X,Y)
+    //     theta_j (Z)   = (c_spine[j] / W_sum) · c_axial · theta_full.Z
+    //     q_j           = exp(theta_j) ⊗ qPelvis
+    //
+    // c_axial = c_spine[4] = 0.35 is the lumbar-axial-rotation stiffness
+    // (spec §45.1 "особый коэффициент, вероятно твист/осевая ротация";
+    // matches kSpineNeck.cNeck = 0.35 used on the cervical chain).  This
+    // is what stops a yawed-T8 IMU from dragging the lumbar segments with
+    // it 1:1; the spine in vivo resists axial torque at the L5/L3/T12 joints.
     namespace fb = fox::body;
     const Quat qPel = orient[kSEG_Pelvis];
     const Quat qT8  = orient[kSEG_T8];
@@ -81,15 +94,24 @@ void applySpineRhythm(std::array<Quat, fox::body::kSegmentCount>& orient)
     const double tL3  = (fb::kCSpine[0] + fb::kCSpine[1])                     / sumC;
     const double tT12 = (fb::kCSpine[0] + fb::kCSpine[1] + fb::kCSpine[2])    / sumC;
 
-    orient[kSEG_L5]  = arcAt(qPel, qT8, tL5);
-    orient[kSEG_L3]  = arcAt(qPel, qT8, tL3);
-    orient[kSEG_T12] = arcAt(qPel, qT8, tT12);
+    const Quat qRel = canon(quat_mult(qT8, qPel.conj()).normalized());
+    const QVector3D phi = quat_log(qRel);
+    const double cAxial = fb::kCSpine[4];           // 0.35 (spec §45.1)
+
+    auto positionAt = [&](double t) {
+        const Quat dq = quat_exp_rotvec(t * double(phi.x()),
+                                        t * double(phi.y()),
+                                        t * cAxial * double(phi.z()));
+        return quat_mult(dq, qPel).normalized();
+    };
+    orient[kSEG_L5]  = positionAt(tL5);
+    orient[kSEG_L3]  = positionAt(tL3);
+    orient[kSEG_T12] = positionAt(tT12);
 
     Diagnostics& d = diagnostics();
     d.spineFracL5  = tL5;
     d.spineFracL3  = tL3;
     d.spineFracT12 = tT12;
-    const QVector3D phi = quat_log(canon(quat_mult(qT8, qPel.conj()).normalized()));
     d.spineFullDeg = std::sqrt(double(phi.x() * phi.x() + phi.y() * phi.y()
                                       + phi.z() * phi.z())) * kR2D;
 }
@@ -165,32 +187,36 @@ double scapCEff(double thetaHumerusDeg)
 void applyOneScap(std::array<Quat, fox::body::kSegmentCount>& orient,
                   int shoulderSeg, int upperArmSeg, bool diagIsR)
 {
-    const Quat qShoulder = orient[shoulderSeg];
+    // Spec §46.2 — scapulo-humeral rhythm.
+    //
+    //     theta_humerus_total = log( qUpperArm ⊗ conj(qT8) )      ← T8 reference
+    //     theta_scapula       = c_eff(theta_humerus_total) · theta_humerus_total
+    //     qScapula            = exp(theta_scapula) ⊗ qT8           ← absolute
+    //
+    // The spec phrases the rhythm in the T8 (sternum) frame, NOT in the
+    // gleno-humeral relative.  At physiological elevation c_eff is 0.95–0.99,
+    // so the scapula picks up the bulk of the elevation and the gleno-humeral
+    // joint (humerus relative to scapula) only contributes the residual ~5 %.
+    // The UpperArm world orientation is the direct IMU measurement and is
+    // preserved.  Only the (X, Y) elevation components couple — axial humerus
+    // twist (Z) stays with the humerus, not the scapula (clinical convention).
+    const Quat qT8       = orient[kSEG_T8];
     const Quat qUpperArm = orient[upperArmSeg];
 
-    // Relative orientation UpperArm in Shoulder frame.
-    const Quat qRel = canon(quat_mult(qUpperArm, qShoulder.conj()).normalized());
-    const QVector3D phi = quat_log(qRel);
-    const double thetaH = std::sqrt(double(phi.x() * phi.x() + phi.y() * phi.y()
-                                           + phi.z() * phi.z())) * kR2D;
-    const double cEff = scapCEff(thetaH);
+    const Quat qRelHumT8 = canon(quat_mult(qUpperArm, qT8.conj()).normalized());
+    const QVector3D phi  = quat_log(qRelHumT8);
+    const double thetaH  = std::sqrt(double(phi.x() * phi.x() + phi.y() * phi.y()
+                                            + phi.z() * phi.z())) * kR2D;
+    const double cEff    = scapCEff(thetaH);
 
-    // Apply c_eff to the abduction (X) and flexion (Y) components only;
-    // axial humerus rotation (Z) is not modulated by the scapula.
-    const Quat dq = quat_exp_rotvec(cEff * double(phi.x()),
-                                    cEff * double(phi.y()),
-                                    double(phi.z()));
-    // Scapula picks up (1 - c_eff) of the swing.  When c_eff = 0.95 the
-    // scapula receives 5 % of the humerus swing — i.e. the joint above
-    // moves a little so the gleno-humeral cone is anatomically plausible.
-    const Quat dqScap = quat_exp_rotvec((1.0 - cEff) * double(phi.x()),
-                                        (1.0 - cEff) * double(phi.y()),
-                                        0.0);
-    orient[shoulderSeg]  = quat_mult(dqScap, qShoulder).normalized();
-    // Re-derive UpperArm from the updated Shoulder + the c_eff-scaled
-    // swing (so the world-frame humerus orientation matches the IMU
-    // measurement up to round-off).
-    orient[upperArmSeg]  = quat_mult(dq, orient[shoulderSeg]).normalized();
+    // Scapula in T8 frame = c_eff × humerus elevation (X, Y); zero axial twist.
+    const Quat dqScapInT8 = quat_exp_rotvec(cEff * double(phi.x()),
+                                            cEff * double(phi.y()),
+                                            0.0);
+    orient[shoulderSeg] = quat_mult(dqScapInT8, qT8).normalized();
+    // UpperArm world orientation unchanged — direct IMU measurement is the
+    // ground truth; the scapula is the constrained quantity.
+    // (orient[upperArmSeg] left alone)
 
     Diagnostics& d = diagnostics();
     if (diagIsR) { d.scapThetaRDeg = thetaH; d.scapCEffR = cEff; }

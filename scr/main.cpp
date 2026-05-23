@@ -539,9 +539,13 @@ public:
             const double f_lowOmega  = (std::abs(double(w.x())) +
                                         std::abs(double(w.y())) +
                                         std::abs(double(w.z())) < 1.0) ? 1.0 : 0.0;
+            // Spec §41.1 gravity (9.812687 m/s²) is the reference the EKF
+            // uses for the "stationary IMU reads -g" hypothesis; the contact
+            // air-score peaks when |a_lp| is near g (point is in free contact
+            // with the floor) and falls off as |a_lp| diverges.
             const double f_air = fb::kAir[0] +
                                  fb::kAir[2] * (1.0 - std::min(1.0,
-                                     std::abs(aNorm - 9.8) / 4.0)) +
+                                     std::abs(aNorm - fb::constants::kGravityMs2) / 4.0)) +
                                  fb::kAir[3] * f_lowFreq +
                                  fb::kAir[4] * f_lowOmega +
                                  fb::kAir[5] * std::abs(double(v_world.z())) +
@@ -738,7 +742,8 @@ public:
                     sum += quat_log(qRel).length();
                 }
             }
-            // (C) Spine rhythm
+            // (C) Spine rhythm — must mirror the Jacobian-build branch below,
+            // including the c_spine[4]=0.35 axial-twist attenuation on Z.
             {
                 const int idxPelvis = 0, idxL5 = 1, idxL3 = 2, idxT12 = 3, idxT8 = 4;
                 const double sumC = fb::kCSpine[0] + fb::kCSpine[1] +
@@ -746,11 +751,12 @@ public:
                 if (sumC > 1e-9) {
                     const QVector3D phi = quat_log(quat_mult(
                         o[idxT8], o[idxPelvis].conj()).normalized());
+                    const double cAxial = fb::kCSpine[4];
                     auto enforceR = [&](int idx, double fraction) {
                         const Quat qExp = quat_mult(
                             quat_exp_rotvec(fraction * double(phi.x()),
                                             fraction * double(phi.y()),
-                                            fraction * double(phi.z())),
+                                            fraction * cAxial * double(phi.z())),
                             o[idxPelvis]).normalized();
                         sum += quat_log(quat_mult(qExp,
                             o[idx].conj()).normalized()).length();
@@ -888,11 +894,17 @@ public:
                     const QVector3D phi = quat_log(quat_mult(qT8, qPel.conj()).normalized());
                     const double w_spine = 1.0 / (fb::kSpineNeck.stdSpine *
                                                   fb::kSpineNeck.stdSpine);
+                    // Spec §45.1 c_spine[4]=0.35 — lumbar axial-twist
+                    // stiffness.  The Z (yaw) component of the Pelvis→T8
+                    // residual is attenuated by this factor on the lumbar
+                    // joints so a yawed-T8 IMU does not drag L5/L3/T12 1:1.
+                    // Matches the post-FK coupling in foxcoupling::applySpineRhythm.
+                    const double cAxial = fb::kCSpine[4];
                     auto enforce = [&](int idx, double fraction) {
                         const Quat qExp = quat_mult(
                             quat_exp_rotvec(fraction * double(phi.x()),
                                             fraction * double(phi.y()),
-                                            fraction * double(phi.z())),
+                                            fraction * cAxial * double(phi.z())),
                             qPel).normalized();
                         // r = log(q_target ⊗ conj(q_current)).  q_current is on
                         // the right of conj() so its Jacobian is -I (small-angle
@@ -1223,7 +1235,9 @@ void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
     // height the solver is actually using and the bone-derived hip/sitting
     // heights so the reader can see the spec §57 numbers replacing the
     // legacy 0.55·H heuristic.  glovesEnabled tightens the trigger so the
-    // dump only shows when the verbose stream is on.
+    // dump only shows when the verbose stream is on.  Also prints the spec
+    // §41.1 model constants (gravity 9.812687, sample-rate 240 Hz) so the
+    // calibration of the EKF gravity gate is visible.
     if (glovesEnabled) {
         static bool antropDumped = false;
         if (!antropDumped) {
@@ -1239,6 +1253,12 @@ void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
                       << "  ankle=" << fb::ankleHeightM(H) << " m"
                       << "  (legacy 0.55·H=" << 0.55 * H << " m, delta="
                       << (hStand - 0.55 * H) << " m)\n";
+            std::cout << "[engine] gravity=" << fb::constants::kGravityMs2
+                      << " m/s²"
+                      << "  sampleRate=" << fb::constants::kSampleRateHz
+                      << " Hz"
+                      << "  dt=" << fb::constants::kSampleDtSec << " s"
+                      << "  (spec §41.1)\n";
             std::cout.flush();
         }
     }
@@ -1285,23 +1305,31 @@ void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
     if (glovesEnabled) {
         const auto& cd = fox::coupling::diagnostics();
         ss << std::fixed << std::setprecision(2);
-        ss << "[coupling spine] full=" << cd.spineFullDeg
-           << "° fracs=" << cd.spineFracL5
+        // Spec §45.5 + §45.1 — spine angular partition Pelvis→T8 across the
+        // three unsensored lumbar joints, with c_spine[4]=0.35 axial-twist
+        // attenuation now applied to the Z component.
+        ss << "[coupling spine]  full=" << cd.spineFullDeg
+           << "° fracs L5/L3/T12=" << cd.spineFracL5
            << "/" << cd.spineFracL3
-           << "/" << cd.spineFracT12 << "\n";
-        ss << "[coupling arm]   R: θ=" << cd.scapThetaRDeg
-           << "° c_eff=" << cd.scapCEffR
-           << "   L: θ=" << cd.scapThetaLDeg
-           << "° c_eff=" << cd.scapCEffL << "\n";
-        ss << "[coupling knee]  R: flex=" << cd.kneeFlexRDeg
+           << "/" << cd.spineFracT12
+           << "  c_axial(Z)=" << fb::kCSpine[4] << "\n";
+        // Spec §46.2 — scapulo-humeral rhythm now uses T8 reference (not
+        // gleno-humeral), so cd.scapThetaR/L is the FULL humerus elevation
+        // in the T8 frame, and the scapula is placed at c_eff × that angle.
+        ss << "[coupling arm]    R: humerusInT8=" << cd.scapThetaRDeg
+           << "° scap=" << (cd.scapCEffR * cd.scapThetaRDeg) << "° c_eff=" << cd.scapCEffR
+           << "   L: humerusInT8=" << cd.scapThetaLDeg
+           << "° scap=" << (cd.scapCEffL * cd.scapThetaLDeg) << "° c_eff=" << cd.scapCEffL
+           << "\n";
+        ss << "[coupling knee]   R: flex=" << cd.kneeFlexRDeg
            << "° screw=" << cd.kneeScrewRDeg
            << "°   L: flex=" << cd.kneeFlexLDeg
            << "° screw=" << cd.kneeScrewLDeg << "°\n";
-        ss << "[coupling ankle] R: pf=" << cd.anklePfRDeg
+        ss << "[coupling ankle]  R: pf=" << cd.anklePfRDeg
            << "°" << (cd.ankleClampedR ? " CLAMP" : "")
            << "   L: pf=" << cd.anklePfLDeg
            << "°" << (cd.ankleClampedL ? " CLAMP" : "") << "\n";
-        ss << "[coupling toe]   R: ext=" << cd.toeRDeg
+        ss << "[coupling toe]    R: ext=" << cd.toeRDeg
            << "° w(heel/toe)=" << cd.toeWeights.w_heel_R
            << "/" << cd.toeWeights.w_toe_R
            << "   L: ext=" << cd.toeLDeg
@@ -1643,7 +1671,7 @@ SkeletonXsens::computeKeypoints(const std::array<Quat, kXsensSegmentCount>& raw,
         ctx.segCenter     = m_haveLastSegCenter ? &m_lastSegCenter : nullptr;
         ctx.accLPBody     = m_accLPBodyValid    ? &m_accLPBodyHint : nullptr;
         ctx.floorLevelZ   = 0.0;
-        ctx.dt            = 1.0 / 240.0;
+        ctx.dt            = fox::body::constants::kSampleDtSec;   // spec §41.1 — 1/240 s
 
         pose_solver::ContactDetector::Result contacts;
         std::lock_guard<std::mutex> lk(pose_solver::g_refinerMtx());
@@ -7647,6 +7675,21 @@ void NewSessionWizard::onCaptureTick()
     for (int i = 0; i < kXsensSegmentCount; ++i)
         m_result.calibReference[i] = Quat(1, 0, 0, 0);
 
+    // Cache the T-pose Markley averages produced in CaptureT (see line ~7526)
+    // for the §174.6 Stage-2 blending below.  These are already stored in
+    // m_result.tposeReference; tposeValid[i] tracks whether the segment had
+    // enough T-pose samples to produce a usable estimate.
+    std::array<bool, kXsensSegmentCount> tposeValid{};
+    for (int i = 0; i < kXsensSegmentCount; ++i) {
+        // CaptureT-handler at line ~7517 fills tposeReference[i] with an
+        // identity quaternion when sampT[i].size() < 4, so we treat anything
+        // other than identity as a valid measurement.
+        const Quat& q = m_result.tposeReference[i];
+        const double dist2 = (q.w - 1.0) * (q.w - 1.0)
+                           +  q.x * q.x +  q.y * q.y +  q.z * q.z;
+        tposeValid[i] = (dist2 > 1e-12);
+    }
+
     for (int i = 0; i < kXsensSegmentCount; ++i) {
         if (!fox::body::kSensorPresent[i]) continue;
         if (sampN[i].size() < 10) continue;
@@ -7656,11 +7699,44 @@ void NewSessionWizard::onCaptureTick()
         m_result.calibReference[i] = qAvgN;
         const Quat& q_bs  = fox::body::kSensorToBone[i].q_bs;
         const Quat& qRefN = fox::body::kRefQuatN[i];
+        const Quat& qRefT = fox::body::kRefQuatT[i];
 
         // §174.4 q_align — closed-form analytical alignment.
-        const Quat qAlign = quat_mult(
+        // Two independent estimates from the two static stages:
+        //     q_align_N = q_ref_N ⊗ conj(q_savg_N) ⊗ conj(q_bs)     (Stage 1)
+        //     q_align_T = q_ref_T ⊗ conj(q_savg_T) ⊗ conj(q_bs)     (Stage 2)
+        //
+        // §174.6 Stage 2 verification: both stages should give the SAME
+        // q_align up to capture noise.  We Markley-average them so the final
+        // q_align has ~1.5× lower σ than either stage alone (the residual
+        // gain depends on noise correlation between the two captures; ours
+        // are independent stillness windows so the gain is empirical 1.4-1.5×).
+        // If only N-pose is available we fall back to the N-only estimate.
+        const Quat qAlignN = quat_mult(
             quat_mult(qRefN, qAvgN.conj()),
             q_bs.conj()).normalized();
+
+        Quat qAlign = qAlignN;
+        double residDegN = 0.0;
+        double residDegT = 0.0;
+        if (tposeValid[i]) {
+            const Quat& qAvgT = m_result.tposeReference[i];
+            const Quat qAlignT = quat_mult(
+                quat_mult(qRefT, qAvgT.conj()),
+                q_bs.conj()).normalized();
+            std::vector<Quat> v{qAlignN, qAlignT};
+            qAlign = fox::quat_avg_markley(v);
+
+            // §174.6 per-stage residuals (printed under -test).
+            const Quat qResidN = quat_mult(qAlignN, q_bs).normalized();
+            double absN = std::abs(qResidN.w);
+            if (absN > 1.0) absN = 1.0;
+            residDegN = 2.0 * std::acos(absN) * 180.0 / M_PI;
+            const Quat qResidT = quat_mult(qAlignT, q_bs).normalized();
+            double absT = std::abs(qResidT.w);
+            if (absT > 1.0) absT = 1.0;
+            residDegT = 2.0 * std::acos(absT) * 180.0 / M_PI;
+        }
         s2s[i] = qAlign;
 
         // §174.5 quality: q_resid = q_align ⊗ q_bs.
@@ -7669,6 +7745,19 @@ void NewSessionWizard::onCaptureTick()
         if (absw > 1.0) absw = 1.0;
         residDeg[i]    = 2.0 * std::acos(absw) * 180.0 / M_PI;
         qualityBand[i] = fox::body::calibrationQuality(residDeg[i]);
+
+        // Verbose -test diagnostic on Stage-1 / Stage-2 individual residuals,
+        // visible only when -test -gloves is on.  The pose_solver flags
+        // are the canonical -gloves source the rest of the engine consults.
+        if (m_test && fox::pose_solver::g_glovesFlag().load(
+                std::memory_order_relaxed) && tposeValid[i]) {
+            std::cout << "[calib §174.6] " << std::left << std::setw(14)
+                      << kSegmentNames[i] << std::right
+                      << "  N-only=" << std::fixed << std::setprecision(2)
+                      << residDegN << "°"
+                      << "  T-only=" << residDegT << "°"
+                      << "  N+T="    << residDeg[i] << "°  (Markley)\n";
+        }
 
         // T+N pose statistics for downstream filter tuning.
         const int cT = m_accumCountT[i];
