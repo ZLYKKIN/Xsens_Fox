@@ -112,8 +112,13 @@ extern const char* kSegmentNames[kXsensSegmentCount];
 // ============================================================================
 
 struct WristAnatomicalCfg {
-    double maxFlexRad   = M_PI * 0.5;
-    double maxLatDevRad = M_PI / 6.0;
+    // Defaults from kJointRom[9] (jRightWrist, spec §14):
+    //   flexion / extension Y axis = [-75°, +85°]  →  85° = 1.484 rad
+    //   abduction (radial/ulnar) X axis = [-30°, +30°] →  30° = 0.524 rad
+    // Axial twist (pronation/supination, Z) is carried by the forearm joint;
+    // weight 1.0 keeps the existing 1:1 absorption behaviour.
+    double maxFlexRad   = 1.4835298641951802;   // 85° → rad
+    double maxLatDevRad = 0.5235987755982988;   // 30° → rad
     double twistWeight  = 1.0;
     bool   enabled      = true;
 };
@@ -640,6 +645,15 @@ public:
                    ? m_defAng[seg] : Quat(1, 0, 0, 0);
     }
 
+    // Latest per-sensor LPA-filtered acceleration in sensor frame.  The
+    // render thread pushes a fresh sample once per frame from the IMU
+    // snapshot so the contact detector (inside pose_solver) can build
+    // its ZUPT residuals against the same data the AHRS just consumed.
+    void setAccLPBodyHint(const std::array<QVector3D, kXsensSegmentCount>& acc) const {
+        m_accLPBodyHint = acc;
+        m_accLPBodyValid = true;
+    }
+
 private:
     std::string m_pose;
     // 27 entries: 7 spine  +  5 right-arm (w/ scap stub)  +  5 left-arm  +
@@ -650,6 +664,15 @@ private:
     // 23 entries: the canonical default angles that align passed-in quats
     // with the T/N-pose reference.
     std::array<Quat,  kXsensSegmentCount> m_defAng{};
+
+    // Mutable single-frame cache: previous-frame keypoints fed into the
+    // contact detector / ZUPT residuals on the next call, plus the most
+    // recent acceleration sample.  Mutable so const computeKeypoints can
+    // keep them up to date — the render loop is single-threaded.
+    mutable std::array<QVector3D, kXsensSegmentCount> m_lastSegCenter{};
+    mutable bool                                      m_haveLastSegCenter = false;
+    mutable std::array<QVector3D, kXsensSegmentCount> m_accLPBodyHint{};
+    mutable bool                                      m_accLPBodyValid = false;
 
     void buildTopology();
     void buildDefaultAngles();

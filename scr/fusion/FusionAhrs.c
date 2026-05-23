@@ -300,10 +300,11 @@ static void ApplyDeltaX(FusionAhrs *ahrs, const float dx[15]) {
 //  §43.14 — defaults (body / gloveHuman scenario)
 // ============================================================================
 const FusionAhrsSettings fusionAhrsDefaultSettings = {
-    .convention        = FusionConventionNwu,
-    .sampleRateHz      = 240.0f,
-    .magDipModelDeg    = 78.0f,            // §51.6 e_dip_mag for body
-    .magDeclinationDeg = 0.0f,
+    .convention             = FusionConventionNwu,
+    .sampleRateHz           = 240.0f,
+    .magDipModelDeg         = 78.0f,       // §51.6 e_dip_mag for body
+    .magDeclinationDeg      = 0.0f,
+    .magNormReferenceLocal  = 0.0f,        // 0 → use body baseline (1.0)
 };
 
 // ============================================================================
@@ -600,7 +601,13 @@ static bool MagGate(FusionAhrs *ahrs, FusionVector m) {
     if (mNorm < 1e-6f) return false;
 
     // Gate 1 — norm  (§51.3 normDiffFromModelMax = 0.03)
-    const float normErr = fabsf(mNorm - KFA_MAG_NORM_REF) / KFA_MAG_NORM_REF;
+    // Reference norm is segment-specific (§51.6 — pelvis 1.0, head 1.3,
+    // hands 1.35, feet 1.22).  Falls back to the body baseline (1.0) when
+    // the caller leaves magNormReferenceLocal at zero.
+    const float refNorm = (ahrs->settings.magNormReferenceLocal > 1e-3f)
+                              ? ahrs->settings.magNormReferenceLocal
+                              : KFA_MAG_NORM_REF;
+    const float normErr = fabsf(mNorm - refNorm) / refNorm;
     if (normErr > KFA_MAG_NORM_GATE) return false;
 
     // Gate 2 — dip.  Use the specific-force gravity convention (+Z up in
