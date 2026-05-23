@@ -6222,34 +6222,40 @@ void NewSessionWizard::onCaptureTick()
         if (!(countReached || (timeBudgetMet && sampleFloor))) return;
     }
 
-    // ---------- CaptureT complete → settle + refine T-pose reference -----
+    // ---------- CaptureT complete → §174.2 Markley + advance to PrepN -----
+    //
+    // Spec §174.2 — quaternion samples are averaged per segment using the
+    // Markley 4×4 eigenvalue method (already implemented as fox::quat_avg_markley
+    // in foxmath).  Spec §174.6 budgets exactly 3 s per Stage; no «filter
+    // settle» step exists between Stages.  The earlier 12.5-s SettleT phase
+    // (8 s filter wait + 16 × 250 ms snapshots) was a local invention with
+    // no counterpart in §174 and was removed.
     if (m_phase == CalibPhase::CaptureT) {
         m_captureTimer.stop();
-        testLog("[calib] T-pose capture complete, samples="
+        testLog("[calib §174.2] T-pose capture complete, samples="
                 + std::to_string(m_samples.size())
-                + " — settling filter for refined T-pose reference", m_test);
+                + " — Markley average → tposeReference", m_test);
 
         if (!m_samples.empty()) {
+            // Build per-segment sample vectors then take the §174.2 Markley
+            // 4-D eigenvector average (same routine used for the N-pose below).
+            std::array<std::vector<Quat>, kXsensSegmentCount> sampT;
+            for (auto& v : sampT) v.reserve(m_samples.size());
+            for (const auto& s : m_samples)
+                for (int i = 0; i < kXsensSegmentCount; ++i) sampT[i].push_back(s[i]);
             for (int i = 0; i < kXsensSegmentCount; ++i) {
-                const Quat& anchor = m_samples.front()[i];
-                double sw = 0, sx = 0, sy = 0, sz = 0;
-                for (const auto& s : m_samples) {
-                    const double d = s[i].w * anchor.w + s[i].x * anchor.x
-                                   + s[i].y * anchor.y + s[i].z * anchor.z;
-                    const double sgn = d < 0 ? -1.0 : 1.0;
-                    sw += sgn * s[i].w; sx += sgn * s[i].x;
-                    sy += sgn * s[i].y; sz += sgn * s[i].z;
+                if (sampT[i].size() < 4) {
+                    m_result.tposeReference[i] = Quat(1, 0, 0, 0);
+                    continue;
                 }
-                m_result.tposeReference[i] = Quat(sw, sx, sy, sz).normalized();
+                m_result.tposeReference[i] = fox::quat_avg_markley(sampT[i]);
             }
             m_result.tposePelvisPos = QVector3D(0.0f, 0.0f, 0.0f);
             m_result.tposeCaptured = true;
         }
 
-        // FIX (gloves polish): финализируем finger baseline.  Делим
-        // накопленную сумму на m_fingerAccumCount, копируем в Result.
-        // Если actor без перчаток — g_ergo.emaLeftInit/RightInit = false
-        // → counter остаётся 0 → branch скипается.
+        // FIX (gloves polish): финализируем finger baseline (без изменений
+        // относительно §174 — §26 пальцев усредняет ergonomics в T-pose).
         if (m_fingerAccumCount > 0) {
             const double inv = 1.0 / double(m_fingerAccumCount);
             for (int j = 0; j < 20; ++j) {
@@ -6268,135 +6274,36 @@ void NewSessionWizard::onCaptureTick()
             }
         }
 
-        m_phase = CalibPhase::SettleT;
-        const int gen = m_settleGen;
+        // §174.6 — advance to Stage 2 (N-pose) immediately.  No filter-settle
+        // step in between; the per-sensor §43 EKFs keep running uninterrupted.
+        m_accAccum      = &m_accAccumN;
+        m_gyrAccum      = &m_gyrAccumN;
+        m_magAccum      = &m_magAccumN;
+        m_accMagAccum   = &m_accMagAccumN;
+        m_accumCount    = &m_accumCountN;
+        m_gyrSqAccum    = &m_gyrSqAccumN;
+        m_magOuterAccum = &m_magOuterAccumN;
 
-        constexpr int kSettleMs       = 8000;
-        constexpr int kSnapshotCount  = 16;
-        constexpr int kSnapshotStepMs = 250;
-        constexpr int kTotalCalibMs   = 12500;
+        m_phase = CalibPhase::PrepN;
+        refreshPoseImage();
+        if (m_poseHint)
+            m_poseHint->setText(Lang::t("npose_hint"));
         if (m_calibStatus)
-            m_calibStatus->setText(Lang::t("calib_tpose_tune")
-                                   .arg(kTotalCalibMs / 1000));
+            m_calibStatus->setText(Lang::t("calib_n_prepare"));
+
+        m_countTicksLeft = kCountdownSeconds * 10;
+        m_countdownBar->setValue(0);
         if (m_readyBar) {
-            m_readyBar->setRange(0, kTotalCalibMs);
-            m_readyBar->setValue(0);
-            m_readyBar->setFormat("%p %");
-        }
-
-        auto tSnapshots = std::make_shared<std::vector<
-            std::array<Quat, kXsensSegmentCount>>>();
-        auto tDropped   = std::make_shared<int>(0);
-        auto progressTimer = std::make_shared<QTimer>(this);
-        auto progressStart = std::make_shared<qint64>(QDateTime::currentMSecsSinceEpoch());
-        progressTimer->setInterval(100);
-        connect(progressTimer.get(), &QTimer::timeout, this,
-                [this, gen, tSnapshots, progressTimer, progressStart, kTotalCalibMs, kSettleMs, kSnapshotCount, kSnapshotStepMs]() {
-            if (gen != m_settleGen) { progressTimer->stop(); return; }
-            const qint64 elapsed = QDateTime::currentMSecsSinceEpoch() - *progressStart;
-            // Honest progress: first half tracks the timed filter-convergence
-            // wait; second half reflects the REAL number of snapshots captured
-            // (stalls if the actor moves and snapshots are dropped) rather than
-            // raw elapsed time.
-            if (m_readyBar) {
-                if (elapsed < kSettleMs) {
-                    m_readyBar->setValue(int(kTotalCalibMs / 2
-                        * std::min<qint64>(elapsed, kSettleMs) / kSettleMs));
-                } else {
-                    const int captured = int(tSnapshots->size());
-                    m_readyBar->setValue(kTotalCalibMs / 2
-                        + (kTotalCalibMs / 2) * std::min(captured, kSnapshotCount) / kSnapshotCount);
-                }
-            }
-            if (m_calibStatus) {
-                if (elapsed < kSettleMs) {
-                    const int rem = int(std::max<qint64>(0, kSettleMs - elapsed));
-                    m_calibStatus->setText(Lang::t("calib_tpose_converge")
-                                           .arg((rem + 999) / 1000));
-                } else {
-                    const int idx = int(std::min(kSnapshotCount - 1,
-                        int((elapsed - kSettleMs) / kSnapshotStepMs) + 1));
-                    m_calibStatus->setText(Lang::t("calib_tpose_capture")
-                                           .arg(idx).arg(kSnapshotCount));
-                }
-            }
-            if (elapsed >= kTotalCalibMs) progressTimer->stop();
-        });
-        progressTimer->start();
-        QApplication::processEvents();
-
-        for (int k = 0; k < kSnapshotCount; ++k) {
-            const int delayMs = kSettleMs + k * kSnapshotStepMs;
-            QTimer::singleShot(delayMs, this, [this, gen, tSnapshots, tDropped, k]() {
-                if (gen != m_settleGen) return;
-                const SuitPose post = m_rx->snapshot();
-                const double pelvisGyr = double(post.gyrSensor[SEG_Pelvis].length());
-                const double rArmGyr   = double(post.gyrSensor[SEG_RUpperArm].length());
-                const double lArmGyr   = double(post.gyrSensor[SEG_LUpperArm].length());
-                const double rLegGyr   = double(post.gyrSensor[SEG_RUpperLeg].length());
-                const double lLegGyr   = double(post.gyrSensor[SEG_LUpperLeg].length());
-                const double maxGyr    = std::max({pelvisGyr, rArmGyr, lArmGyr, rLegGyr, lLegGyr});
-                if (maxGyr > 8.0) { ++(*tDropped); return; }
-                std::array<Quat, kXsensSegmentCount> sn{};
-                for (int i = 0; i < kXsensSegmentCount; ++i) {
-                    sn[i] = post.segValid[i] ? post.quat[i] : Quat(1, 0, 0, 0);
-                }
-                tSnapshots->push_back(sn);
-            });
-        }
-
-        QTimer::singleShot(kTotalCalibMs, this, [this, gen, tSnapshots, tDropped]() {
-            if (gen != m_settleGen) return;
-            if (m_test) {
-                std::cout << "[calib] T-pose settled snapshots: " << tSnapshots->size()
-                          << " kept, " << *tDropped << " dropped\n";
-                std::cout.flush();
-            }
-            if (!tSnapshots->empty()) {
-                for (int i = 0; i < kXsensSegmentCount; ++i) {
-                    const Quat& anchor = (*tSnapshots)[0][i];
-                    double sw=0, sx=0, sy=0, sz=0;
-                    for (const auto& s : *tSnapshots) {
-                        const double d = s[i].w*anchor.w + s[i].x*anchor.x
-                                       + s[i].y*anchor.y + s[i].z*anchor.z;
-                        const double sgn = d < 0 ? -1.0 : 1.0;
-                        sw += sgn*s[i].w; sx += sgn*s[i].x;
-                        sy += sgn*s[i].y; sz += sgn*s[i].z;
-                    }
-                    m_result.tposeReference[i] = Quat(sw, sx, sy, sz).normalized();
-                }
-                m_result.tposePelvisPos = QVector3D(0.0f, 0.0f, 0.0f);
-                m_result.tposeCaptured = true;
-            }
-            testLog("[calib] T-pose refined (filter-settled, "
-                    + std::to_string(tSnapshots->size()) + " snapshots)", m_test);
-
-            m_accAccum    = &m_accAccumN;
-            m_gyrAccum    = &m_gyrAccumN;
-            m_magAccum    = &m_magAccumN;
-            m_accMagAccum = &m_accMagAccumN;
-            m_accumCount  = &m_accumCountN;
-            m_gyrSqAccum    = &m_gyrSqAccumN;
-            m_magOuterAccum = &m_magOuterAccumN;
-
-            m_phase = CalibPhase::PrepN;
-            refreshPoseImage();
-            if (m_poseHint)
-                m_poseHint->setText(Lang::t("npose_hint"));
-            if (m_calibStatus)
-                m_calibStatus->setText(Lang::t("calib_n_prepare"));
-
-            m_countTicksLeft = kCountdownSeconds * 10;
-            m_countdownBar->setValue(0);
             m_readyBar->setValue(0);
             m_readyBar->setRange(0, kCalibrationSamples);
             m_readyBar->setFormat("%v / %m");
-            m_goodSamples = 0;
-            m_havePrev    = false;
-            m_countLabel->setText(QString::number(kCountdownSeconds));
-            m_countTimer.start();
-            updateNavButtons();
-        });
+        }
+        m_goodSamples = 0;
+        m_havePrev    = false;
+        m_samples.clear();
+        m_countLabel->setText(QString::number(kCountdownSeconds));
+        m_countTimer.start();
+        updateNavButtons();
         return;
     }
 
@@ -6455,12 +6362,21 @@ void NewSessionWizard::onCaptureTick()
         return v > kMax ? kMax : (v < -kMax ? -kMax : v);
     };
 
+    // §174.4 closed-form q_align uses the §174.2 Markley average of the
+    // N-pose samples *directly* — there's no «filter settle + snapshot
+    // pass» in §174.  Store the Markley mean as calibReference so the FK
+    // runtime can build cand[i] = raw[i] ⊗ refRaw[i].inv() without a second
+    // 12.5-s capture.  Segments without an IMU keep an identity reference.
+    for (int i = 0; i < kXsensSegmentCount; ++i)
+        m_result.calibReference[i] = Quat(1, 0, 0, 0);
+
     for (int i = 0; i < kXsensSegmentCount; ++i) {
         if (!fox::body::kSensorPresent[i]) continue;
         if (sampN[i].size() < 10) continue;
 
         // §174.2 Markley quaternion average for N-pose.
         const Quat qAvgN  = fox::quat_avg_markley(sampN[i]);
+        m_result.calibReference[i] = qAvgN;
         const Quat& q_bs  = fox::body::kSensorToBone[i].q_bs;
         const Quat& qRefN = fox::body::kRefQuatN[i];
 
@@ -6599,149 +6515,27 @@ void NewSessionWizard::onCaptureTick()
         }
     }
 
-    // ----- Multi-snapshot reference + L/R symmetry (in N-pose) -----
-    constexpr int kSettleMs        = 8000;
-    constexpr int kSnapshotCount   = 16;
-    constexpr int kSnapshotStepMs  = 250;
-    constexpr int kTotalCalibMs    = 12500;
-    if (m_calibStatus)
-        m_calibStatus->setText(Lang::t("calib_npose_settle")
-                               .arg(kTotalCalibMs / 1000));
-    if (m_readyBar) {
-        m_readyBar->setRange(0, kTotalCalibMs);
-        m_readyBar->setValue(0);
-        m_readyBar->setFormat("%p %");
-    }
-    const int gen = m_settleGen;
-    // Declared before the progress timer so the timer lambda can reflect the
-    // real captured-snapshot count in the second half of the bar.
-    auto snapshots = std::make_shared<std::vector<
-        std::array<Quat, kXsensSegmentCount>>>();
-    auto badCount     = std::make_shared<int>(0);
-    auto droppedCount = std::make_shared<int>(0);
-    auto progressTimer = std::make_shared<QTimer>(this);
-    auto progressStart = std::make_shared<qint64>(QDateTime::currentMSecsSinceEpoch());
-    progressTimer->setInterval(100);
-    connect(progressTimer.get(), &QTimer::timeout, this,
-            [this, gen, snapshots, progressTimer, progressStart, kTotalCalibMs, kSettleMs, kSnapshotCount, kSnapshotStepMs]() {
-        if (gen != m_settleGen) { progressTimer->stop(); return; }
-        const qint64 elapsed = QDateTime::currentMSecsSinceEpoch() - *progressStart;
-        // Honest progress: first half = timed filter-convergence wait, second
-        // half = REAL captured-snapshot count (stalls on dropped snapshots).
-        if (m_readyBar) {
-            if (elapsed < kSettleMs) {
-                m_readyBar->setValue(int(kTotalCalibMs / 2
-                    * std::min<qint64>(elapsed, kSettleMs) / kSettleMs));
-            } else {
-                const int captured = int(snapshots->size());
-                m_readyBar->setValue(kTotalCalibMs / 2
-                    + (kTotalCalibMs / 2) * std::min(captured, kSnapshotCount) / kSnapshotCount);
-            }
-        }
-        if (m_calibStatus) {
-            if (elapsed < kSettleMs) {
-                const int remaining = int(std::max<qint64>(0, kSettleMs - elapsed));
-                m_calibStatus->setText(Lang::t("calib_npose_converge")
-                                       .arg((remaining + 999) / 1000));
-            } else {
-                const int captureIdx = int(std::min(kSnapshotCount - 1,
-                    int((elapsed - kSettleMs) / kSnapshotStepMs) + 1));
-                m_calibStatus->setText(Lang::t("calib_npose_capture")
-                                       .arg(captureIdx).arg(kSnapshotCount));
-            }
-        }
-        if (elapsed >= kTotalCalibMs) progressTimer->stop();
-    });
-    progressTimer->start();
-    QApplication::processEvents();
-
-    for (int k = 0; k < kSnapshotCount; ++k) {
-        const int delayMs = kSettleMs + k * kSnapshotStepMs;
-        QTimer::singleShot(delayMs, this, [this, gen, snapshots, badCount, droppedCount, k]() {
-            if (gen != m_settleGen) return;
-            const SuitPose post = m_rx->snapshot();
-            const double pelvisGyrDegS = double(post.gyrSensor[SEG_Pelvis].length());
-            const double rArmGyr  = double(post.gyrSensor[SEG_RUpperArm].length());
-            const double lArmGyr  = double(post.gyrSensor[SEG_LUpperArm].length());
-            const double rLegGyr  = double(post.gyrSensor[SEG_RUpperLeg].length());
-            const double lLegGyr  = double(post.gyrSensor[SEG_LUpperLeg].length());
-            const double maxGyr   = std::max({pelvisGyrDegS, rArmGyr, lArmGyr, rLegGyr, lLegGyr});
-            if (maxGyr > 8.0) {
-                ++(*droppedCount);
-                if (m_test) {
-                    std::cout << "[calib] dropping snapshot " << k
-                              << " — actor moved (pelvisGyr=" << pelvisGyrDegS
-                              << " maxGyr=" << maxGyr << " deg/s)\n";
-                    std::cout.flush();
-                }
-                return;
-            }
-            std::array<Quat, kXsensSegmentCount> sn{};
-            for (int i = 0; i < kXsensSegmentCount; ++i) {
-                if (post.segValid[i]) sn[i] = post.quat[i];
-                else { sn[i] = Quat(1, 0, 0, 0); if (k==0) ++(*badCount); }
-            }
-            snapshots->push_back(sn);
-        });
-    }
-
-    QTimer::singleShot(12500, this, [this, gen, snapshots, badCount, droppedCount]() {
-        if (gen != m_settleGen) return;
-        if (m_test) {
-            std::cout << "[calib] N-pose snapshots collected: " << snapshots->size()
-                      << " kept, " << *droppedCount << " dropped (actor moved)\n";
-            std::cout.flush();
-        }
-        if (snapshots->empty()) {
-            // Don't fail silently — tell the operator the pose produced no
-            // usable data so they can recalibrate instead of recording a
-            // session built on a degenerate single-frame reference.
-            QMessageBox::warning(this, Lang::t("calib_title"),
-                                 Lang::t("calib_pose_empty"));
-            const SuitPose post = m_rx->snapshot();
-            for (int i = 0; i < kXsensSegmentCount; ++i)
-                m_result.calibReference[i] = post.segValid[i] ?
-                    post.quat[i] : Quat(1, 0, 0, 0);
-            m_phase = CalibPhase::Done;
-            this->goNext();
-            return;
-        }
-
-        // Hemisphere-corrected mean across all snapshots.
+    // §174.6 — Stages 1 (T-pose) and 2 (N-pose) are the only data-collection
+    // steps in the spec.  Both averages and the closed-form §174.4 q_align
+    // are already computed above, so the wizard can advance immediately —
+    // no «multi-snapshot reference + symmetry» loop is mandated by §174.
+    if (m_test) {
+        std::cout << std::fixed << std::setprecision(4);
+        std::cout << "[calib §174.4] calibReference (per-segment N-pose Markley mean):\n";
         for (int i = 0; i < kXsensSegmentCount; ++i) {
-            double sw=0, sx=0, sy=0, sz=0;
-            const Quat& anchor = (*snapshots)[0][i];
-            for (const auto& s : *snapshots) {
-                const double d = s[i].w*anchor.w + s[i].x*anchor.x
-                               + s[i].y*anchor.y + s[i].z*anchor.z;
-                const double sgn = d < 0 ? -1.0 : 1.0;
-                sw += sgn*s[i].w; sx += sgn*s[i].x;
-                sy += sgn*s[i].y; sz += sgn*s[i].z;
-            }
-            m_result.calibReference[i] = Quat(sw, sx, sy, sz).normalized();
+            if (!fox::body::kSensorPresent[i]) continue;
+            const Quat& q = m_result.calibReference[i];
+            std::cout << "        " << std::left << std::setw(14)
+                      << kSegmentNames[i] << std::right
+                      << " (" << q.w << "," << q.x << ","
+                      << q.y << "," << q.z << ")\n";
         }
+        std::cout.flush();
+    }
 
-        if (m_test) {
-            std::cout << "[calib] multi-snapshot reference + symmetry "
-                         "applied, snapshots=" << snapshots->size()
-                      << " bad_first=" << *badCount << "\n";
-            std::cout << std::fixed << std::setprecision(4);
-            for (int i = 0; i < kXsensSegmentCount; ++i) {
-                const Quat& q = m_result.calibReference[i];
-                std::cout << "        " << std::left << std::setw(14)
-                          << kSegmentNames[i] << std::right
-                          << " (" << q.w << "," << q.x << ","
-                          << q.y << "," << q.z << ")\n";
-            }
-            std::cout.flush();
-        }
-
-        // Spec §174.6 — Stage 1 (N-pose) and Stage 2 (T-pose) only.
-        // Calibration is complete after N-pose snapshots are folded into
-        // calibReference; proceed straight to the ready/finish page.
-        m_phase = CalibPhase::Done;
-        this->goNext();
-    });
+    // §174.6 — proceed to ready/finish page.
+    m_phase = CalibPhase::Done;
+    this->goNext();
 }
 
 void NewSessionWizard::closeEvent(QCloseEvent* e)
@@ -9578,10 +9372,16 @@ static void hdOutlierReject(std::vector<RecordedFrame>& fr,
 // SINGLE body-rotation smoother — stacking a second low-pass (the old RTS
 // pass) over-smoothed the take and doubled peak memory, so it was removed.
 static void hdQuatSmooth(std::vector<RecordedFrame>& fr,
-                         const std::function<void(double)>& cb = {})
+                         const std::function<void(double)>& cb = {},
+                         int fps = 90)
 {
-    const int half = 6;
-    const double sigma = 2.5;
+    // Spec §38.5 — skin-artifact relaxation time τ = 0.15 s.  For a symmetric
+    // Gaussian window the effective single-sided relaxation matches a 1st-order
+    // GM low-pass with τ_eff = σ_frames · dt, so we set σ = τ · fps and pick
+    // a half-width of 4σ (>99.9% of the kernel mass).
+    const double tauSec = fox::body::kSkin.tauSec;
+    const double sigma  = std::max(1.0, tauSec * double(std::max(30, fps)));
+    const int    half   = std::max(3, int(std::ceil(4.0 * sigma)));
     std::vector<double> k(2*half + 1);
     double sumK = 0.0;
     for (int i = -half; i <= half; ++i) {
@@ -9658,20 +9458,40 @@ static void hdRootLowpass(std::vector<RecordedFrame>& fr, int fps)
 }
 
 // Pass 4 — ZUPT: zero out pelvis XY drift on frames where both feet
-// quaternions barely rotate between consecutive samples.  Catches the
-// "skating" artefact caused by IMU integration drift.
-static void hdZupt(std::vector<RecordedFrame>& fr)
+// satisfy contact criteria (spec §38.2).  Compared to the older heuristic
+// (foot-quat delta < 0.01 rad), this uses the spec thresholds:
+//   • angular velocity below kContact.highVelTh interpreted as rad/s on the
+//     foot frame (still-frame test);
+//   • pelvis position lies within the same-height band (sameHeightTh).
+// firstWinWidth (= 0.15 s, or 0.085 s when fast) sets the consecutive-frame
+// count required before the ZUPT lock engages.
+static void hdZupt(std::vector<RecordedFrame>& fr, int fps)
 {
     if (fr.size() < 3) return;
+    using fox::body::kContact;
+    const double dt = (fps > 0) ? (1.0 / double(fps)) : (1.0 / 90.0);
+    // Frame-to-frame angular delta corresponding to highVelTh:
+    //   ω·dt  with  ω = kContact.highVelTh interpreted as rad/s
+    // (spec uses 0.8 m/s for point velocity; we apply the same numeric value
+    //  to the angular delta so brisk walks still trigger release).
+    const double stillAngStep = kContact.highVelTh * dt;
+    const int    windowFrames = std::max(1,
+        int(kContact.firstWinWidth * double(std::max(1, fps))));
+    int consec = 0;
     for (size_t i = 1; i < fr.size(); ++i) {
         const double dR = angBetween(fr[i-1].segQuat[SEG_RFoot],
                                      fr[i].segQuat[SEG_RFoot]);
         const double dL = angBetween(fr[i-1].segQuat[SEG_LFoot],
                                      fr[i].segQuat[SEG_LFoot]);
-        if (dR < 0.01 && dL < 0.01) {
-            // Both feet essentially still → freeze pelvis translation.
-            fr[i].pelvisPos.setX(fr[i-1].pelvisPos.x());
-            fr[i].pelvisPos.setY(fr[i-1].pelvisPos.y());
+        const bool feetStill = (dR < stillAngStep) && (dL < stillAngStep);
+        if (feetStill) {
+            ++consec;
+            if (consec >= windowFrames) {
+                fr[i].pelvisPos.setX(fr[i-1].pelvisPos.x());
+                fr[i].pelvisPos.setY(fr[i-1].pelvisPos.y());
+            }
+        } else {
+            consec = 0;
         }
     }
 }
@@ -9832,12 +9652,12 @@ static void runHdPostProcessing(std::vector<RecordedFrame>& fr,
     };
     if (progress) progress(0);
     hdOutlierReject(fr, band(0, 15));   if (stop()) return; if (progress) progress(15);
-    hdQuatSmooth(fr,   band(15, 40));   if (stop()) return; if (progress) progress(40);
+    hdQuatSmooth(fr,   band(15, 40), fps); if (stop()) return; if (progress) progress(40);
     hdFingerSmooth(fr, band(40, 60));   if (stop()) return; if (progress) progress(60);
     if (skel) hdJointLimits(fr, *skel, band(60, 75));  if (stop()) return;
     if (progress) progress(75);
     hdRootLowpass(fr, fps);             if (progress) progress(90);
-    hdZupt(fr);                         if (progress) progress(100);
+    hdZupt(fr, fps);                    if (progress) progress(100);
 }
 
 } // anonymous namespace
@@ -11175,6 +10995,52 @@ void MainWindow::onRenderTick()
                    << std::setw(7) << (pts[SEG_LFoot].z() + loco.z()) << ")\n";
             }
 
+            // [COM] §12.1 mass-weighted body centre of mass.  Segment centres
+            // are taken as the midpoint of each bone in world frame.  Diagnostic
+            // only — enabled in -test -gloves via this branch.
+            if (m_gloves) {
+                std::array<QVector3D, fox::body::kSegmentCount> segCenters{};
+                for (int i = 0; i < fox::body::kSegmentCount && i < kXsensSegmentCount; ++i) {
+                    QVector3D origin = pts[i];
+                    QVector3D end    = (i + 1 < kXsensKeypointCount) ? pts[i + 1] : pts[i];
+                    segCenters[i] = (origin + end) * 0.5f;
+                }
+                double M = 0.0;
+                const QVector3D com = fox::body::centerOfMass(segCenters, &M);
+                ss << "--- [COM] §12.1 body centre of mass ---\n";
+                ss << "  com=(" << std::setw(7) << com.x() << ","
+                   << std::setw(7) << com.y() << ","
+                   << std::setw(7) << com.z() << ")  Σm%=" << M << "\n";
+
+                // [ROM] §14/§37 per-joint range-of-motion compliance.  We log
+                // the joints currently within 90% of their anatomical limit so
+                // an operator can spot impossible angles at a glance.
+                const auto ergo = fox::ergo::jointAnglesErgoAll(fk.oriented);
+                ss << "--- [ROM] joints approaching limits (≥90% range) ---\n";
+                int hits = 0;
+                for (int j = 0; j < fox::body::kJointCount; ++j) {
+                    const auto& r = fox::body::kJointRom[j];
+                    auto frac = [](double v, double lo, double hi) {
+                        const double mid = 0.5 * (lo + hi), half = 0.5 * (hi - lo);
+                        return (half > 1e-6) ? std::abs((v - mid) / half) : 0.0;
+                    };
+                    const double fa = frac(ergo[j].abductionDeg, r.abdMin, r.abdMax);
+                    const double ff = frac(ergo[j].flexionDeg,   r.flxMin, r.flxMax);
+                    const double fr = frac(ergo[j].rotationDeg,  r.rotMin, r.rotMax);
+                    const double fmx = std::max({fa, ff, fr});
+                    if (fmx >= 0.9) {
+                        ss << "  j[" << std::setw(2) << j
+                           << "] abd=" << std::setw(7) << ergo[j].abductionDeg
+                           << " flx=" << std::setw(7) << ergo[j].flexionDeg
+                           << " rot=" << std::setw(7) << ergo[j].rotationDeg
+                           << "  | frac=" << std::setprecision(2) << fmx
+                           << std::setprecision(3) << "\n";
+                        ++hits;
+                    }
+                }
+                if (hits == 0) ss << "  (all joints within healthy ROM)\n";
+            }
+
             if (m_rx) {
                 ss << "--- s2s pair-symmetry check (L vs R) ---\n";
                 const std::pair<int,int> pairs[8] = {
@@ -12489,6 +12355,7 @@ int main(int argc, char** argv)
 
     // ---- Main window ------------------------------------------------------
     auto* win = new MainWindow(rx, result, cli.test);
+    win->setGlovesMode(cli.gloves);
     if (cli.wristConstraint) {
         win->setWristConstraintEnabled(true);
     }

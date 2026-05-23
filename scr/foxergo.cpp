@@ -80,14 +80,27 @@ JointAngles jointAnglesErgo(int jointIdx, const Quat& qParentWorld, const Quat& 
     // the parent frame, which is the natural definition of a joint angle.)
     const Quat qRel = fox::quat_mult(qParentWorld, qChildWorld.conj()).normalized();
 
+    JointAngles a;
     switch (fox::body::ergoTypeOf(jointIdx)) {
-        case 0:  return handlerAxial(qRel);
-        case 1:  return handlerRight(qRel);
-        case 2:  return handlerLeft(qRel);
-        case 3:  return handlerFoot(qRel, /*leftSide=*/false);
-        case 4:  return handlerFoot(qRel, /*leftSide=*/true);
-        default: return handlerAxial(qRel);
+        case 0:  a = handlerAxial(qRel); break;
+        case 1:  a = handlerRight(qRel); break;
+        case 2:  a = handlerLeft(qRel); break;
+        case 3:  a = handlerFoot(qRel, /*leftSide=*/false); break;
+        case 4:  a = handlerFoot(qRel, /*leftSide=*/true); break;
+        default: a = handlerAxial(qRel); break;
     }
+
+    // Spec §14 / §37 — clamp to per-joint anatomical range of motion.
+    if (jointIdx >= 0 && jointIdx < fox::body::kJointCount) {
+        const auto& rom = fox::body::kJointRom[jointIdx];
+        if (a.abductionDeg < rom.abdMin) a.abductionDeg = rom.abdMin;
+        if (a.abductionDeg > rom.abdMax) a.abductionDeg = rom.abdMax;
+        if (a.flexionDeg   < rom.flxMin) a.flexionDeg   = rom.flxMin;
+        if (a.flexionDeg   > rom.flxMax) a.flexionDeg   = rom.flxMax;
+        if (a.rotationDeg  < rom.rotMin) a.rotationDeg  = rom.rotMin;
+        if (a.rotationDeg  > rom.rotMax) a.rotationDeg  = rom.rotMax;
+    }
+    return a;
 }
 
 std::array<JointAngles, fox::body::kJointCount>

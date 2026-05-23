@@ -221,71 +221,77 @@ inline const std::array<SensorToBone, kSegmentCount> kSensorToBone = {{
 //  to future PRs).  Used by §174.4 q_align computation:
 //      q_align(i) = kRefQuatN[i] ⊗ conj(q_S_avg(i)) ⊗ conj(q_bs(i)).
 //
-//  T-pose (arms horizontal) — every segment is identity in world frame:
-//  the body is upright, arms extend laterally along the standard MVN body
-//  axes, so the bone-to-world rotation matches the skeleton's reference
-//  pose with no per-segment correction.
+//  T-pose (arms horizontal) — the spine carries natural posture tilts:
+//  pelvis tilts forward by 6.34°+Y, lumbar arches back (L3, T12 ≈ 5.83°−Y),
+//  neck/head lean forward, legs have small forward tilts.  The arms are
+//  exactly identity (perpendicular to the spine, pointing laterally).
 //
-//  N-pose (arms down at sides) — the arm chain (UpperArm, ForeArm, Hand)
-//  rotates 90° about ±X relative to the T-pose, so the bones point along
-//  −Z in world frame.  Right side rotates +90° about +X (→ +Y axis maps
-//  to +Z, so the T-pose lateral arm (−Y) maps to −Z = down).  Left side
-//  rotates +90° about −X (mirrored).  Spec §174.3 gives the example for
-//  RUpperArm verbatim: q_эталон_9 = (0.7071, 0.7071, 0, 0).
+//  N-pose (arms down at sides) — spine/legs identical to T-pose; the arm
+//  chain rotates ±90°+X (right) / ±90°−X (left) so the arm bones point
+//  along −Z (down).  Shoulder also tilts ±10°+X relative to T-pose so the
+//  acromion sits a touch below the lateral horizontal.
+//  Numbers reproduced verbatim from spec §24.1 / §24.2.  Magnitudes:
+//  sin5°  = 0.087155742747658166,  sin45° = 0.7071067811865475,
+//  sin(6.34°/2) = 0.0553003879..., sin(12.61°/2) = 0.109822896...,
+//  cos(6.34°/2) = 0.998469762..., cos(90°/2)    = 0.7071067811865475,
+//  cos(10°/2)   = 0.996194698091745.
 // ---------------------------------------------------------------------------
+inline constexpr double kRefSqrtHalf  = 0.7071067811865475;  // sin45°=cos45°
+inline constexpr double kRefSin5      = 0.087155742747658166; // sin5°
+inline constexpr double kRefCos5      = 0.996194698091745532; // cos5°
+
 inline constexpr std::array<Quat, kSegmentCount> kRefQuatT = {{
-    /* 0  Pelvis    */ Quat(1, 0, 0, 0),
-    /* 1  L5        */ Quat(1, 0, 0, 0),
-    /* 2  L3        */ Quat(1, 0, 0, 0),
-    /* 3  T12       */ Quat(1, 0, 0, 0),
-    /* 4  T8        */ Quat(1, 0, 0, 0),
-    /* 5  Neck      */ Quat(1, 0, 0, 0),
-    /* 6  Head      */ Quat(1, 0, 0, 0),
-    /* 7  RShoulder */ Quat(1, 0, 0, 0),
-    /* 8  RUpperArm */ Quat(1, 0, 0, 0),
-    /* 9  RForeArm  */ Quat(1, 0, 0, 0),
-    /* 10 RHand     */ Quat(1, 0, 0, 0),
-    /* 11 LShoulder */ Quat(1, 0, 0, 0),
-    /* 12 LUpperArm */ Quat(1, 0, 0, 0),
-    /* 13 LForeArm  */ Quat(1, 0, 0, 0),
-    /* 14 LHand     */ Quat(1, 0, 0, 0),
-    /* 15 RUpperLeg */ Quat(1, 0, 0, 0),
-    /* 16 RLowerLeg */ Quat(1, 0, 0, 0),
-    /* 17 RFoot     */ Quat(1, 0, 0, 0),
-    /* 18 RToe      */ Quat(1, 0, 0, 0),
-    /* 19 LUpperLeg */ Quat(1, 0, 0, 0),
-    /* 20 LLowerLeg */ Quat(1, 0, 0, 0),
-    /* 21 LFoot     */ Quat(1, 0, 0, 0),
-    /* 22 LToe      */ Quat(1, 0, 0, 0),
+    /* 0  Pelvis    */ Quat( 0.9984697627340179, 0.0,  0.05530038793601835, 0.0),
+    /* 1  L5        */ Quat( 1.0,                0.0,  0.0,                 0.0),
+    /* 2  L3        */ Quat( 0.9987077007098614, 0.0, -0.05082252003612363, 0.0),
+    /* 3  T12       */ Quat( 0.9987050781810652, 0.0, -0.05087402888854364, 0.0),
+    /* 4  T8        */ Quat( 1.0,                0.0,  0.0,                 0.0),
+    /* 5  Neck      */ Quat( 0.9939511715005132, 0.0,  0.1098228968510563,  0.0),
+    /* 6  Head      */ Quat( 0.999568500071736,  0.0,  0.02937369000210807, 0.0),
+    /* 7  RShoulder */ Quat( 1.0,                0.0,  0.0,                 0.0),
+    /* 8  RUpperArm */ Quat( 1.0,                0.0,  0.0,                 0.0),
+    /* 9  RForeArm  */ Quat( 1.0,                0.0,  0.0,                 0.0),
+    /* 10 RHand     */ Quat( 1.0,                0.0,  0.0,                 0.0),
+    /* 11 LShoulder */ Quat( 1.0,                0.0,  0.0,                 0.0),
+    /* 12 LUpperArm */ Quat( 1.0,                0.0,  0.0,                 0.0),
+    /* 13 LForeArm  */ Quat( 1.0,                0.0,  0.0,                 0.0),
+    /* 14 LHand     */ Quat( 1.0,                0.0,  0.0,                 0.0),
+    /* 15 RUpperLeg */ Quat( 0.9997115343780182, 0.0,  0.02401766082591783, 0.0),
+    /* 16 RLowerLeg */ Quat( 0.999173864575052,  0.0,  0.04063973855914903, 0.0),
+    /* 17 RFoot     */ Quat( 1.0,                0.0,  0.0,                 0.0),
+    /* 18 RToe      */ Quat( 1.0,                0.0,  0.0,                 0.0),
+    /* 19 LUpperLeg */ Quat( 0.9997115343780182, 0.0,  0.02401766082591783, 0.0),
+    /* 20 LLowerLeg */ Quat( 0.999173864575052,  0.0,  0.04063973855914903, 0.0),
+    /* 21 LFoot     */ Quat( 1.0,                0.0,  0.0,                 0.0),
+    /* 22 LToe      */ Quat( 1.0,                0.0,  0.0,                 0.0),
 }};
 
-// Spec §24.2 — right arm chain: +90° about +X.  Left arm chain mirror:
-// +90° about −X (equivalent: −90° about +X).  Magnitude = √½ ≈ 0.7071068.
-inline constexpr double kRefSqrtHalf = 0.7071067811865475;
+// N-pose reference (§24.2): spine/legs identical to T-pose, shoulder ±10°+X,
+// upper arm/forearm/hand ±90°+X.
 inline constexpr std::array<Quat, kSegmentCount> kRefQuatN = {{
-    /* 0  Pelvis    */ Quat(1, 0, 0, 0),
-    /* 1  L5        */ Quat(1, 0, 0, 0),
-    /* 2  L3        */ Quat(1, 0, 0, 0),
-    /* 3  T12       */ Quat(1, 0, 0, 0),
-    /* 4  T8        */ Quat(1, 0, 0, 0),
-    /* 5  Neck      */ Quat(1, 0, 0, 0),
-    /* 6  Head      */ Quat(1, 0, 0, 0),
-    /* 7  RShoulder */ Quat(1, 0, 0, 0),
-    /* 8  RUpperArm */ Quat(kRefSqrtHalf,  kRefSqrtHalf, 0, 0),
-    /* 9  RForeArm  */ Quat(kRefSqrtHalf,  kRefSqrtHalf, 0, 0),
-    /* 10 RHand     */ Quat(kRefSqrtHalf,  kRefSqrtHalf, 0, 0),
-    /* 11 LShoulder */ Quat(1, 0, 0, 0),
-    /* 12 LUpperArm */ Quat(kRefSqrtHalf, -kRefSqrtHalf, 0, 0),
-    /* 13 LForeArm  */ Quat(kRefSqrtHalf, -kRefSqrtHalf, 0, 0),
-    /* 14 LHand     */ Quat(kRefSqrtHalf, -kRefSqrtHalf, 0, 0),
-    /* 15 RUpperLeg */ Quat(1, 0, 0, 0),
-    /* 16 RLowerLeg */ Quat(1, 0, 0, 0),
-    /* 17 RFoot     */ Quat(1, 0, 0, 0),
-    /* 18 RToe      */ Quat(1, 0, 0, 0),
-    /* 19 LUpperLeg */ Quat(1, 0, 0, 0),
-    /* 20 LLowerLeg */ Quat(1, 0, 0, 0),
-    /* 21 LFoot     */ Quat(1, 0, 0, 0),
-    /* 22 LToe      */ Quat(1, 0, 0, 0),
+    /* 0  Pelvis    */ Quat( 0.9984697627340179, 0.0,            0.05530038793601835, 0.0),
+    /* 1  L5        */ Quat( 1.0,                0.0,            0.0,                 0.0),
+    /* 2  L3        */ Quat( 0.9987077007098614, 0.0,           -0.05082252003612363, 0.0),
+    /* 3  T12       */ Quat( 0.9987050781810652, 0.0,           -0.05087402888854364, 0.0),
+    /* 4  T8        */ Quat( 1.0,                0.0,            0.0,                 0.0),
+    /* 5  Neck      */ Quat( 0.9939511715005132, 0.0,            0.1098228968510563,  0.0),
+    /* 6  Head      */ Quat( 0.999568500071736,  0.0,            0.02937369000210807, 0.0),
+    /* 7  RShoulder */ Quat( kRefCos5,           kRefSin5,       0.0,                 0.0),
+    /* 8  RUpperArm */ Quat( kRefSqrtHalf,       kRefSqrtHalf,   0.0,                 0.0),
+    /* 9  RForeArm  */ Quat( kRefSqrtHalf,       kRefSqrtHalf,   0.0,                 0.0),
+    /* 10 RHand     */ Quat( kRefSqrtHalf,       kRefSqrtHalf,   0.0,                 0.0),
+    /* 11 LShoulder */ Quat( kRefCos5,          -kRefSin5,       0.0,                 0.0),
+    /* 12 LUpperArm */ Quat( kRefSqrtHalf,      -kRefSqrtHalf,   0.0,                 0.0),
+    /* 13 LForeArm  */ Quat( kRefSqrtHalf,      -kRefSqrtHalf,   0.0,                 0.0),
+    /* 14 LHand     */ Quat( kRefSqrtHalf,      -kRefSqrtHalf,   0.0,                 0.0),
+    /* 15 RUpperLeg */ Quat( 0.9997115343780182, 0.0,            0.02401766082591783, 0.0),
+    /* 16 RLowerLeg */ Quat( 0.999173864575052,  0.0,            0.04063973855914903, 0.0),
+    /* 17 RFoot     */ Quat( 1.0,                0.0,            0.0,                 0.0),
+    /* 18 RToe      */ Quat( 1.0,                0.0,            0.0,                 0.0),
+    /* 19 LUpperLeg */ Quat( 0.9997115343780182, 0.0,            0.02401766082591783, 0.0),
+    /* 20 LLowerLeg */ Quat( 0.999173864575052,  0.0,            0.04063973855914903, 0.0),
+    /* 21 LFoot     */ Quat( 1.0,                0.0,            0.0,                 0.0),
+    /* 22 LToe      */ Quat( 1.0,                0.0,            0.0,                 0.0),
 }};
 
 // Stub offsets (pelvis→hip-joint, T8→shoulder-joint) used by the FK dummy chain.
@@ -502,6 +508,50 @@ inline constexpr std::array<double, 3> kALumpA_jump2 = { 0.995, 0.995, 0.9995 };
 // Joint laxity & hyper-extension limits applied as soft constraints.
 inline constexpr double kJointLaxityRad     = 0.005;  // soft «play» per joint, radians
 inline constexpr double kHyperExtensionMax  = 0.0;    // hyper-extension forbidden
+
+// ---------------------------------------------------------------------------
+//  §14 / §37 — per-joint range-of-motion clamps for the ergonomic triple
+//  (abduction X, flexion Y, rotation Z), in degrees.  These are healthy-adult
+//  RoMs used by the engine to gate biomechanically impossible angles after
+//  fusion.  Wide limits (±180°) mean «no clinical limit» for that axis on
+//  that joint.
+// ---------------------------------------------------------------------------
+struct JointRom {
+    double abdMin, abdMax;   // X axis: ad-/abduction
+    double flxMin, flxMax;   // Y axis: ext-/flexion
+    double rotMin, rotMax;   // Z axis: ext-/internal rotation
+};
+
+inline constexpr std::array<JointRom, kJointCount> kJointRom = {{
+    /*  0 jL5S1            */ {  -25.0,  25.0,   -30.0,  35.0,  -25.0, 25.0 },
+    /*  1 jL4L3            */ {  -20.0,  20.0,   -25.0,  30.0,  -20.0, 20.0 },
+    /*  2 jL1T12           */ {  -20.0,  20.0,   -25.0,  30.0,  -20.0, 20.0 },
+    /*  3 jT9T8            */ {  -20.0,  20.0,   -20.0,  25.0,  -25.0, 25.0 },
+    /*  4 jT1C7            */ {  -35.0,  35.0,   -50.0,  60.0,  -45.0, 45.0 },
+    /*  5 jC1Head          */ {  -25.0,  25.0,   -30.0,  30.0,  -30.0, 30.0 },
+    /*  6 jRightT4Shoulder */ {  -25.0,  25.0,   -25.0,  25.0,  -45.0, 45.0 },
+    /*  7 jRightShoulder   */ { -100.0, 180.0,   -60.0, 180.0,  -90.0, 90.0 },
+    /*  8 jRightElbow      */ {   -2.0,   2.0,     0.0, 145.0,  -80.0, 80.0 },
+    /*  9 jRightWrist      */ {  -30.0,  30.0,   -75.0,  85.0,  -25.0, 25.0 },
+    /* 10 jLeftT4Shoulder  */ {  -25.0,  25.0,   -25.0,  25.0,  -45.0, 45.0 },
+    /* 11 jLeftShoulder    */ { -100.0, 180.0,   -60.0, 180.0,  -90.0, 90.0 },
+    /* 12 jLeftElbow       */ {   -2.0,   2.0,     0.0, 145.0,  -80.0, 80.0 },
+    /* 13 jLeftWrist       */ {  -30.0,  30.0,   -75.0,  85.0,  -25.0, 25.0 },
+    /* 14 jRightHip        */ {  -45.0,  45.0,   -30.0, 125.0,  -45.0, 45.0 },
+    /* 15 jRightKnee       */ {   -2.0,   2.0,     0.0, 150.0,   -5.0,  5.0 },
+    /* 16 jRightAnkle      */ {  -25.0,  25.0,   -30.0,  20.0,  -20.0, 20.0 },
+    /* 17 jRightBallFoot   */ {   -5.0,   5.0,   -30.0,  70.0,  -10.0, 10.0 },
+    /* 18 jLeftHip         */ {  -45.0,  45.0,   -30.0, 125.0,  -45.0, 45.0 },
+    /* 19 jLeftKnee        */ {   -2.0,   2.0,     0.0, 150.0,   -5.0,  5.0 },
+    /* 20 jLeftAnkle       */ {  -25.0,  25.0,   -30.0,  20.0,  -20.0, 20.0 },
+    /* 21 jLeftBallFoot    */ {   -5.0,   5.0,   -30.0,  70.0,  -10.0, 10.0 },
+}};
+
+// §37.4 — lump-group coupling stiffness.  Standard deviation of joint angle
+// coupling between segments in the same lump group.  Engine uses 1/sd² as the
+// MNK weight; for our deterministic redistribution we use it as a normaliser.
+inline constexpr double kSdLumpRad = 0.025;                 // §37.4 verbatim
+inline constexpr double kLumpStiffness = 1.0 / (kSdLumpRad * kSdLumpRad);  // = 1600
 
 // ---------------------------------------------------------------------------
 //  §174.5 / §174.6 — calibration quality scale and stage timing.
@@ -896,6 +946,27 @@ constexpr double totalMassRatio() {
 // Subject vectors = kBoneVec[seg] * scaleFor(subjectHeightM).
 inline double scaleFor(double subjectHeightM) {
     return (subjectHeightM > 1e-3) ? (subjectHeightM / kRefHeightM) : 1.0;
+}
+
+// Spec §12.1 — whole-body centre of mass:  r_cm = Σ m_i·r_i / Σ m_i.
+// `segCenters[i]` is the world-frame centre of segment i.  Returns the
+// mass-weighted mean using kMassRatio[] as the m_i weights (the absolute
+// units do not matter — only the ratio of mass).  No external normalisation
+// of segCenters is performed.  If `M` is non-null, it receives Σ m_i.
+inline QVector3D centerOfMass(const std::array<QVector3D, kSegmentCount>& segCenters,
+                              double* M = nullptr) {
+    double sx = 0.0, sy = 0.0, sz = 0.0, sm = 0.0;
+    for (int i = 0; i < kSegmentCount; ++i) {
+        const double m = kMassRatio[i];
+        sx += m * double(segCenters[i].x());
+        sy += m * double(segCenters[i].y());
+        sz += m * double(segCenters[i].z());
+        sm += m;
+    }
+    if (M) *M = sm;
+    if (sm <= 0.0) return QVector3D(0, 0, 0);
+    const double inv = 1.0 / sm;
+    return QVector3D(float(sx * inv), float(sy * inv), float(sz * inv));
 }
 
 // Returns true if the segment is one of the 17 IMU-instrumented sensors.

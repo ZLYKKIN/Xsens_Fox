@@ -237,17 +237,22 @@ Quat quat_pow(const Quat& q, double t)
 
 QVector3D angular_velocity_from_quat(const Quat& dq, double dtSec)
 {
-    // Spec §12.2 / fox_types_engine §34.5: ω = (2·asin(‖v‖) / (‖v‖·Δt)) · v.
+    // Spec §12.2: ω = (2·asin(‖v‖) / (‖v‖·Δt)) · v,  v = (dq.x, dq.y, dq.z).
+    // Hemisphere canonicalisation [1.3]: q and −q describe the same rotation,
+    // but only the w≥0 representative gives the shortest-path half-angle
+    // through asin (which is monotone on [0, π/2]).  Without it, rotations
+    // close to ±π flip sign and the velocity vector reverses.
     if (dtSec <= 0.0) return QVector3D(0, 0, 0);
-    const double vn2 = dq.x*dq.x + dq.y*dq.y + dq.z*dq.z;
+    double x = dq.x, y = dq.y, z = dq.z;
+    if (dq.w < 0.0) { x = -x; y = -y; z = -z; }
+    const double vn2 = x*x + y*y + z*z;
     if (vn2 < 1e-24) {
-        // Small-angle limit: ω = (2/Δt)·v.
         const double k = 2.0 / dtSec;
-        return QVector3D(float(k*dq.x), float(k*dq.y), float(k*dq.z));
+        return QVector3D(float(k*x), float(k*y), float(k*z));
     }
     const double vn = std::sqrt(vn2);
     const double k  = 2.0 * clamp_asin(vn) / (vn * dtSec);
-    return QVector3D(float(k*dq.x), float(k*dq.y), float(k*dq.z));
+    return QVector3D(float(k*x), float(k*y), float(k*z));
 }
 
 // Spec §174.2 — Jacobi eigendecomposition of 4×4 symmetric.  Cyclic
