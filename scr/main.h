@@ -993,7 +993,7 @@ private:
     //   → CaptureN (accumulate again)
     //   → Settle (push s2s into receiver, wait for FusionAhrs to converge)
     //   → Done (goNext())
-    enum class CalibPhase { Idle, PrepT, CaptureT, SettleT, PrepN, CaptureN, Settle, PrepK, CaptureK, Done };
+    enum class CalibPhase { Idle, PrepT, CaptureT, SettleT, PrepN, CaptureN, Settle, Done };
     CalibPhase m_phase = CalibPhase::Idle;
 
     // Per-pose accumulators (acc_magn, gyr_bias, mag_magn) — T and N.
@@ -1017,18 +1017,10 @@ private:
     std::array<double,    kXsensSegmentCount> m_accMagAccumN{};
     std::array<int,       kXsensSegmentCount> m_accumCountN{};
 
-    std::array<QVector3D, kXsensSegmentCount> m_accAccumK{};
-    std::array<QVector3D, kXsensSegmentCount> m_gyrAccumK{};
-    std::array<QVector3D, kXsensSegmentCount> m_magAccumK{};
-    std::array<double,    kXsensSegmentCount> m_accMagAccumK{};
-    std::array<int,       kXsensSegmentCount> m_accumCountK{};
-
     std::array<QVector3D, kXsensSegmentCount> m_gyrSqAccumT{};
     std::array<QVector3D, kXsensSegmentCount> m_gyrSqAccumN{};
-    std::array<QVector3D, kXsensSegmentCount> m_gyrSqAccumK{};
     std::array<std::array<double, 6>, kXsensSegmentCount> m_magOuterAccumT{};
     std::array<std::array<double, 6>, kXsensSegmentCount> m_magOuterAccumN{};
-    std::array<std::array<double, 6>, kXsensSegmentCount> m_magOuterAccumK{};
 
     std::array<QVector3D, kXsensSegmentCount>* m_gyrSqAccum    = nullptr;
     std::array<std::array<double, 6>, kXsensSegmentCount>* m_magOuterAccum = nullptr;
