@@ -526,6 +526,7 @@ public:
         const std::array<QVector3D, fb::kSegmentCount>* segVelocity;   // m/s
         const std::array<QVector3D, fb::kSegmentCount>* segOmega;      // rad/s
         const std::array<QVector3D, fb::kSegmentCount>* accLPBody;     // m/s² (sensor frame, after LPA)
+        const SkinArtifactState*                        skinState = nullptr;  // §50.5 Phase B
         double                                          floorLevelZ;
         double                                          dt;
     };
@@ -591,7 +592,15 @@ public:
             if (nCand >= cands.size()) return;
             const Quat& q = (*in.worldOrient)[seg];
             const QVector3D rWorldRot = vec_rotate(r_local, q);
-            const QVector3D p_world   = (*in.segCenter)[seg] + rWorldRot;
+            // §50.5 Phase B — fold the per-sensor position skin drift into
+            // the world-frame contact point.  driftPos is in segment-world
+            // frame (≤ 3 σ = 60 mm cap; in practice 10–20 mm during gait)
+            // and shifts the contact point alongside the soft-tissue
+            // wobble so the ZUPT residual is computed against the true
+            // anchor location, not the bone-rigid estimate.
+            const QVector3D posDrift = in.skinState
+                ? in.skinState->driftPos(seg) : QVector3D(0, 0, 0);
+            const QVector3D p_world   = (*in.segCenter)[seg] + rWorldRot + posDrift;
             // v_world = v_seg + ω × (R·r_local)
             const QVector3D w = (*in.segOmega)[seg];
             const QVector3D wxr(
@@ -1316,6 +1325,95 @@ private:
 };
 
 // ----------------------------------------------------------------------------
+//  §29.2 — Locomotion classifier.  Drives the PoseRefiner's understanding of
+//  which contact-pattern regime the actor is in so downstream consumers
+//  (diagnostics here, ZUPT modulation in a later commit) can pick the right
+//  defaults without the operator having to flip a UI switch.  Pure state
+//  machine over the ContactDetector output + pelvis kinematics — no new IO.
+// ----------------------------------------------------------------------------
+enum class LocomotionPhase : std::uint8_t {
+    Unknown   = 0,
+    Standing  = 1,
+    Walking   = 2,
+    Running   = 3,
+    Sitting   = 4,
+    Acrobatic = 5,
+};
+
+inline const char* locomotionPhaseName(LocomotionPhase p) {
+    switch (p) {
+        case LocomotionPhase::Standing:  return "standing";
+        case LocomotionPhase::Walking:   return "walking";
+        case LocomotionPhase::Running:   return "running";
+        case LocomotionPhase::Sitting:   return "sitting";
+        case LocomotionPhase::Acrobatic: return "acrobatic";
+        default: return "unknown";
+    }
+}
+
+class LocomotionClassifier {
+public:
+    LocomotionPhase phase() const { return m_phase; }
+    double          flightFracSec() const { return m_flightSec; }
+    double          contactFracSec() const { return m_contactSec; }
+
+    // `pelvisZ` — world-frame Z of the pelvis origin (m).  `pelvisSpeed`
+    // — magnitude of the pelvis velocity (m/s).  `rFootContact`/`lFootContact`
+    // — boolean from the ContactDetector for the foot segments (RFoot=17,
+    // LFoot=21).  `pelvisInverted` — true when the pelvis Z-axis in world
+    // points DOWN (somersault).  `dt` — frame time in seconds.
+    LocomotionPhase update(double pelvisZ, double pelvisSpeed,
+                            bool rFootContact, bool lFootContact,
+                            bool pelvisInverted,
+                            double standHeightM,
+                            double dt) {
+        // Accumulate flight (no foot contact) vs contact time.  Short windows
+        // (0.2 s) so the classifier reacts quickly without flapping.
+        const bool anyContact = rFootContact || lFootContact;
+        if (anyContact) {
+            m_contactSec += dt;
+            m_flightSec   = std::max(0.0, m_flightSec - dt);
+        } else {
+            m_flightSec  += dt;
+            m_contactSec  = std::max(0.0, m_contactSec - dt);
+        }
+        m_flightSec   = std::min(m_flightSec,   1.0);
+        m_contactSec  = std::min(m_contactSec,  1.0);
+
+        // Track contact alternation (heel-strike pattern of walking).
+        const int curSide = rFootContact ? +1 : (lFootContact ? -1 : 0);
+        if (curSide != 0 && curSide != m_lastContactSide) {
+            m_lastContactSide = curSide;
+            m_altSec = 0.0;
+        } else {
+            m_altSec += dt;
+        }
+
+        const double sittingZ = 0.55 * std::max(0.3, standHeightM);
+        const bool   lowPelvis = pelvisZ < sittingZ;
+
+        // Branch by clearest discriminators first.
+        if (pelvisInverted)                          m_phase = LocomotionPhase::Acrobatic;
+        else if (m_flightSec  > 0.12 && pelvisSpeed > 2.0) m_phase = LocomotionPhase::Running;
+        else if (lowPelvis    && pelvisSpeed < 0.8)        m_phase = LocomotionPhase::Sitting;
+        else if (rFootContact && lFootContact && pelvisSpeed < 0.3)
+                                                          m_phase = LocomotionPhase::Standing;
+        else if (anyContact   && (rFootContact != lFootContact) && m_altSec < 0.8)
+                                                          m_phase = LocomotionPhase::Walking;
+        else if (!anyContact)                              m_phase = LocomotionPhase::Acrobatic;
+        // Otherwise keep the previous phase (transient).
+        return m_phase;
+    }
+
+private:
+    LocomotionPhase m_phase           = LocomotionPhase::Unknown;
+    double          m_flightSec       = 0.0;
+    double          m_contactSec      = 0.0;
+    double          m_altSec          = 0.0;
+    int             m_lastContactSide = 0;
+};
+
+// ----------------------------------------------------------------------------
 //  PoseRefiner — single entry point for the FK pipeline.  Encapsulates the
 //  per-receiver state of all three components.  Thread-safe under the
 //  caller's lock — refine() is meant to be called from the GL render tick
@@ -1371,6 +1469,7 @@ public:
             in.segVelocity   = &velocity;
             in.segOmega      = &omega;
             in.accLPBody     = ctx.accLPBody;
+            in.skinState     = &m_skin;        // §50.5 Phase B — apply posDrift
             in.floorLevelZ   = ctx.floorLevelZ;
             in.dt            = dt;
             cr = m_contacts.detect(in);
@@ -1413,6 +1512,34 @@ public:
             }
         }
 
+        // §29.2 — drive the locomotion-phase classifier off the contact
+        // detector + pelvis kinematics.  Pure read-side, no flag / GUI.
+        // Output is exposed via locomotion() for the diag dump and
+        // future ZUPT-weight modulation.
+        if (ctx.segCenter) {
+            bool rContact = false, lContact = false;
+            for (const auto& ac : cr.active) {
+                if (ac.probability < 0.5) continue;
+                if (ac.seg == 17) rContact = true;     // RFoot
+                if (ac.seg == 21) lContact = true;     // LFoot
+            }
+            const QVector3D pelvis = (*ctx.segCenter)[0];
+            const double pelvisSpeed = m_havePrev
+                ? (pelvis - m_prevSegCenter[0]).length() / std::max(1e-4, dt)
+                : 0.0;
+            // Inverted: pelvis Z-axis points DOWN in world (somersault).
+            const QVector3D pelvisZAxisWorld = vec_rotate(QVector3D(0, 0, 1), orient[0]);
+            const bool pelvisInverted = (pelvisZAxisWorld.z() < -0.3f);
+            // Reference standing height = pelvis-stand for 1.75 m subject;
+            // any per-actor scaling is handled by ContactDetector's floor
+            // estimate and the WLS, this just gives the classifier a
+            // sensible "low pelvis" threshold (≈ 0.5 × stand height).
+            const double standH = fb::pelvisStandHeightM(1.75);
+            m_locomotion.update(double(pelvis.z()), pelvisSpeed,
+                                rContact, lContact, pelvisInverted,
+                                standH, dt);
+        }
+
         if (ctx.segCenter) {
             m_prevSegCenter = *ctx.segCenter;
             m_prevOrient    = orient;
@@ -1421,13 +1548,15 @@ public:
         return dg;
     }
 
-    const SkinArtifactState& skin()     const { return m_skin; }
-    const ContactDetector&   contacts() const { return m_contacts; }
+    const SkinArtifactState&    skin()     const { return m_skin; }
+    const ContactDetector&      contacts() const { return m_contacts; }
+    const LocomotionClassifier& locomotion() const { return m_locomotion; }
 
 private:
-    SkinArtifactState m_skin;
-    ContactDetector   m_contacts;
-    BodyPoseSolver    m_solver;
+    SkinArtifactState     m_skin;
+    ContactDetector       m_contacts;
+    BodyPoseSolver        m_solver;
+    LocomotionClassifier  m_locomotion;
     std::array<Quat,      fb::kSegmentCount> m_prevOrient{};
     std::array<QVector3D, fb::kSegmentCount> m_prevSegCenter{};
     bool   m_havePrev = false;
@@ -1456,7 +1585,8 @@ inline std::atomic<bool>& g_glovesFlag() { static std::atomic<bool> v{false}; re
 void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
                    const BodyPoseSolver::Diag& d,
                    const ContactDetector::Result& cr,
-                   const SkinArtifactState& skin)
+                   const SkinArtifactState& skin,
+                   const LocomotionClassifier& loco)
 {
     if (!testEnabled) return;
     static int frameCounter = 0;
@@ -1544,6 +1674,12 @@ void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
                                 << (d.aidingBiasMaxMps * 1000.0) << "mm/s"
        << std::setprecision(4)
        << "\n";
+
+    // §29.2 locomotion phase — internal state, no UI flag.
+    ss << "[loco] phase=" << locomotionPhaseName(loco.phase())
+       << "  flight=" << std::setprecision(2) << loco.flightFracSec() << "s"
+       << "  contact=" << loco.contactFracSec() << "s"
+       << std::setprecision(4) << "\n";
 
     if (!cr.active.empty()) {
         ss << "[zupt-wls] active=" << cr.active.size();
@@ -1966,7 +2102,8 @@ SkeletonXsens::computeKeypoints(const std::array<Quat, kXsensSegmentCount>& raw,
         pose_solver::dumpFrameDiag(
             pose_solver::g_testFlag().load(),
             pose_solver::g_glovesFlag().load(),
-            dg, contacts, pose_solver::g_refiner().skin());
+            dg, contacts, pose_solver::g_refiner().skin(),
+            pose_solver::g_refiner().locomotion());
     }
 
     // Step 2: expand to 27 (add dummy stubs).

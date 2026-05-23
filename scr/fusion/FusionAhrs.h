@@ -99,6 +99,11 @@ typedef struct {
     float        tauM0;
     FusionVector m0_avg;
     bool         m0_avg_ready;
+    // §51.5 — magnetic gate up-hysteresis.  After a failure the gate stays
+    // closed until the 3-condition check has passed continuously for
+    // KFA_MAG_RES_TIME_UP_S = 0.6 s.  This suppresses brief field glitches
+    // that would otherwise leak through the per-frame gate.
+    float        magClearStreakSec;
 
     // §43.12 stillness detector + ZRU rate-limit
     float stillnessTime;

@@ -60,6 +60,8 @@
 #define KFA_GYR_BIAS_MIN_DEG     0.005f        // §43.8 floor
 #define KFA_GYR_BIAS_MAX_DEG     0.07f         // §43.8 ceiling
 #define KFA_MAG_RES_THRESH       0.03f         // §43.8 magResThresholdGyrBiasDeg
+#define KFA_MAG_RES_TIME_UP_S    0.6f          // §51.5 magResTimeUp — gate up-hysteresis
+#define KFA_MAG_RES_TIME_DOWN_S  3.0f          // §51.5 magResTimeDown — gate down-hysteresis (reserved)
 
 // §43.7 — accDivMon (body uses HighBoost = 3 per §43.14 gloveHuman)
 #define KFA_LPA_TAU_S            10.0f
@@ -351,6 +353,7 @@ void FusionAhrsRestart(FusionAhrs *ahrs) {
     ahrs->dAccHighTime = 0.0f;
     ahrs->sBg = DegToRad(KFA_GYR_BIAS_MIN_DEG);
     ahrs->tauM0 = KFA_TAU_M0_MED_S;
+    ahrs->magClearStreakSec = 0.0f;
     ahrs->stillnessTime = 0.0f;
     ahrs->zruSampleCount = 0;
     ahrs->zruFrameCounter = 0;
@@ -656,9 +659,22 @@ static bool MagGate(FusionAhrs *ahrs, FusionVector m) {
 static void ApplyMagUpdate(FusionAhrs *ahrs, FusionVector m, float dt) {
     if (m.axis.x == 0.0f && m.axis.y == 0.0f && m.axis.z == 0.0f) {
         ahrs->magGateOpen = false;
+        ahrs->magClearStreakSec = 0.0f;
         return;
     }
     if (!MagGate(ahrs, m)) {
+        ahrs->magGateOpen = false;
+        ahrs->magClearStreakSec = 0.0f;
+        return;
+    }
+    // §51.5 up-hysteresis — the per-frame gate just passed, but we require
+    // a continuous streak of clean passes longer than KFA_MAG_RES_TIME_UP_S
+    // = 0.6 s before re-enabling the update (suppresses momentary glitches
+    // that happen to drift past the 3-condition check by chance).  Once the
+    // streak crosses the threshold the gate stays open until the next
+    // hard failure resets the streak to zero.
+    ahrs->magClearStreakSec += dt;
+    if (ahrs->magClearStreakSec < KFA_MAG_RES_TIME_UP_S) {
         ahrs->magGateOpen = false;
         return;
     }
