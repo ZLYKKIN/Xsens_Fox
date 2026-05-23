@@ -2406,23 +2406,13 @@ struct MocapReceiver::Impl {
     // acc/gyr/mag into proper NWU quaternions exactly like hipose's
     // InertialPoseFusionFilter — but using the newer, more robust xio AHRS
     // (gyro-bias correction, accel/magnetic rejection, startup ramp).
-    std::array<FusionAhrs, kXsensSegmentCount> fusion{};
-    std::array<bool,       kXsensSegmentCount> fusionReady{};
-    std::array<FusionBias,           kXsensSegmentCount> bias{};
-    std::array<bool,                 kXsensSegmentCount> biasReady{};
-    std::array<FusionAhrsSettings,   kXsensSegmentCount> ahrsCfg{};
-
-    // Spec §50 — Gauss-Markov skin-artifact post-filter on AHRS output.
-    // First-order exponential smoothing with τ = kSkin.tauSec (0.15 s) on
-    // the unit-quaternion log-map.  Per segment.
-    std::array<Quat, kXsensSegmentCount> qSkin{};
-    std::array<bool, kXsensSegmentCount> qSkinReady{};
-
-    // Spec §43.7 — acceleration-divergence monitor low-pass state.  v_lp
-    // tracks the slow-moving integrated linear acceleration; the magnitude
-    // alongside the gravity-residual norm dAcc drives the adaptive
-    // accelerationRejection threshold.
-    std::array<QVector3D, kXsensSegmentCount> vLp{};
+    // Per-segment §43 EKF.  All ancillary state (gyro-bias, low-pass
+    // acceleration, skin-artifact post-filter, ZRU stillness counter,
+    // adaptive m0) lives INSIDE the FusionAhrs struct now — main.cpp just
+    // calls FusionAhrsUpdate and reads the smoothed quaternion back.
+    std::array<FusionAhrs, kXsensSegmentCount>           fusion{};
+    std::array<bool,       kXsensSegmentCount>           fusionReady{};
+    std::array<FusionAhrsSettings, kXsensSegmentCount>   ahrsCfg{};
     double           freqHz       = 240.0;   // queried from XsDevice_updateRate
 
     // Sensor-to-segment alignment — identity by default, overwritten when
@@ -2443,8 +2433,8 @@ struct MocapReceiver::Impl {
 
     // -test diagnostics: the IMU channels AFTER the full calibration chain
     // (acc-norm, gyr-bias, mag soft-iron) and the sensor->body s2s rotation,
-    // plus the gyro after FusionBias removal.  Captured by the fusion loop so
-    // the [FUSED SNAPSHOT] can show raw -> body-frame -> filter-input per axis.
+    // plus the raw gyro fed into the §43 EKF.  Captured by the fusion loop
+    // so the [FUSED SNAPSHOT] can show raw -> body-frame -> EKF input per axis.
     std::array<QVector3D, kXsensSegmentCount> dbgAccBody{};   // g, body frame
     std::array<QVector3D, kXsensSegmentCount> dbgGyrBody{};   // deg/s, body frame
     std::array<QVector3D, kXsensSegmentCount> dbgMagBody{};   // norm, body frame
@@ -2478,10 +2468,8 @@ struct MocapReceiver::Impl {
 
     // Bumped (atomically) by the calibration setters whenever s2s / gyr-bias /
     // segment-gain change, to ask the network thread to re-initialise every
-    // fusion / bias filter.  Replaces the old cross-thread writes to
-    // fusionReady/biasReady (which were reset under the lock here but read &
-    // written lock-free in the poll loop — a data race).  fusion/bias/ahrsCfg/
-    // fusionReady/biasReady are now strictly owned by the network thread.
+    // EKF.  Replaces cross-thread writes to fusionReady that used to race the
+    // poll loop.  fusion / ahrsCfg / fusionReady are owned by the network thread.
     std::atomic<uint32_t> calGen{0};
 
     // Connection transport preference: COM = scanPorts first, Network =
@@ -3439,10 +3427,10 @@ bool MocapReceiver::glovesDllLoaded() const { return m_impl->manusDllLoaded; }
 
 void MocapReceiver::resetFusion()
 {
-    // Ask the network thread to re-init every fusion / bias filter on its next
-    // packet (fusionReady/biasReady are owned by that thread; see Impl::calGen).
+    // Ask the network thread to re-init every EKF on its next packet
+    // (fusionReady is owned by that thread; see Impl::calGen).
     m_impl->calGen.fetch_add(1, std::memory_order_relaxed);
-    testLog("[fusion] reset — all 17 xio AHRS filters will re-init", m_impl->test);
+    testLog("[fusion] reset — all per-sensor §43 EKFs will re-init", m_impl->test);
 }
 
 void MocapReceiver::setS2sAlignment(const std::array<Quat, kXsensSegmentCount>& s2s)
@@ -3876,14 +3864,11 @@ void MocapReceiver::run()
                 QMutexLocker lk(&I.lock);
                 const uint32_t gen = I.calGen.load(std::memory_order_relaxed);
                 if (gen != lastCalGen) {
+                    // Restart every EKF — clean P₀ + zero bias + reseed m0
+                    // + reseed skin filter.  Spec §43.1 initial covariance
+                    // matters here: stale P would bake the pre-calibration
+                    // confidence into the post-calibration state.
                     I.fusionReady.fill(false);
-                    I.biasReady.fill(false);
-                    // Spec §50 — re-seed skin smoothing and §43.7 v_lp state
-                    // whenever a calibration / alignment is applied; the post-
-                    // filter τ=0.15 s would otherwise carry stale orientation
-                    // for ~5 settling constants after the alignment change.
-                    I.qSkinReady.fill(false);
-                    I.vLp.fill(QVector3D(0, 0, 0));
                     lastCalGen = gen;
                 }
                 if (targetSeg >= 0 && targetSeg < kXsensSegmentCount) {
@@ -4097,159 +4082,30 @@ void MocapReceiver::run()
             if (fuseReady && inputsFinite &&
                 targetSeg >= 0 && targetSeg < kXsensSegmentCount) {
                 FusionAhrs& ahrs = I.fusion[targetSeg];
-                FusionAhrsSettings& s = I.ahrsCfg[targetSeg];
                 if (!I.fusionReady[targetSeg]) {
                     FusionAhrsInitialise(&ahrs);
+                    FusionAhrsSettings& s = I.ahrsCfg[targetSeg];
                     s = fusionAhrsDefaultSettings;
-                    s.convention            = FusionConventionNwu;
-                    // Live mocap settings:
-                    //   * moderate gain (0.5) — responsive without overshoot
-                    //   * rejection thresholds squared: accel 25° ≈ 0.18
-                    //     field units (we pass the squared value below
-                    //     because the lib stores the pre-squared magnitude)
-                    //   * recoveryTriggerPeriod=0 so we never get locked in
-                    //     gyro-only mode during fast motion
-                    s.gain                  = (cal.segGainActive && cal.segGain > 0.0f)
-                                              ? cal.segGain : 0.7f;
-                    s.gyroscopeRange        = 2000.0f;
-                    // Softened rejection thresholds — tight values (15°/30°)
-                    // parked the filter in gyro-only mode during static but
-                    // complex poses (sitting, arms crossed, leg-over-leg),
-                    // causing visible drift until recovery.  These values
-                    // correct gravity / mag faster while still filtering
-                    // real disturbances.
-                    s.accelerationRejection = 30.0f;
-                    s.magneticRejection     = 50.0f;
-                    s.recoveryTriggerPeriod = int(I.freqHz / 2);  // 0.5s recovery
+                    s.convention   = FusionConventionNwu;          // spec §25.2
+                    s.sampleRateHz = float(std::max(60.0, I.freqHz));
+                    // §51.6 body dip 78°; §51.1 declination 0° by default
+                    s.magDipModelDeg    = float(fox::body::kMagnet.inclinationDeg);
+                    s.magDeclinationDeg = float(fox::body::kMagnet.declinationDeg);
                     FusionAhrsSetSettings(&ahrs, &s);
-                    // Kill the 3-second startup ramp — `startup` + `rampedGain`
-                    // add real latency to the first motion after a reset.
-                    // Forcing them here lets the filter respond from the
-                    // very first packet at the steady-state gain.
-                    ahrs.startup    = false;
-                    ahrs.rampedGain = s.gain;
                     I.fusionReady[targetSeg] = true;
                 }
 
-                FusionBias& biasRef = I.bias[targetSeg];
-                if (!I.biasReady[targetSeg]) {
-                    FusionBiasInitialise(&biasRef);
-                    FusionBiasSettings bs = fusionBiasDefaultSettings;
-                    bs.sampleRate          = float(std::max(60.0, I.freqHz));
-                    // Spec §43.12 — ZRU (zero rotation update).  When |ω - b_g|
-                    // stays below movementRedefThresholdDeg = 0.3°/s for the
-                    // hold window (5 s in the FOX_KFA spec, matching the
-                    // omegaRedef* ramp constants), the bias filter is allowed
-                    // to absorb the residual.  Previous settings (1.5°/s /
-                    // 1 s) were 5× looser and let the bias drift on
-                    // intermediate motion.  Per-axis threshold mirrors how
-                    // xio FusionBias evaluates the gate.
-                    bs.stationaryThreshold = 0.3f;     // §43.12 movementRedefThresholdDeg
-                    bs.stationaryPeriod    = 5.0f;     // §43.12 hold-window seconds
-                    FusionBiasSetSettings(&biasRef, &bs);
-                    I.biasReady[targetSeg] = true;
-                }
-
-                FusionVector g = {{ float(gyrForFilter.x()),
-                                    float(gyrForFilter.y()),
-                                    float(gyrForFilter.z()) }};
-                g = FusionBiasUpdate(&biasRef, g);
-                if (I.test)
-                    I.dbgGyrFused[targetSeg] =
-                        QVector3D(g.axis.x, g.axis.y, g.axis.z);  // post-bias gyro
-
+                // Acc / gyro / mag straight into the §43 EKF.  The filter
+                // handles §19.3 mag gating, §43.7 accDivMon, §43.8 adaptive
+                // gyro-bias σ, §43.12 stillness + ZRU and §50 skin-artifact
+                // post-filtering internally.  No external knobs needed.
+                const FusionVector g = {{ float(gyrForFilter.x()),
+                                          float(gyrForFilter.y()),
+                                          float(gyrForFilter.z()) }};
                 const FusionVector a = {{ float(accForFilter.x()),
                                           float(accForFilter.y()),
                                           float(accForFilter.z()) }};
-
-                // Spec §43.7 — acceleration-divergence monitor (accDivMon).
-                // Track a slow low-pass of integrated linear acceleration as
-                // a proxy for the FOX_KFA v_lp state; combine its magnitude
-                // with the gravity-residual norm to drive a 3-band adaptive
-                // accelerationRejection threshold.  Numbers verbatim from
-                // §43.7 (gloveHuman: threshold 0.5 m/s², highBoost 3 m/s²,
-                // velThreshold 2 m/s, decay τ=0.1s, recovery 60s).
-                const float aLen = std::sqrt(a.axis.x*a.axis.x + a.axis.y*a.axis.y + a.axis.z*a.axis.z);
-                const float aErr = std::abs(aLen - 1.0f);            // |a| - 1g  (g units)
-                const float dAcc_mps2 = aErr * 9.80665f;             // convert to m/s²
-
-                // v_lp update — exponential moving average with τ = 0.1s
-                // (accDivMonTauDecay).  Driven by the linear-acc residual
-                // direction (we use the magnitude-only proxy here since the
-                // body-frame linear acc isn't gravity-removed at this stage).
-                const float bDecay = std::exp(-float(dt) / 0.1f);
-                const float keep   = bDecay;
-                const float inject = (1.0f - bDecay) * 9.80665f;
-                const QVector3D& vLpOld = I.vLp[targetSeg];
-                const QVector3D vLpNew(
-                    keep * vLpOld.x() + inject * (a.axis.x - 0.0f),
-                    keep * vLpOld.y() + inject * (a.axis.y - 0.0f),
-                    keep * vLpOld.z() + inject * (a.axis.z - 1.0f));
-                I.vLp[targetSeg] = vLpNew;
-                const float vLpMag = vLpNew.length();
-
-                // 3-band classification (spec §43.7 — Human scenario):
-                //   dAcc < 0.5 m/s² AND |v_lp| < 2 m/s   → low dynamics  → acc rej tight (≈10°)
-                //   dAcc > 3.0 m/s²                       → high dynamics → acc rej wide  (90°)
-                //   otherwise                             → mid           → smooth ramp 30..80°
-                float dynAccRej;
-                if (dAcc_mps2 < 0.5f && vLpMag < 2.0f)
-                    dynAccRej = 10.0f;
-                else if (dAcc_mps2 > 3.0f)
-                    dynAccRej = 90.0f;
-                else {
-                    const float t = std::clamp((dAcc_mps2 - 0.5f) / 2.5f, 0.0f, 1.0f);
-                    dynAccRej = 30.0f + (80.0f - 30.0f) * t;
-                }
-
-                // Spec §19.3 — three-gate magnetometer outlier rejection.
-                // Magnet hint is accepted ONLY when all three pass:
-                //   |angle(m_meas) − declination|   < 6.0°
-                //   |dip(m_meas) − dip_model|       < 3.5°
-                //   ||m_meas| − |m0|| / |m0|        < 0.03
-                // (Numbers from foxbody::kMagnet, decrypted from
-                //  fox_definitions.xsb.)
-                bool useMag = haveMag && (mag.length() > 1e-6);
-                float dynMagRej = 50.0f;
-                if (useMag) {
-                    namespace fb = fox::body;
-                    const double mLen = mag.length();
-                    const double normErr = std::abs(mLen - fb::kMagnet.normReference)
-                                         / fb::kMagnet.normReference;
-                    const double dipRad  = std::asin(std::clamp(-mag.z()/mLen, -1.0, 1.0));
-                    const double dipDeg  = dipRad * 180.0 / M_PI;
-                    const double dipErr  = std::abs(dipDeg - fb::kMagnet.inclinationDeg);
-                    const double hxy     = std::hypot(mag.x(), mag.y());
-                    const double angDeg  = (hxy > 1e-9)
-                        ? std::atan2(mag.y(), mag.x()) * 180.0 / M_PI : 0.0;
-                    const double angErr  = std::abs(angDeg - fb::kMagnet.declinationDeg);
-
-                    const bool gateNorm = normErr < fb::kMagnet.normDiffFromModelMax;
-                    const bool gateDip  = dipErr  < fb::kMagnet.dipDiffFromModelMaxDeg;
-                    const bool gateAng  = angErr  < fb::kMagnet.angleDiffFromModelMaxDeg;
-                    useMag = useMag && gateNorm && gateDip && gateAng;
-                    // When the magnet passes the gate, narrow rejection
-                    // proportionally to the worst-residual gate score.
-                    if (useMag) {
-                        const double worst = std::max({normErr / fb::kMagnet.normDiffFromModelMax,
-                                                       dipErr  / fb::kMagnet.dipDiffFromModelMaxDeg,
-                                                       angErr  / fb::kMagnet.angleDiffFromModelMaxDeg});
-                        dynMagRej = float(50.0 - 20.0 * (1.0 - worst));   // 30..50° band
-                    }
-                }
-
-                if (s.accelerationRejection != dynAccRej || s.magneticRejection != dynMagRej) {
-                    s.accelerationRejection = dynAccRej;
-                    s.magneticRejection     = dynMagRej;
-                    FusionAhrsSetSettings(&ahrs, &s);
-                }
-                if (I.test) {
-                    I.dbgDynAccRej[targetSeg] = dynAccRej;
-                    I.dbgDynMagRej[targetSeg] = dynMagRej;
-                    I.dbgAccErr[targetSeg]    = aErr;
-                }
-
-                if (useMag) {
+                if (haveMag && mag.length() > 1e-6) {
                     const FusionVector m = {{ float(mag.x()),
                                               float(mag.y()),
                                               float(mag.z()) }};
@@ -4257,35 +4113,27 @@ void MocapReceiver::run()
                 } else {
                     FusionAhrsUpdateNoMagnetometer(&ahrs, g, a, float(dt));
                 }
-                // xio AHRS natively outputs in the convention we picked
-                // (NWU), no extra rotation needed.
+
+                if (I.test) {
+                    // Diagnostic snapshot reflects the EKF's internal state.
+                    const FusionAhrsInternalStates st = FusionAhrsGetInternalStates(&ahrs);
+                    I.dbgDynAccRej[targetSeg] = st.accelerationRecoveryTrigger * 90.0f;
+                    I.dbgDynMagRej[targetSeg] = st.magneticError;
+                    I.dbgAccErr[targetSeg]    = st.accelerationError;
+                    I.dbgGyrFused[targetSeg]  = QVector3D(g.axis.x, g.axis.y, g.axis.z);
+                }
+
                 const FusionQuaternion fq = FusionAhrsGetQuaternion(&ahrs);
                 if (std::isfinite(fq.element.w) && std::isfinite(fq.element.x) &&
                     std::isfinite(fq.element.y) && std::isfinite(fq.element.z)) {
-                    const Quat qFresh = Quat(fq.element.w, fq.element.x,
-                                             fq.element.y, fq.element.z).normalized();
-
-                    // Spec §50 — Gauss-Markov skin-artifact smoothing.  The
-                    // sensor sits on soft tissue that lags / overshoots the
-                    // underlying bone; a first-order exponential filter with
-                    // τ = kSkin.tauSec (0.15 s) is the spec-compliant model.
-                    //     q_skin(k+1) = slerp(q_skin(k), q_fresh, α),  α = 1 - exp(-dt/τ).
-                    // First frame seeds the state; thereafter we smooth.
-                    if (!I.qSkinReady[targetSeg]) {
-                        I.qSkin[targetSeg]      = qFresh;
-                        I.qSkinReady[targetSeg] = true;
-                    } else {
-                        const double alpha = 1.0 - std::exp(-double(dt) / fox::body::kSkin.tauSec);
-                        I.qSkin[targetSeg]  = slerp_quat(I.qSkin[targetSeg], qFresh, alpha);
-                    }
-                    fusedQuat = I.qSkin[targetSeg];
+                    fusedQuat = Quat(fq.element.w, fq.element.x,
+                                     fq.element.y, fq.element.z).normalized();
                     haveFused = true;
                     if (I.test) I.dbgFusedQuat[targetSeg] = fusedQuat;
                 } else {
-                    // Filter state went non-finite — drop it and force a clean
-                    // re-init on the next packet so the sensor can recover.
-                    I.fusionReady[targetSeg]  = false;
-                    I.qSkinReady[targetSeg]   = false;   // re-seed skin filter on recovery
+                    // Filter state went non-finite — drop it and re-init on
+                    // the next packet so the sensor recovers cleanly.
+                    I.fusionReady[targetSeg] = false;
                 }
             }
 
@@ -4485,7 +4333,7 @@ void MocapReceiver::run()
                 // transform from raw (above) to filter input is visible.
                 ss << std::setprecision(4);
                 ss << "--- per-sensor calibrated body-frame IMU (post acc-norm/gyr-bias/"
-                      "mag-soft-iron/s2s; gyrFused = post-FusionBias) ---\n";
+                      "mag-soft-iron/s2s; gyrFused = raw input to FOX_KFA EKF) ---\n";
                 for (int i = 0; i < kXsensSegmentCount; ++i) {
                     const QVector3D& ab = I.dbgAccBody[i];
                     const QVector3D& gb = I.dbgGyrBody[i];
@@ -4550,16 +4398,22 @@ void MocapReceiver::run()
                    << "  magNorm=" << (I.magNormActive ? "on" : "off")
                    << "  gyrBias=" << (I.gyrBiasActive ? "on" : "off")
                    << "  freq=" << std::setprecision(1) << I.freqHz << "Hz ---\n";
-                // Madgwick/xio AHRS settings (Pelvis sensor, representative) so
-                // the fusion stage's tunables are auditable from the log.
+                // FOX_KFA §43 EKF settings (Pelvis sensor, representative).
+                // Adaptive thresholds (acc rejection, mag-gate residual) live
+                // inside the EKF; logged from FusionAhrsGetInternalStates.
                 {
                     const FusionAhrsSettings& fs = I.ahrsCfg[SEG_Pelvis];
-                    ss << "--- fusion (xio AHRS, seg[0] Pelvis): gain="
-                       << std::setprecision(2) << fs.gain
-                       << " gyroRange=" << std::setprecision(0) << fs.gyroscopeRange
-                       << " accelRej=" << std::setprecision(1) << fs.accelerationRejection << "°"
-                       << " magRej=" << fs.magneticRejection << "°"
-                       << " recoveryTrig=" << fs.recoveryTriggerPeriod << " ticks ---\n";
+                    const FusionAhrsInternalStates st =
+                        FusionAhrsGetInternalStates(&I.fusion[SEG_Pelvis]);
+                    ss << "--- fusion (§43 EKF, seg[0] Pelvis): sampleRate="
+                       << std::setprecision(0) << fs.sampleRateHz << "Hz"
+                       << " dipModel=" << std::setprecision(1) << fs.magDipModelDeg << "°"
+                       << " declination=" << fs.magDeclinationDeg << "°"
+                       << "  | dAcc=" << std::setprecision(2) << st.accelerationError << "m/s²"
+                       << " fAccBoost=" << std::setprecision(0) << (st.accelerationRecoveryTrigger * 1000.0f)
+                       << " magResid=" << std::setprecision(2) << st.magneticError << "°"
+                       << " magGate=" << (st.magnetometerIgnored ? "closed" : "open")
+                       << " ---\n";
                 }
                 if (I.accNormActive || I.magNormActive || I.gyrBiasActive
                     || I.s2sActive) {

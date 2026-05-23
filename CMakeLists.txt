@@ -88,8 +88,6 @@ add_executable(fox_mocap WIN32
     scr/fusion/Fusion.h
     scr/fusion/FusionAhrs.c
     scr/fusion/FusionAhrs.h
-    scr/fusion/FusionBias.c
-    scr/fusion/FusionBias.h
     scr/fusion/FusionCompass.c
     scr/fusion/FusionCompass.h
     scr/fusion/FusionConvention.h
