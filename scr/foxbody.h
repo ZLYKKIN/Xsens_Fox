@@ -431,6 +431,77 @@ inline constexpr double kJointLaxityRad     = 0.005;  // soft «play» per joint
 inline constexpr double kHyperExtensionMax  = 0.0;    // hyper-extension forbidden
 
 // ---------------------------------------------------------------------------
+//  §174.5 / §174.6 — calibration quality scale and stage timing.
+//
+//  Quality bands (residual angle of q_align relative to the factory q_bs
+//  baseline, see spec §174.5):
+//    angle_resid < 5°    →  5  excellent
+//        5°..10°         →  4  good
+//       10°..20°         →  3  adequate
+//       20°..30°         →  2  poor
+//             > 30°      →  1  invalid (re-calibrate)
+//
+//  Stage timing (§174.6):
+//    Stage 1: N-pose, 3 s
+//    Stage 2: T-pose, 3 s     (verification)
+//    Stage 3: K-pose / individual gestures, 3 s   (refinement)
+// ---------------------------------------------------------------------------
+inline constexpr std::array<double, 4> kCalibQualityThresholdDeg = {
+    5.0, 10.0, 20.0, 30.0
+};
+inline constexpr double kCalibStageDurationSec = 3.0;     // §174.6 each pose
+inline constexpr int    kCalibQualityExcellent = 5;
+inline constexpr int    kCalibQualityGood      = 4;
+inline constexpr int    kCalibQualityAdequate  = 3;
+inline constexpr int    kCalibQualityPoor      = 2;
+inline constexpr int    kCalibQualityInvalid   = 1;
+
+// §174.5 — map a residual angle (degrees) to the 1..5 quality band.
+inline int calibrationQuality(double residualDeg)
+{
+    if (residualDeg < kCalibQualityThresholdDeg[0]) return kCalibQualityExcellent;
+    if (residualDeg < kCalibQualityThresholdDeg[1]) return kCalibQualityGood;
+    if (residualDeg < kCalibQualityThresholdDeg[2]) return kCalibQualityAdequate;
+    if (residualDeg < kCalibQualityThresholdDeg[3]) return kCalibQualityPoor;
+    return kCalibQualityInvalid;
+}
+
+// §174.5 — human-readable label for the quality band (kept English; UI may
+// localise via the existing Lang strings, but the band name is canonical).
+inline const char* calibrationQualityLabel(int q)
+{
+    switch (q) {
+        case kCalibQualityExcellent: return "excellent";
+        case kCalibQualityGood:      return "good";
+        case kCalibQualityAdequate:  return "adequate";
+        case kCalibQualityPoor:      return "poor";
+        case kCalibQualityInvalid:   return "invalid";
+        default:                     return "unknown";
+    }
+}
+
+// ---------------------------------------------------------------------------
+//  §38.5 — sensor-to-body alignment standard deviations (re-exposed for the
+//  weighted Wahba solver in the calibration wizard).  These are the same
+//  numbers already stored in kSkin but pulled out at the foxbody level so
+//  the calibrator can reach them without including the larger SkinParams
+//  struct.  Spec wording: «начальные СКО до калибровки субъекта».
+// ---------------------------------------------------------------------------
+inline constexpr double kCalibInitStdOriBodyDeg          = 45.0;   // pre-calibration prior
+inline constexpr double kCalibInitStdSensorToBodyDeg     = 1.5;    // post-stage SD
+inline constexpr double kCalibStdSensorToBodyOriFloorDeg = 0.3;    // feet — tighter
+inline constexpr double kCalibInitStdSensorToBodyPos     = 0.01;   // metres
+inline constexpr double kCalibStdSensorToBodyPosFloor    = 0.004;  // feet — tighter
+
+// True for the «floor-grade» tighter SD: only the feet in contact with the
+// ground get the 0.3° / 0.004 m floor (spec §38.5 — «нижняя граница в работе»).
+inline constexpr bool kCalibSegmentOnFloor(int seg)
+{
+    // 17/21 = RFoot/LFoot (0-based after main.h offset).
+    return (seg == 17) || (seg == 21);
+}
+
+// ---------------------------------------------------------------------------
 //  §37.5 — calibration body dimensions and their measurement sd (metres).
 //  Used as weights when applying user-measured anthropometry.
 // ---------------------------------------------------------------------------

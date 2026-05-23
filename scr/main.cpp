@@ -5963,6 +5963,7 @@ void NewSessionWizard::onCalibrationBegin()
     m_rx->resetFusion();
 
     m_phase = CalibPhase::PrepT;
+    m_phaseStartMs = 0;   // armed on Capture* entry (spec §174.6)
     refreshPoseImage();
     m_countTicksLeft = kCountdownSeconds * 10;
     m_countLabel->setText(QString::number(kCountdownSeconds));
@@ -6007,6 +6008,11 @@ void NewSessionWizard::onCountdownTick()
             if (m_calibStatus)
                 m_calibStatus->setText(Lang::t("calib_k_capture"));
         }
+        // Spec §174.6 — each Capture* stage budgets 3 s wall-clock.  Stamp
+        // the entry time; the readiness gate below uses (samples-reached OR
+        // 3-s-elapsed-AND-sample-floor) so we honour the spec on slow suits
+        // (Awinda 60 Hz) without truncating fast ones (Link 240 Hz).
+        m_phaseStartMs = QDateTime::currentMSecsSinceEpoch();
         m_captureTimer.start();
     }
 }
@@ -6103,7 +6109,19 @@ void NewSessionWizard::onCaptureTick()
     const int v = std::min(m_goodSamples, kCalibrationSamples);
     m_readyBar->setValue(v);
 
-    if (m_goodSamples < kCalibrationSamples) return;
+    // Spec §174.6 — finalize when EITHER the fixed sample count is reached
+    // (fast suits) OR the 3-second per-stage budget is up AND at least a
+    // statistical-floor of samples accumulated.  The dual gate keeps slow
+    // suits (Awinda) inside the spec without truncating fast ones (Link).
+    {
+        const qint64 elapsedMs = (m_phaseStartMs > 0)
+            ? (QDateTime::currentMSecsSinceEpoch() - m_phaseStartMs) : 0;
+        const qint64 stageBudgetMs = qint64(fox::body::kCalibStageDurationSec * 1000.0);
+        const bool   timeBudgetMet = elapsedMs >= stageBudgetMs;
+        const bool   sampleFloor   = m_goodSamples >= 50;
+        const bool   countReached  = m_goodSamples >= kCalibrationSamples;
+        if (!(countReached || (timeBudgetMet && sampleFloor))) return;
+    }
 
     // ---------- CaptureT complete → settle + refine T-pose reference -----
     if (m_phase == CalibPhase::CaptureT) {
@@ -6922,14 +6940,36 @@ void NewSessionWizard::onCaptureTick()
                 }
             }
             const double avgConf = sumConf / double(kXsensSegmentCount);
+
+            // Spec §174.5 — average residual across all sensored segments
+            // (skipping mode-2 "identity" fallbacks which have no real solve).
+            double sumResid = 0.0;
+            int    nResid   = 0;
+            for (int i = 0; i < kXsensSegmentCount; ++i) {
+                if (s2sNewMode[i] == 2) continue;
+                sumResid += s2sResidual[i];
+                ++nResid;
+            }
+            const double avgResid = (nResid > 0) ? sumResid / double(nResid) : 99.0;
+            const int    band     = fox::body::calibrationQuality(avgResid);
+            const char*  label    = fox::body::calibrationQualityLabel(band);
+
             if (m_calibQuality) {
-                QString qual = QString("Quality: %1").arg(avgConf, 0, 'f', 2);
+                QString qual = QString("Quality: %1/5 %2 (residual %3°, conf %4)")
+                                   .arg(band)
+                                   .arg(QString::fromUtf8(label))
+                                   .arg(avgResid, 0, 'f', 1)
+                                   .arg(avgConf,  0, 'f', 2);
                 if (problems > 0)
                     qual += QString(" — issues: %1").arg(problemList.join(", "));
                 m_calibQuality->setText(qual);
-                m_calibQuality->setStyleSheet(avgConf > 0.8 ? "color:#2EC25A; font-weight:700;"
-                                            : avgConf > 0.6 ? "color:#E0A030; font-weight:700;"
-                                                            : "color:#E04040; font-weight:700;");
+                // Colour by spec band (1..5), not the internal 0..1 confidence.
+                m_calibQuality->setStyleSheet(
+                    band >= fox::body::kCalibQualityGood
+                        ? "color:#2EC25A; font-weight:700;"
+                    : band >= fox::body::kCalibQualityAdequate
+                        ? "color:#E0A030; font-weight:700;"
+                        : "color:#E04040; font-weight:700;");
             }
         }
 
