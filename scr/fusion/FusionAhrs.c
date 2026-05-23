@@ -62,6 +62,9 @@
 #define KFA_MAG_RES_THRESH       0.03f         // §43.8 magResThresholdGyrBiasDeg
 #define KFA_MAG_RES_TIME_UP_S    0.6f          // §51.5 magResTimeUp — gate up-hysteresis
 #define KFA_MAG_RES_TIME_DOWN_S  3.0f          // §51.5 magResTimeDown — gate down-hysteresis (reserved)
+#define KFA_REDEF_CLOSED_THR_S   5.0f          // §1064 — gate must be closed ≥ 5 s before snap eligibility
+#define KFA_REDEF_RAMP_S         2.0f          // §1064 — boost decays over 2 s
+#define KFA_REDEF_SIGMA_DOWNSCALE 0.10f        // §1064 — sigmaMag × 0.10 → ~100× weight at peak
 
 // §43.7 — accDivMon (body uses HighBoost = 3 per §43.14 gloveHuman)
 #define KFA_LPA_TAU_S            10.0f
@@ -354,6 +357,9 @@ void FusionAhrsRestart(FusionAhrs *ahrs) {
     ahrs->sBg = DegToRad(KFA_GYR_BIAS_MIN_DEG);
     ahrs->tauM0 = KFA_TAU_M0_MED_S;
     ahrs->magClearStreakSec = 0.0f;
+    ahrs->magClosedStreakSec = 0.0f;
+    ahrs->magRedefBoostTimer = 0.0f;
+    ahrs->magWasClosed = false;
     ahrs->stillnessTime = 0.0f;
     ahrs->zruSampleCount = 0;
     ahrs->zruFrameCounter = 0;
@@ -657,14 +663,19 @@ static bool MagGate(FusionAhrs *ahrs, FusionVector m) {
 }
 
 static void ApplyMagUpdate(FusionAhrs *ahrs, FusionVector m, float dt) {
+    // §1064 — track sustained gate closure for the snap trigger below.
     if (m.axis.x == 0.0f && m.axis.y == 0.0f && m.axis.z == 0.0f) {
         ahrs->magGateOpen = false;
         ahrs->magClearStreakSec = 0.0f;
+        ahrs->magClosedStreakSec += dt;
+        ahrs->magWasClosed = true;
         return;
     }
     if (!MagGate(ahrs, m)) {
         ahrs->magGateOpen = false;
         ahrs->magClearStreakSec = 0.0f;
+        ahrs->magClosedStreakSec += dt;
+        ahrs->magWasClosed = true;
         return;
     }
     // §51.5 up-hysteresis — the per-frame gate just passed, but we require
@@ -676,8 +687,21 @@ static void ApplyMagUpdate(FusionAhrs *ahrs, FusionVector m, float dt) {
     ahrs->magClearStreakSec += dt;
     if (ahrs->magClearStreakSec < KFA_MAG_RES_TIME_UP_S) {
         ahrs->magGateOpen = false;
+        // Don't reset magClosedStreakSec yet — only when the gate truly
+        // opens do we count the closure as "ended".
         return;
     }
+    // Gate is fully open this frame.  §1064: if it had been closed for ≥
+    // 5 s before this re-open, arm the heading-redef boost timer so the
+    // next 2 s of mag updates use a smaller sigmaMag (≈ ×0.10 → ~100×
+    // Kalman weight on heading).  Snaps the heading to the newly trusted
+    // field instead of crawling there over m0_avg's τ.
+    if (ahrs->magWasClosed &&
+        ahrs->magClosedStreakSec >= KFA_REDEF_CLOSED_THR_S) {
+        ahrs->magRedefBoostTimer = KFA_REDEF_RAMP_S;
+    }
+    ahrs->magClosedStreakSec = 0.0f;
+    ahrs->magWasClosed = false;
     ahrs->magGateOpen = true;
 
     // Innovation: r = m - h_mag,  h_mag = q⁻¹ · m0 · q
@@ -703,7 +727,21 @@ static void ApplyMagUpdate(FusionAhrs *ahrs, FusionVector m, float dt) {
     H[1 * N15 + 9 + 0] = ex.axis.y;  H[1 * N15 + 9 + 1] = ey.axis.y;  H[1 * N15 + 9 + 2] = ez.axis.y;
     H[2 * N15 + 9 + 0] = ex.axis.z;  H[2 * N15 + 9 + 1] = ey.axis.z;  H[2 * N15 + 9 + 2] = ez.axis.z;
 
-    const float Rs = ahrs->sigmaMag * ahrs->sigmaMag;
+    // §1064 — heading redefinition boost.  When magRedefBoostTimer > 0
+    // (gate just re-opened after a long closure), scale sigmaMag down so
+    // R is tiny and the Kalman gain pulls heading hard.  Linear ramp-down
+    // back to nominal over KFA_REDEF_RAMP_S = 2 s.
+    float sigmaMagEff = ahrs->sigmaMag;
+    if (ahrs->magRedefBoostTimer > 0.0f) {
+        const float frac = ahrs->magRedefBoostTimer / KFA_REDEF_RAMP_S;
+        // boost = downscale at frac=1, 1.0 at frac=0
+        const float boostMul = KFA_REDEF_SIGMA_DOWNSCALE
+                             + (1.0f - KFA_REDEF_SIGMA_DOWNSCALE) * (1.0f - frac);
+        sigmaMagEff = ahrs->sigmaMag * boostMul;
+        ahrs->magRedefBoostTimer -= dt;
+        if (ahrs->magRedefBoostTimer < 0.0f) ahrs->magRedefBoostTimer = 0.0f;
+    }
+    const float Rs = sigmaMagEff * sigmaMagEff;
     const float Rdiag[3] = { Rs, Rs, Rs };
 
     float HP[3 * N15];

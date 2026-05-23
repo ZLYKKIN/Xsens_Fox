@@ -104,6 +104,15 @@ typedef struct {
     // KFA_MAG_RES_TIME_UP_S = 0.6 s.  This suppresses brief field glitches
     // that would otherwise leak through the per-frame gate.
     float        magClearStreakSec;
+    // §1064 — heading redefinition.  Track how long the gate has been
+    // closed; when it re-opens after a long closure (≥ 5 s), temporarily
+    // boost the Kalman gain on the magnetic update by shrinking sigmaMag
+    // so the EKF snaps the heading to the newly-trusted field instead of
+    // crawling there over the m0_avg's τ.  Decays back to nominal over
+    // KFA_REDEF_RAMP_S = 2 s.
+    float        magClosedStreakSec;
+    float        magRedefBoostTimer;
+    bool         magWasClosed;
 
     // §43.12 stillness detector + ZRU rate-limit
     float stillnessTime;
