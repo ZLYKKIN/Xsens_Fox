@@ -978,6 +978,12 @@ private:
     int    m_settleGen = 0;   // bumped to invalidate pending settle / singleShot callbacks
     bool   m_suitBtnCooldown = false;  // debounce window after a Connect-suit click
 
+    // §174.6 — wall-clock start of the current Capture* phase.  Spec mandates
+    // 3 s per stage (T, N, K).  We enter Capture* with m_phaseStartMs set;
+    // finalisation gates on EITHER the fixed sample count (fast suits)
+    // OR a 3 s budget with a small sample floor (Awinda/60 Hz suits).
+    qint64 m_phaseStartMs = 0;
+
     // Double-pose calibration state machine.
     //
     //  Idle

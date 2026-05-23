@@ -46,4 +46,13 @@ void appendPoseSegment(QByteArray& pkt, qint32 segId,
 void appendScaleSegment(QByteArray& pkt, const char* name,
                         float x, float y, float z);
 
+// Append one MXTP21 ergonomic-angle segment (spec §30):
+//   ">I3f"  — jointId (1-based, i32 BE) + (abduction, flexion, rotation)
+//             in DEGREES (3×f32 BE).
+// Sign convention is the spec §30/§58 per-joint table — abduction (X axis,
+// coronal plane), flexion (Y, sagittal), rotation (Z, transverse).  A full
+// MXTP21 packet has 22 segments (one per joint in foxbody::kJoints).
+void appendErgoAngleSegment(QByteArray& pkt, qint32 jointId,
+                            float abductionDeg, float flexionDeg, float rotationDeg);
+
 }  // namespace fox
