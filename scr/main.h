@@ -1079,12 +1079,23 @@ private:
     void updateNavButtons();
     void refreshPoseImage();
     void setBadge(QLabel* lab, const QString& txt, bool green);
+    // -test-only one-liner emitted on every CalibPhase transition.  Name + a
+    // short tag + accumulated good-sample count, so a session log records the
+    // exact moment each stage began and how much data fed it.
+    void logCalibPhaseTransition(const char* tag);
 
     // True while a calibration run is in progress (any phase except Idle/Done),
     // INCLUDING the timer-less "settle" phases. Gates navigation and tells us
     // when a lost connection must abort the run.
     bool calibBusy() const {
         return m_phase != CalibPhase::Idle && m_phase != CalibPhase::Done;
+    }
+    // True during the N-pose half of the wizard (prep or capture).  Used by
+    // both refreshPoseImage() and retranslate() to pick the correct image /
+    // instruction text without duplicating the phase enum check.
+    bool isNPosePhase() const noexcept {
+        return m_phase == CalibPhase::PrepN
+            || m_phase == CalibPhase::CaptureN;
     }
     // Cancel an in-progress calibration: invalidate pending settle callbacks,
     // stop timers, reset progress bars and accumulated samples back to Idle.
