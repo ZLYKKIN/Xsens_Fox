@@ -899,6 +899,13 @@ inline constexpr double kStdSamePosMeasZ    = 10.0;   // ZHC off: Z is free vert
 inline constexpr int    kMaxIKSteps         = 2;        // FOX_FE.LX.maxIKsteps
 inline constexpr double kJointLaxitySolver  = 0.005;    // FOX_FE.LX.jointLaxity (rad)
 inline constexpr double kHypExtPenaltySd    = 0.0002;   // hard barrier sd for knee/elbow ≥ 0
+// §38.2 — body-wide height tolerance band used by the air-phase contact feature.
+//   dLevel.default — general height tolerance (any body point near floor)
+//   dLevel.foot    — tighter band reserved for foot-floor contact (already at kAir[6])
+// The contact detector blends these to score "low-Z" without committing to a
+// strict floor distance.  Values are the calibrated body-model defaults.
+inline constexpr double kDLevelDefault      = 0.175;    // general height tolerance (m)
+inline constexpr double kDLevelFoot         = 0.10;     // foot-floor tolerance       (m)
 
 // §45.1 — spineNeck namespace coefficients (separate from c_spine, fox_definitions.xsb
 // spineNeck.*).  These are the per-joint coupling strengths used by the

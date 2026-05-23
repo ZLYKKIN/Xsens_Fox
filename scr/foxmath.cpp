@@ -111,7 +111,7 @@ Quat slerp_quat(const Quat& a, const Quat& b, double t)
 double quat_angle_deg(const Quat& q)
 {
     const double w = std::abs(q.w) > 1.0 ? 1.0 : std::abs(q.w);
-    return 2.0 * std::acos(w) * 180.0 / 3.14159265358979323846;
+    return 2.0 * std::acos(w) * 180.0 / M_PI;
 }
 
 // ============================================================================

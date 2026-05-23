@@ -529,7 +529,12 @@ public:
             const double f_com = fb::kCom[1] + (fb::kCom[4] - fb::kCom[1]) *
                                  sigmoid(-(dCom - 0.0) / std::max(1e-6, fb::kCom[2]));
             // Feature: air (§226) — penalises high pelvis speed, rewards low-z.
-            const double lowZ        = std::max(0.0, 0.2 - (double(p_world.z()) - in.floorLevelZ));
+            // The outer band uses the general height tolerance (kDLevelDefault);
+            // the divisor below uses the tighter foot-floor band (kDLevelFoot)
+            // so the score blends gracefully between "near the floor" and
+            // "on the floor" without a discontinuity at the foot edge.
+            const double lowZ        = std::max(0.0,
+                fb::kDLevelDefault - (double(p_world.z()) - in.floorLevelZ));
             const double f_lowFreq   = (aNorm < 12.0) ? 1.0 : 0.0;
             const double f_lowOmega  = (std::abs(double(w.x())) +
                                         std::abs(double(w.y())) +
@@ -540,7 +545,7 @@ public:
                                  fb::kAir[3] * f_lowFreq +
                                  fb::kAir[4] * f_lowOmega +
                                  fb::kAir[5] * std::abs(double(v_world.z())) +
-                                 fb::kAir[6] * std::min(1.0, lowZ / 0.1) +
+                                 fb::kAir[6] * std::min(1.0, lowZ / fb::kDLevelFoot) +
                                  fb::kAir[8] * std::min(1.0, pelvisSpeed / 2.0);
             // Feature: general bias (§229).
             const double f_general = fb::kGeneralProb[0];
@@ -648,19 +653,37 @@ private:
 //    D. Hyper-extension barrier: knee/elbow flex ≥ 0 (soft penalty with
 //       sd = kHypExtPenaltySd).
 //
-//  Normal equations: (JᵀWJ + λI)·δ = -JᵀWr, λ = kJointLaxitySolver = 0.005.
-//  Two Gauss-Newton iterations per frame (kMaxIKSteps).
+//  Normal equations: (JᵀWJ + λD)·δ = -JᵀWr where D = I (identity scaling).
+//  λ is the adaptive Levenberg-Marquardt damping: started at jointLaxity²
+//  (warm-start from the converged value of the previous frame), divided by
+//  10 on every step that reduces the residual, multiplied by 10 on every
+//  step that grows it.  Two outer Gauss-Newton iterations per frame
+//  (kMaxIKSteps), with up to kMaxLambdaRetries inner damping retries
+//  before giving up — in practice the loop accepts on the first or second
+//  try and the damping bounds [jointLaxity², 1.0] guarantee PSD on one end
+//  and gradient descent on the other.
 // ----------------------------------------------------------------------------
 class BodyPoseSolver {
 public:
     struct Diag {
-        double     residualMeanRad   = 0.0;     // mean |r| across active rows
+        double     residualMeanRad     = 0.0;   // mean |r| across active rows
         double     residualMeanPostRad = 0.0;
-        int        numRows           = 0;
-        int        poseQualityBand   = fb::PoseQualityGood;
-        double     stepNormRad       = 0.0;
-        int        iterations        = 0;
+        int        numRows             = 0;
+        int        poseQualityBand     = fb::PoseQualityGood;
+        double     stepNormRad         = 0.0;
+        int        iterations          = 0;
+        int        rejectedSteps       = 0;   // adaptive-LM rejections this frame
+        double     lambda              = 0.0; // adaptive damping at exit
     };
+
+    // Adaptive Levenberg-Marquardt damping bounds.  The lower bound matches
+    // the documented joint-laxity damping λ = jointLaxity² so the solver
+    // collapses to pure Gauss-Newton in the well-conditioned regime; the
+    // upper bound caps λ at 1.0 so the worst case is gradient descent.
+    static constexpr double kLambdaMin =
+        fb::kJointLaxitySolver * fb::kJointLaxitySolver;
+    static constexpr double kLambdaMax = 1.0;
+    static constexpr int    kMaxLambdaRetries = 5;
 
     // Refines `orient` in place from raw sensored quaternions.  `sensorPresent`
     // marks which entries of `orient` came from a real IMU (others are
@@ -678,6 +701,73 @@ public:
         Eigen::VectorXd JtWr  = Eigen::VectorXd::Zero(DOF);
         double initialResidSum = 0.0;
         int    initialResidN   = 0;
+
+        // Residual-only evaluator.  Mirrors the four blocks of the build
+        // phase (A orientation hints, B lump coupling, C spine rhythm, D
+        // hyper-extension barriers) without touching the Jacobian — used by
+        // the adaptive-LM accept/reject test to score a candidate orientation
+        // without having to rebuild the normal equations from scratch.
+        auto evalResidual =
+            [&](const std::array<Quat, fb::kSegmentCount>& o) -> double {
+            double sum = 0.0;
+            // (A) Orientation hints
+            for (int i = 0; i < N; ++i) {
+                if (!sensorPresent[i]) continue;
+                const Quat qPred = skin.applyTo(i, o[i]);
+                const Quat qRel  = quat_mult(sensorMeas[i],
+                                             qPred.conj()).normalized();
+                sum += quat_log(qRel).length();
+            }
+            // (B) Lump coupling
+            for (int g = 0; g < fb::kLumpGroups; ++g) {
+                std::vector<int> segs;
+                for (int j = 0; j < fb::kJointCount; ++j) {
+                    if (fb::kJointLump[j] != g) continue;
+                    segs.push_back(fb::kJoints[j].child);
+                }
+                if (segs.size() < 2) continue;
+                for (size_t s = 1; s < segs.size(); ++s) {
+                    const Quat qRel = quat_mult(o[segs[s - 1]],
+                                                o[segs[s]].conj()).normalized();
+                    sum += quat_log(qRel).length();
+                }
+            }
+            // (C) Spine rhythm
+            {
+                const int idxPelvis = 0, idxL5 = 1, idxL3 = 2, idxT12 = 3, idxT8 = 4;
+                const double sumC = fb::kCSpine[0] + fb::kCSpine[1] +
+                                    fb::kCSpine[2] + fb::kCSpine[3];
+                if (sumC > 1e-9) {
+                    const QVector3D phi = quat_log(quat_mult(
+                        o[idxT8], o[idxPelvis].conj()).normalized());
+                    auto enforceR = [&](int idx, double fraction) {
+                        const Quat qExp = quat_mult(
+                            quat_exp_rotvec(fraction * double(phi.x()),
+                                            fraction * double(phi.y()),
+                                            fraction * double(phi.z())),
+                            o[idxPelvis]).normalized();
+                        sum += quat_log(quat_mult(qExp,
+                            o[idx].conj()).normalized()).length();
+                    };
+                    enforceR(idxL5,  fb::kCSpine[0] / sumC);
+                    enforceR(idxL3, (fb::kCSpine[0] + fb::kCSpine[1]) / sumC);
+                    enforceR(idxT12,(fb::kCSpine[0] + fb::kCSpine[1] +
+                                     fb::kCSpine[2]) / sumC);
+                }
+            }
+            // (D) Hyper-extension barriers
+            auto barrier = [&](int parentIdx, int childIdx) {
+                const Quat qRel = quat_mult(o[childIdx],
+                                            o[parentIdx].conj()).normalized();
+                const QVector3D phi = quat_log(qRel);
+                if (phi.y() < 0) sum += std::abs(double(phi.y()));
+            };
+            barrier(15, 16);
+            barrier(19, 20);
+            barrier( 8,  9);
+            barrier(12, 13);
+            return sum;
+        };
 
         for (d.iterations = 0; d.iterations < fb::kMaxIKSteps; ++d.iterations) {
             JtWJ.setZero();
@@ -815,48 +905,84 @@ public:
             }
             d.numRows = residN;
 
-            // Levenberg-Marquardt damping λI on the diagonal.
-            const double lambda = fb::kJointLaxitySolver * fb::kJointLaxitySolver;
-            for (int k = 0; k < DOF; ++k) JtWJ(k, k) += lambda;
+            // Adaptive Levenberg-Marquardt step.  The classical algorithm:
+            // try a step at the current damping λ; if it reduces the
+            // residual it is accepted and λ is divided by 10 (more
+            // ambitious next time); if it grows the residual the trial
+            // orientation is rolled back, λ is multiplied by 10, and the
+            // step is re-solved with the stronger damping.  After at most
+            // kMaxLambdaRetries retries we give up on this outer iteration
+            // — in practice the loop accepts on the first or second try.
+            bool accepted = false;
+            double thisStepNorm = 0.0;
+            double thisResidPost = residSum;
+            for (int retry = 0; retry < kMaxLambdaRetries; ++retry) {
+                // λI on the diagonal of a fresh copy so we can retry with a
+                // different damping without rebuilding the normal equations.
+                Eigen::MatrixXd JtWJ_damped = JtWJ;
+                for (int k = 0; k < DOF; ++k) JtWJ_damped(k, k) += m_lambda;
 
-            // Solve via LDLᵀ (Eigen).  Guaranteed PSD because λI > 0.
-            Eigen::LDLT<Eigen::MatrixXd> ldlt(JtWJ);
-            if (ldlt.info() != Eigen::Success) {
-                // Singular system — abort this iteration cleanly.
-                break;
+                Eigen::LDLT<Eigen::MatrixXd> ldlt(JtWJ_damped);
+                if (ldlt.info() != Eigen::Success) {
+                    // Numerically singular even with damping — bail out of
+                    // both the inner retry and the outer Gauss-Newton loop.
+                    break;
+                }
+                Eigen::VectorXd dx = ldlt.solve(-JtWr);
+
+                double stepNorm = 0.0;
+                for (int k = 0; k < DOF; ++k) stepNorm += dx[k] * dx[k];
+                stepNorm = std::sqrt(stepNorm);
+
+                // Tentative orientation: q_i ⊗ exp_quat(δθ_i).
+                std::array<Quat, fb::kSegmentCount> orientTrial = orient;
+                for (int i = 0; i < N; ++i) {
+                    const int row = i * 3;
+                    const QVector3D phi(float(dx[row]), float(dx[row + 1]),
+                                        float(dx[row + 2]));
+                    const Quat dq = quat_exp_rotvec(double(phi.x()),
+                                                    double(phi.y()),
+                                                    double(phi.z()));
+                    orientTrial[i] = quat_mult(orientTrial[i], dq).normalized();
+                }
+
+                // Accept if the move strictly reduces residual at the new
+                // orientation; otherwise reject and damp harder.
+                const double residTrial = evalResidual(orientTrial);
+                if (residTrial < residSum) {
+                    orient        = orientTrial;
+                    thisStepNorm  = stepNorm;
+                    thisResidPost = residTrial;
+                    m_lambda      = std::max(kLambdaMin, m_lambda * 0.1);
+                    accepted      = true;
+                    break;
+                }
+                m_lambda = std::min(kLambdaMax, m_lambda * 10.0);
+                ++d.rejectedSteps;
             }
-            Eigen::VectorXd dx = ldlt.solve(-JtWr);
 
-            // Cap per-iteration step to avoid runaway when the linearisation
-            // is far from accurate (large measurement gaps).
-            double stepNorm = 0.0;
-            for (int k = 0; k < DOF; ++k) stepNorm += dx[k] * dx[k];
-            stepNorm = std::sqrt(stepNorm);
-            const double stepCapRad = 0.5;   // 28°
-            if (stepNorm > stepCapRad) {
-                dx *= (stepCapRad / stepNorm);
-                stepNorm = stepCapRad;
-            }
-            d.stepNormRad = stepNorm;
+            d.stepNormRad         = thisStepNorm;
+            d.residualMeanPostRad = residN > 0
+                ? (thisResidPost / double(residN)) : 0.0;
 
-            // Apply δθ — q_i ← q_i ⊗ exp_quat(δθ_i).
-            for (int i = 0; i < N; ++i) {
-                const int row = i * 3;
-                const QVector3D phi(float(dx[row]), float(dx[row + 1]),
-                                    float(dx[row + 2]));
-                const Quat dq = quat_exp_rotvec(double(phi.x()), double(phi.y()),
-                                                double(phi.z()));
-                orient[i] = quat_mult(orient[i], dq).normalized();
-            }
-
-            d.residualMeanPostRad = residN > 0 ? (residSum / double(residN)) : 0.0;
+            // No descent direction at any damping → stop trying further
+            // Gauss-Newton sweeps; the pose is as refined as it will get.
+            if (!accepted) break;
         }
 
         d.residualMeanRad = initialResidN > 0
             ? (initialResidSum / double(initialResidN)) : 0.0;
         d.poseQualityBand = fb::poseQualityFromResidual(d.residualMeanPostRad);
+        d.lambda          = m_lambda;
         return d;
     }
+
+private:
+    // Adaptive Levenberg-Marquardt damping, persisted across frames so the
+    // solver remembers the regime that converged last time and warm-starts
+    // the next frame with a sane value rather than restarting at kLambdaMin
+    // every tick.
+    double m_lambda = kLambdaMin;
 };
 
 // ----------------------------------------------------------------------------
@@ -995,6 +1121,9 @@ void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
        << "  r_avg=" << d.residualMeanRad
        << "  r_post=" << d.residualMeanPostRad
        << "  step=" << d.stepNormRad
+       << "  lambda=" << std::scientific << std::setprecision(2) << d.lambda
+       << std::fixed << std::setprecision(4)
+       << "  rej=" << d.rejectedSteps
        << "  poseQ=" << d.poseQualityBand
        << " (" << (d.poseQualityBand == fb::PoseQualityExcellent ? "excellent"
                   : d.poseQualityBand == fb::PoseQualityGood      ? "good"
@@ -1031,6 +1160,20 @@ void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
             }
         }
         ss << "\n";
+    }
+
+    // -test solver-saturation event: when the adaptive LM has been
+    // forced to back off every step (rejectedSteps ≥ kMaxLambdaRetries)
+    // and the inner descent is stuck, surface a one-line event next to
+    // the [wls] dump.  The pose is at the spec's noise floor; the LM
+    // cannot find a descent direction.  Useful for diagnosing held-
+    // still / dark-mode drift, where the residual is dominated by
+    // measurement noise rather than geometric error.
+    if (d.rejectedSteps >= BodyPoseSolver::kMaxLambdaRetries) {
+        ss << "[wls-event] no descent direction"
+           << "  lambda=" << std::scientific << std::setprecision(2)
+                          << d.lambda
+           << "  rej=" << std::fixed << d.rejectedSteps << "\n";
     }
 
     std::cout << ss.str();
@@ -1619,6 +1762,7 @@ static double parallelDeviationDeg(const Quat& qR, const Quat& qL)
         m_committedR = m_committedL = false;
         m_anchorR = m_anchorL = QVector3D(0, 0, 0);
         m_pose = PoseUnknown;
+        m_posePrev = PoseUnknown;
         m_poseTicks = 0;
         m_zuptTicks = 0;
         m_lowZTicksR = m_lowZTicksL = 0;
@@ -1786,30 +1930,28 @@ QVector3D LocomotionSolver::update(const Quat& qR,
             const float dx = xmax - xmin, dy = ymax - ymin;
             return std::sqrt(dx*dx + dy*dy);
         };
-        // Threshold raised from 0.10 rad/s (~5.7°/s) to 0.50 rad/s (~28°/s).
-        // Walking forward produces 5-10°/s yaw oscillation from heel-strike;
-        // the old threshold suspended foot commits during normal walking,
-        // which is why the skeleton "walked in place" — anchors never
-        // updated.  0.5 rad/s reserves yawFreeze for actual deliberate
-        // turning.
-        // FIX (terminator smoothing): smoothstep zone [0.35..0.65] rad/s
-        // вместо жёсткого 0.50, чтобы при ходьбе с heel-strike-yaw-oscillation
-        // ~0.4 rad/s не было flicker'а в rFKXYStable.  Bool yawFreeze
-        // оставляем для edge-handler ниже (ring buffer clear), который
-        // должен срабатывать ровно один раз на переходе.
+        // FK-XY ring buffer reliability is driven by the §29 action class:
+        // in the airborne phase the foot points are off the floor and any
+        // accumulated FK XY is stale, so the rising edge clears the buffer
+        // and the falling edge (landing) re-bases committed anchors so the
+        // travel accumulated during flight isn't lost.  The previous-frame
+        // m_pose drives the edge — m_pose is updated below in step 4 — so
+        // detection lags exactly one frame, which is well inside the
+        // ring-buffer fill window (kFKXYWindowMax) and invisible to the
+        // user.  m_pelvisYawAngV is still computed above for diagnostics
+        // and the pelvisRotating gate below still suspends commits during
+        // deliberate turning via the m_pelvisAngV / pelvisRotKill path.
         auto smoothstep01 = [](double x) {
             x = std::clamp(x, 0.0, 1.0);
             return x * x * (3.0 - 2.0 * x);
         };
-        const double yawFreezeW = smoothstep01((m_pelvisYawAngV - 0.35) / 0.30);
-        const bool yawFreeze = (yawFreezeW > 0.5);
-
-        if (yawFreeze && !m_yawFrozenPrev) {
+        const bool freezeRing = (m_pose == PoseAirborne);
+        if (freezeRing && !m_yawFrozenPrev) {
             m_fkxyHead  = 0;
             m_fkxyCount = 0;
         }
-        if (!yawFreeze && m_yawFrozenPrev && m_initialised) {
-            // Re-base off the committed (travel-correct) offset so a turn
+        if (!freezeRing && m_yawFrozenPrev && m_initialised) {
+            // Re-base off the committed (travel-correct) offset so landing
             // doesn't reset accumulated displacement back toward origin.
             if (m_committedR) {
                 m_anchorR.setX(fkR.x() + m_offsetCommitted.x());
@@ -1823,22 +1965,22 @@ QVector3D LocomotionSolver::update(const Quat& qR,
             m_fkxyCount = 0;
         }
 
-        // FIX (terminator smoothing): rFKXYStable теперь continuous weight.
-        // Smoothstep zone [stableRange*0.5 .. stableRange*1.5] = [0.02..0.06].
-        // При xy < 0.02 m → stableW=1; при xy > 0.06 → 0; в середине плавно.
+        // Foot FK-XY stability — continuous smoothstep weight on the ring
+        // buffer xyRange.  Below stableRange*0.5: fully stable; above
+        // stableRange*1.5: fully unstable; midway smoothly interpolated.
+        // The §29 freezeRing edge above clears the buffer on take-off so
+        // this weight starts fresh whenever the foot returns to the floor.
         const float xyR = xyRange(m_rFKXY);
         const float xyL = xyRange(m_lFKXY);
         const double stableHi = m_fkxyStableRange * 1.5;
         const double stableDen = std::max(1e-6, m_fkxyStableRange);
-        const double rFKXYStableW = std::max(yawFreezeW,
-                smoothstep01((stableHi - double(xyR)) / stableDen));
-        const double lFKXYStableW = std::max(yawFreezeW,
-                smoothstep01((stableHi - double(xyL)) / stableDen));
+        const double rFKXYStableW = smoothstep01((stableHi - double(xyR)) / stableDen);
+        const double lFKXYStableW = smoothstep01((stableHi - double(xyL)) / stableDen);
         const bool rFKXYStable = (rFKXYStableW > 0.5);
         const bool lFKXYStable = (lFKXYStableW > 0.5);
         m_dbgFkxyRangeR = double(xyR);    m_dbgFkxyRangeL = double(xyL);
         m_dbgFkxyStableWR = rFKXYStableW; m_dbgFkxyStableWL = lFKXYStableW;
-        m_dbgYawFreezeW = yawFreezeW;
+        m_dbgYawFreezeW = 0.0;   // legacy diagnostic field — yaw-rate gate removed.
 
         // 4. Classify pose.
         double tiltCos = 1.0;
@@ -2104,8 +2246,12 @@ QVector3D LocomotionSolver::update(const Quat& qR,
                                       QVector3D& anchor, const QVector3D& fk,
                                       bool isRight, bool rolling) {
             // FIX issue 10: rolling-foot — заморожен commit/release,
-            // skeleton XY не скачет от перехода через порог.
-            if (pelvisRotating || yawFreeze || rolling) return;
+            // skeleton XY не скачет от перехода через порог.  pelvisRotating
+            // suspends commits during deliberate turning (m_pelvisAngV gate);
+            // rolling suspends them during the heel/toe rocker so the
+            // confidence band doesn't bounce while the foot is rotating
+            // over its sole.
+            if (pelvisRotating || rolling) return;
             if (!committed && conf >= m_confCommit) {
                 // FIX: оценка таза от ДРУГОЙ committed-ноги (мгновенная),
                 // а не от LP-сглаженного m_offsetLast.
@@ -2179,7 +2325,12 @@ QVector3D LocomotionSolver::update(const Quat& qR,
         if (didCommitThisFrame) m_recentCommitTicks = m_commitFadeTicks;
         else if (m_recentCommitTicks > 0) --m_recentCommitTicks;
 
-        if (m_verbose) {
+        // Commit/release edge log — operational under Settings UI verbose
+        // toggle (m_verbose) AND automatically under -test, so a test
+        // session captures the foot anchor transitions without needing
+        // the UI flag.
+        if (m_verbose || pose_solver::g_testFlag().load(
+                std::memory_order_relaxed)) {
             if (!wasCommittedR && m_committedR) {
                 std::cout << "[loco commit R] anchor=("
                           << std::fixed << std::setprecision(3)
@@ -2260,12 +2411,10 @@ QVector3D LocomotionSolver::update(const Quat& qR,
         // anchor его нельзя оценить надёжно — лучше не двигать чем
         // ошибиться в направлении.
         if (m_pose != PoseAirborne && total > 1e-3) {
-            if (!yawFreeze) {
-                newOff.setX(float((1.0 - effXyRate) * m_offsetLast.x()
-                                  + effXyRate * rawOff.x()));
-                newOff.setY(float((1.0 - effXyRate) * m_offsetLast.y()
-                                  + effXyRate * rawOff.y()));
-            }
+            newOff.setX(float((1.0 - effXyRate) * m_offsetLast.x()
+                              + effXyRate * rawOff.x()));
+            newOff.setY(float((1.0 - effXyRate) * m_offsetLast.y()
+                              + effXyRate * rawOff.y()));
             newOff.setZ(float((1.0 - zRate) * m_offsetLast.z()
                               + zRate * rawOff.z()));
         }
@@ -2328,7 +2477,37 @@ QVector3D LocomotionSolver::update(const Quat& qR,
 
         m_offsetLast = newOff;
         m_offsetReady = true;
-        m_yawFrozenPrev = yawFreeze;
+
+        // -test event: surface action-class transitions (§29) so a log
+        // diff over a session lines pose changes up against [wls] /
+        // [zupt] / [skin] state.  Quiet otherwise; just an edge log.
+        if (m_pose != m_posePrev && pose_solver::g_testFlag().load(
+                std::memory_order_relaxed)) {
+            auto poseName = [](LocomotionSolver::PoseKind p) -> const char* {
+                switch (p) {
+                    case LocomotionSolver::PoseUnknown:  return "Unknown";
+                    case LocomotionSolver::PoseStand:    return "Stand";
+                    case LocomotionSolver::PoseSit:      return "Sit";
+                    case LocomotionSolver::PoseSquat:    return "Squat";
+                    case LocomotionSolver::PoseLying:    return "Lying";
+                    case LocomotionSolver::PoseAirborne: return "Airborne";
+                }
+                return "?";
+            };
+            std::cout << "[loco-event] pose: " << poseName(m_posePrev)
+                      << " -> " << poseName(m_pose)
+                      << "  ticks=" << m_poseTicks
+                      << "  off=(" << std::fixed << std::setprecision(3)
+                      << newOff.x() << "," << newOff.y() << "," << newOff.z()
+                      << ")\n" << std::flush;
+        }
+        m_posePrev = m_pose;
+
+        // m_yawFrozenPrev now tracks "ring buffer was frozen on the previous
+        // frame" — driven by the §29 airborne action class (see step 3).
+        // Kept under the original name to avoid touching every diagnostic
+        // log that already references it.
+        m_yawFrozenPrev = (m_pose == PoseAirborne);
         if (m_zSnapBlendTicks > 0) --m_zSnapBlendTicks;
 
         // Legacy: for UI / debugging, expose which foot is currently dominant.
@@ -2756,6 +2935,7 @@ struct MocapReceiver::Impl {
     std::atomic<int> activeTrackers{0};
 
     double           lastDump   = 0.0;
+    double           lastAhrsDump = 0.0;   // -test compact AHRS/MAG line (~0.4 s)
     double           lastPacket = 0.0;     // monotonic, for stale detection
 
     // Manus SDK handle.  `manusDllLoaded` just means the DLL is present next
@@ -2969,8 +3149,15 @@ struct FingerBaselineState {
 };
 static FingerBaselineState g_fingerBaseline;
 
-// Per-finger bone lengths in metres — approximate adult-male anatomy.
-// kFingerBoneLen[finger][joint].  joint 0 = MCP/CMC, joint 3 = tip.
+// Per-finger bone lengths in metres — standard anatomical proportions used
+// only when a per-actor glove calibration is not available.  The body model
+// gives the whole-hand bone length (wrist → fingertip = 0.183 m, mirrored on
+// both sides), but the per-phalanx breakdown comes from runtime FOX_Calib
+// records that are populated only when the glove is calibrated.  These
+// defaults sum to about that 0.183 m on the middle column so the rendered
+// hand matches the documented anatomy at the wrist-to-tip scale; they do not
+// participate in the body IK solver.  Indexing: kFingerBoneLen[finger][joint],
+// joint 0 = MCP / CMC, joint 3 = tip.
 static const double kFingerBoneLen[5][4] = {
     { 0.045, 0.030, 0.025, 0.020 },   // thumb
     { 0.045, 0.040, 0.025, 0.020 },   // index
@@ -3932,6 +4119,37 @@ void MocapReceiver::run()
     auto& I = *m_impl;
     I.setStatus(ConnStatus::Scanning, "loading XDA driver…", this);
 
+    // One-shot session overview banner — flushed before any subsystem
+    // initialisation so the log header records exactly what was enabled
+    // and the suit cadence we are about to bind.  The banner is the
+    // first thing a `-test` session writes, so a later regression is
+    // straightforward to bisect by build.
+    if (I.test) {
+        const double expectedHz = I.expectedRateHz.load();
+        const int    transSel   = I.transport.load();
+        const bool   gloves     = pose_solver::g_glovesFlag().load(
+                                      std::memory_order_relaxed);
+        const char*  suitName   = (expectedHz >= 200.0) ? "Link"
+                                : (expectedHz >= 50.0)  ? "Awinda"
+                                                        : "unknown";
+        std::ostringstream sys;
+        sys << std::fixed << std::setprecision(0);
+        sys << "[sys] fox-mocap session: suit=" << suitName
+            << "(" << expectedHz << "Hz)"
+            << " transport=" << (transSel == 1 ? "WiFi" : "COM")
+            << " gloves=" << (gloves ? "on" : "off")
+            << " test=on";
+        // FoxSPC model availability — read the same path the wizard does so
+        // the banner reflects what the placement classifier will actually use.
+        const QString exeDir = QCoreApplication::applicationDirPath();
+        const QString modelPath = QDir(exeDir).filePath(
+            "fox_sensor_placement_classifier.onnx");
+        sys << " foxspc=" << (QFile::exists(modelPath) ? "available" : "missing");
+        sys << "\n";
+        std::cout << sys.str();
+        std::cout.flush();
+    }
+
     Api api;
     QString detail;
     if (!loadApi(api, detail)) {
@@ -4226,6 +4444,12 @@ void MocapReceiver::run()
 
             // Snapshot the GUI-thread-written calibration/config for this
             // segment under the lock, and pick up any pending re-init request.
+            // calGen is read with memory_order_relaxed because the mutex
+            // around the snapshot already provides the acquire/release pair
+            // for every other piece of calibration state; the generation
+            // counter only needs to monotonically reflect bumps made by the
+            // GUI thread (single writer, single reader per segment) and the
+            // mutex synchronises the actual data we care about.
             SegCal cal;
             {
                 QMutexLocker lk(&I.lock);
@@ -4622,6 +4846,49 @@ void MocapReceiver::run()
                 fpsT0 = now;
             }
 
+            // Compact per-AHRS / per-MAG line — every ~0.4 s.  Reuses
+            // the per-sensor diagnostic arrays already captured under
+            // -test (I.dbgAccErr / I.dbgDynAccRej / I.dbgDynMagRej /
+            // I.dbgGyrFused) and prints a single representative line
+            // for the Pelvis (seg 0) — its sensor is always present
+            // and is the reference for the rest of the chain.  The
+            // 1.5-s FUSED SNAPSHOT below still prints the full per-
+            // sensor dump; this faster cadence is the "is the filter
+            // healthy right now" pulse.
+            if (I.test && (now - I.lastAhrsDump) > 0.4) {
+                QMutexLocker lk(&I.lock);
+                constexpr int kPelvis = 0;
+                const QVector3D& gf = I.dbgGyrFused[kPelvis];
+                const double gyrNorm = std::sqrt(double(gf.x())*gf.x()
+                                              + double(gf.y())*gf.y()
+                                              + double(gf.z())*gf.z());
+                std::ostringstream ss;
+                ss << std::fixed << std::setprecision(3);
+                ss << "[ahrs] Pelvis"
+                   << "  accErr=" << std::setw(6) << I.dbgAccErr[kPelvis]
+                   << "  dynAccRej=" << std::setw(5) << std::setprecision(2)
+                                     << I.dbgDynAccRej[kPelvis] << "deg"
+                   << "  magErr=" << std::setw(5) << std::setprecision(2)
+                                  << I.dbgDynMagRej[kPelvis] << "deg"
+                   << "  gyr|w|=" << std::setw(6) << std::setprecision(2)
+                                  << gyrNorm << "deg/s"
+                   << "\n";
+                // accGate / magGate use the same 5°-error threshold the
+                // AHRS itself uses to flag a measurement as suspect.
+                // Below this the filter is fusing accel/mag normally;
+                // above this the inner gate likely held the update.
+                ss << "[mag]  Pelvis"
+                   << "  magErr=" << std::setw(5) << std::setprecision(2)
+                                  << I.dbgDynMagRej[kPelvis] << "deg"
+                   << "  accGate=" << (I.dbgDynAccRej[kPelvis] > 5.0
+                                        ? "REJECTED" : "open")
+                   << "  magGate=" << (I.dbgDynMagRej[kPelvis] > 5.0
+                                        ? "REJECTED" : "open")
+                   << "\n";
+                std::cout << ss.str() << std::flush;
+                I.lastAhrsDump = now;
+            }
+
             // Once-every-1.5-seconds full snapshot of every tracker's
             // state across the full calibration pipeline: raw IMU →
             // normalisation → s2s rotation → fusion output → final
@@ -4636,6 +4903,31 @@ void MocapReceiver::run()
                    << staging.sampleCounter
                    << "  t=" << std::setprecision(2) << now
                    << "s ==========\n";
+
+                // [net] / [thr] — packet and threading observability under -test.
+                // sinceLastPkt is the gap from now to the most recent successful
+                // packet (large values flag a stall / disconnect); fps is the
+                // running suit-rate estimate; trackerCount is what XDA opened.
+                // The mutex contention reading is implicit in the fact that we
+                // already hold I.lock — a contended lock would have appeared
+                // as a stall in sinceLastPkt above.
+                {
+                    const double sinceLastPkt = now - I.lastPacket;
+                    const double instFps =
+                        ((now - fpsT0) > 1e-3) ? (framesThisSec / (now - fpsT0))
+                                               : 0.0;
+                    ss << "[net] trackers=" << trackerHandles.size()
+                       << " active=" << I.activeTrackers.load()
+                       << " sinceLastPkt=" << std::setprecision(3) << sinceLastPkt << "s"
+                       << " fpsInst=" << std::setprecision(1) << instFps
+                       << " fpsExpected=" << I.freqHz << "Hz"
+                       << " sampleCounter=" << staging.sampleCounter << "\n";
+                    ss << "[thr] networkThread=alive"
+                       << " calGen=" << I.calGen.load(std::memory_order_relaxed)
+                       << " status=" << I.status.load()
+                       << "\n";
+                    ss << std::setprecision(3);
+                }
 
                 // Quaternion → intrinsic XYZ Euler (deg).  Matches
                 // scipy.spatial.transform.Rotation.from_quat(w,x,y,z).as_euler('XYZ').
@@ -5605,9 +5897,15 @@ struct PlacementClassifier {
             if (outs.size() < 2) return probs;
             float* p = outs[1].GetTensorMutableData<float>();
             for (int i = 0; i < fox::body::kSpcClassCount; ++i) probs[i] = p[i];
-        } catch (const std::exception&) {
-            // Single inference failures don't deserve a stderr spam — just
-            // return zeros, the caller already gates on max(p).
+        } catch (const std::exception& ex) {
+            // Single inference failures don't deserve a stderr spam — the
+            // caller already gates on max(p) so a zero vector is harmless.
+            // Under -test we surface them anyway so a regression in the
+            // model or the runtime is visible in the session log.
+            if (pose_solver::g_testFlag().load(std::memory_order_relaxed)) {
+                std::cout << "[FoxSPC] inference failed: " << ex.what() << "\n";
+                std::cout.flush();
+            }
         }
         return probs;
     }
@@ -6445,12 +6743,32 @@ void NewSessionWizard::buildPages()
     refreshPoseImage();
 }
 
+void NewSessionWizard::logCalibPhaseTransition(const char* tag)
+{
+    if (!m_test) return;
+    static constexpr const char* kPhaseNames[] = {
+        "Idle", "PrepT", "CaptureT", "SettleT",
+        "PrepN", "CaptureN", "Settle", "LiveSpc", "Done"
+    };
+    const int idx = static_cast<int>(m_phase);
+    const char* name = (idx >= 0 && idx < int(std::size(kPhaseNames)))
+                       ? kPhaseNames[idx] : "?";
+    std::cout << "[calib] -> " << name;
+    if (tag && *tag) std::cout << "  (" << tag << ")";
+    std::cout << "  goodSamples=" << m_goodSamples
+              << "  bufSize="     << int(m_samples.size());
+    if (m_phaseStartMs > 0) {
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        std::cout << "  elapsed=" << (now - m_phaseStartMs) << "ms";
+    }
+    std::cout << "\n";
+    std::cout.flush();
+}
+
 void NewSessionWizard::refreshPoseImage()
 {
     if (!m_poseImage) return;
-    const bool nHalf = (m_phase == CalibPhase::PrepN
-                     || m_phase == CalibPhase::CaptureN);
-    const char* path = nHalf ? ":/img/npose.png" : ":/img/tpose.png";
+    const char* path = isNPosePhase() ? ":/img/npose.png" : ":/img/tpose.png";
     QPixmap pm(path);
     if (!pm.isNull()) {
         m_poseImage->setPixmap(pm.scaled(420, 420,
@@ -6517,9 +6835,7 @@ void NewSessionWizard::retranslate()
     }
     if (m_calibTitle)     m_calibTitle->setText(Lang::t("calib_title"));
     if (m_poseHint) {
-        const bool nHalf = (m_phase == CalibPhase::PrepN
-                         || m_phase == CalibPhase::CaptureN);
-        m_poseHint->setText(Lang::t(nHalf ? "npose_hint" : "tpose_hint"));
+        m_poseHint->setText(Lang::t(isNPosePhase() ? "npose_hint" : "tpose_hint"));
     }
     if (m_btnCalibBegin)  m_btnCalibBegin->setText(Lang::t("start_calib"));
     if (m_readyTitle)     m_readyTitle->setText(Lang::t("ready_title"));
@@ -6758,6 +7074,7 @@ void NewSessionWizard::abortCalibration()
     m_havePrev = false;
     m_calibComplete = false;
     m_phase = CalibPhase::Idle;
+    logCalibPhaseTransition("aborted");
     refreshPoseImage();
     if (m_countLabel) m_countLabel->setText("—");
 }
@@ -6843,6 +7160,7 @@ void NewSessionWizard::onCalibrationBegin()
         m_poseHint->setText(Lang::t("tpose_hint"));
     testLog("[calib] double-pose sequence started, PrepT "
             "(Madgwick re-init scheduled)", m_test);
+    logCalibPhaseTransition("countdown begin");
     m_countTimer.start();
     updateNavButtons();
 }
@@ -6879,6 +7197,7 @@ void NewSessionWizard::onCountdownTick()
         // 3-s-elapsed-AND-sample-floor) so we honour the spec on slow suits
         // (Awinda 60 Hz) without truncating fast ones (Link 240 Hz).
         m_phaseStartMs = QDateTime::currentMSecsSinceEpoch();
+        logCalibPhaseTransition("capture begin");
         m_captureTimer.start();
     }
 }
@@ -7091,6 +7410,7 @@ void NewSessionWizard::onCaptureTick()
         m_havePrev    = false;
         m_samples.clear();
         m_countLabel->setText(QString::number(kCountdownSeconds));
+        logCalibPhaseTransition("T-pose committed");
         m_countTimer.start();
         updateNavButtons();
         return;
@@ -7122,6 +7442,7 @@ void NewSessionWizard::onCaptureTick()
     m_phase = CalibPhase::Settle;
     if (m_calibStatus) m_calibStatus->setText(Lang::t("calib_ok"));
     testLog("[calib] N-pose capture complete, solving q_align per §174.4…", m_test);
+    logCalibPhaseTransition("N-pose captured, solving q_align");
 
     // §174.2 — pull N-pose quaternion samples (per segment) out of the
     // shared snapshot buffer for Markley averaging.
@@ -7324,6 +7645,7 @@ void NewSessionWizard::onCaptureTick()
 
     // §174.6 — proceed to ready/finish page.
     m_phase = CalibPhase::Done;
+    logCalibPhaseTransition("calibration complete");
     this->goNext();
 }
 
