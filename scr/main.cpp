@@ -9546,6 +9546,28 @@ void LiveStreamSender::pushFrame(quint32 sample,
         m_impl->firstFrameDumped = true;
     }
     m_impl->sendChecked(pkt);
+
+    // Spec §30 — ergonomic joint angles (abduction / flexion / rotation in
+    // degrees) emitted as a parallel MXTP21 packet right after the pose.
+    // 22 joints × 16 bytes = 352 bytes of payload.  Consumers that don't
+    // know MXTP21 yet will ignore it; consumers that do (Blender / UE
+    // ergonomic-overlay plugins) get the clinical decomposition without
+    // needing to recompute Euler-from-quat on their side.
+    {
+        const auto ergo = fox::ergo::jointAnglesErgoAll(segQuat);
+        QByteArray ergoBody;
+        for (int j = 0; j < fox::body::kJointCount; ++j) {
+            appendErgoAngleSegment(ergoBody, j + 1,
+                                   float(ergo[j].abductionDeg),
+                                   float(ergo[j].flexionDeg),
+                                   float(ergo[j].rotationDeg));
+        }
+        const QByteArray ergoHdr = buildMxtpHeader("21", sample, 0x80,
+                                                   quint8(fox::body::kJointCount),
+                                                   ft, quint8(fox::body::kJointCount), 0);
+        m_impl->sendChecked(ergoHdr + ergoBody);
+    }
+
     if (wireDue) {
         wireSS << "  pelvis(world,m)=(" << pelvisPos.x() << "," << pelvisPos.y()
                << "," << pelvisPos.z() << ")  packetBytes=" << pkt.size() << "\n"
@@ -9748,6 +9770,24 @@ void LiveStreamSender::pushFrameWithGloves(quint32 sample,
         }
         m_impl->sendChecked(pkt);
     }
+
+    // Spec §30 — ergonomic joint angles MXTP21 packet (body-only, finger
+    // joints have their own ergo decomposition via the glove vendor).
+    {
+        const auto ergo = fox::ergo::jointAnglesErgoAll(segQuat);
+        QByteArray ergoBody;
+        for (int j = 0; j < fox::body::kJointCount; ++j) {
+            appendErgoAngleSegment(ergoBody, j + 1,
+                                   float(ergo[j].abductionDeg),
+                                   float(ergo[j].flexionDeg),
+                                   float(ergo[j].rotationDeg));
+        }
+        const QByteArray ergoHdr = buildMxtpHeader("21", sample, 0x80,
+                                                   quint8(fox::body::kJointCount),
+                                                   ft, quint8(fox::body::kJointCount), 0);
+        m_impl->sendChecked(ergoHdr + ergoBody);
+    }
+
     if (wireDue) {
         wireSS << "  pelvis(world,m)=(" << pelvisPos.x() << "," << pelvisPos.y()
                << "," << pelvisPos.z() << ")  mode="

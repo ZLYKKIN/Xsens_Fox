@@ -540,31 +540,61 @@ struct ContactRow {
     double th1, th2, th3, th4;   // contact-probability thresholds / weights
 };
 
-// Foot/leg contact point candidates.  This is a subset that exactly mirrors
-// §38.1: each foot has heel + 1st/5th metatarsal + toe-ball; each lower-leg
-// has a single kneeling-contact point.  Other segments may add candidates
-// for acrobatic poses; the spec lists 26 rows total.  We seed with the most
-// important 10; the rest are introduced lazily by foxsolver as needed.
+// Foot/leg contact point candidates.  Spec §44.10 lists 26 candidates total;
+// numbered probability thresholds are explicit for the 12 entries below
+// (foot main + ball + toe-tip + kneeling pad).  The remaining 14 entries
+// (hand-balance for acrobatic poses, pelvis sit-aid, etc.) are mentioned
+// in §44.10 without explicit th1..th4 values, so they are not seeded
+// here — adding them would require invented numbers.
 inline constexpr int kSEG_RLowerLeg = 16;
 inline constexpr int kSEG_RFoot     = 17;
+inline constexpr int kSEG_RToe      = 18;
 inline constexpr int kSEG_LLowerLeg = 20;
 inline constexpr int kSEG_LFoot     = 21;
+inline constexpr int kSEG_LToe      = 22;
 
-inline constexpr std::array<ContactRow, 10> kFootContacts = {{
-    // Right foot: heel + medial + lateral metatarsal + ball
+inline constexpr std::array<ContactRow, 12> kFootContacts = {{
+    // Right foot: heel + medial / lateral metatarsal + ball/toe-6
     { kSEG_RFoot,     3, 0.05, 0.25, 0.25, 0.40 },
     { kSEG_RFoot,     4, 0.05, 0.25, 0.25, 0.40 },
     { kSEG_RFoot,     5, 0.05, 0.25, 0.25, 0.40 },
     { kSEG_RFoot,     6, 0.05, 0.20, 0.20, 0.40 },
-    // Left foot
+    // Right toe-tip — spec §44.10 «аналогично носку стопы» (same thresholds
+    // as the foot's toe-6 entry).
+    { kSEG_RToe,      2, 0.05, 0.20, 0.20, 0.40 },
+    // Left foot mirror
     { kSEG_LFoot,     3, 0.05, 0.25, 0.25, 0.40 },
     { kSEG_LFoot,     4, 0.05, 0.25, 0.25, 0.40 },
     { kSEG_LFoot,     5, 0.05, 0.25, 0.25, 0.40 },
     { kSEG_LFoot,     6, 0.05, 0.20, 0.20, 0.40 },
-    // Lower-leg kneeling pads
+    { kSEG_LToe,      2, 0.05, 0.20, 0.20, 0.40 },
+    // Lower-leg kneeling pads — high th1 means «rarely on the floor»
     { kSEG_RLowerLeg, 5, 0.08, 1.0,  1.0,  0.40 },
     { kSEG_LLowerLeg, 5, 0.08, 1.0,  1.0,  0.40 },
 }};
+
+// Spec §44.3 (Г) — per-segment height-measurement standard deviation
+// (stdHeightMeas, metres).  Used by the WLS body solver as the weight
+// 1/sd² on the z = floor constraint when a contact point on that
+// segment is active.  Tighter SD = harder anchor.  Default 0.002;
+// Pelvis/T8/UpperLeg (large bones, loose anchor) = 0.03; ForeArm/
+// LowerLeg (close to ground in acrobatic poses) = 0.005.
+inline constexpr double kStdHeightMeasDefault = 0.002;
+inline double stdHeightMeasFor(int seg)
+{
+    switch (seg) {
+        case 0:  return 0.03;    // Pelvis
+        case 4:  return 0.03;    // T8
+        case 11: return 0.03;    // LShoulder (spec lists seg index 12 = LShoulder in 1-based;
+        case 15: return 0.03;    // RUpperLeg
+        case 19: return 0.03;    // LUpperLeg
+        case 9:  return 0.005;   // RForeArm
+        case 13: return 0.005;   // LForeArm
+        case 16: return 0.005;   // RLowerLeg
+        case 20: return 0.005;   // LLowerLeg
+        default: return kStdHeightMeasDefault;
+    }
+}
 
 // ---------------------------------------------------------------------------
 //  §38.2 — contact detection & update parameters.

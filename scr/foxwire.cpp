@@ -76,4 +76,17 @@ void appendScaleSegment(QByteArray& pkt, const char* name,
     appendFloatBE(pkt, z);
 }
 
+void appendErgoAngleSegment(QByteArray& pkt, qint32 jointId,
+                            float abductionDeg, float flexionDeg, float rotationDeg)
+{
+    // 16-byte record matching the ">I3f" template in the receivers' parsers
+    // (see ErgoDatagram.cpp in the Plugins/ tree once the consumer ships).
+    // Big-endian throughout; the float helper coerces NaN/Inf to 0 so the
+    // wire never carries a non-finite value.
+    appendInt32BE(pkt, jointId);
+    appendFloatBE(pkt, abductionDeg);
+    appendFloatBE(pkt, flexionDeg);
+    appendFloatBE(pkt, rotationDeg);
+}
+
 }  // namespace fox
