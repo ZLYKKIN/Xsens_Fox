@@ -44,6 +44,8 @@
 #include <vector>
 
 #include "foxmath.h"   // Quat + pure rotation math (extracted, unit-tested)
+#include "foxbody.h"   // §24/§37/§39/§40 biomech tables (kJointCount, kSensorToBone, …)
+#include "foxergo.h"   // §30 ergonomic joint angles (JointAngles struct)
 
 // ============================================================================
 //  Constants
@@ -589,6 +591,18 @@ struct FkDiag {
     std::array<float,     kXsensSegmentCountWithDummies> len{};      // bone lengths used (m)
     std::array<QVector3D, kXsensKeypointCount>          kp{};        // final keypoints (world, m)
     QVector3D rootPos{0, 0, 0};
+
+    // Spec §40 — post-FK biomech-coupling stage output (after spine rhythm,
+    // scapulo-humeral ratio, knee screw and ankle/toe rocker have been
+    // applied to `oriented`).  Same shape as `oriented`; equal when coupling
+    // is disabled.
+    std::array<Quat, kXsensSegmentCount>                couplingOut{};
+
+    // Spec §30 — ergonomic joint angles (abduction, flexion, rotation in
+    // degrees) for the 22 body joints, computed from the post-coupling
+    // segment-world orientations.  Per-joint sign convention from §58 /
+    // foxbody::kErgoHandler.
+    std::array<fox::ergo::JointAngles, fox::body::kJointCount> ergo{};
 };
 
 class SkeletonXsens {

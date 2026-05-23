@@ -9,7 +9,9 @@
 
 #include "main.h"
 #include "foxwire.h"   // MVN MXTP byte encoders (extracted, unit-tested)
-#include "foxbody.h"   // Biomechanical model tables from FOX_KFA spec §24/§37/§38
+#include "foxbody.h"      // Biomechanical model tables from FOX_KFA spec §24/§37/§38/§39/§40
+#include "foxcoupling.h"  // Post-FK biomech-coupling (spec §40 / §45–§48)
+#include "foxergo.h"      // Ergonomic joint-angle decomposition (spec §30)
 
 #include <QtCore/QCommandLineOption>
 #include <QtCore/QCommandLineParser>
@@ -501,6 +503,50 @@ SkeletonXsens::computeKeypoints(const std::array<Quat, kXsensSegmentCount>& raw,
     oriented[SEG_LUpperArm] = constrain_shoulder_cone(
         oriented[SEG_LUpperArm], q_pelvis_world, /*isRight=*/false);
 
+    // Step 1c: spec §40 biomechanical joint-coupling post-FK filter.
+    //
+    // Redistributes the parent→child total rotation across an anatomical
+    // chain (spine rhythm, scapulo-humeral ratio, knee screw, ankle/toe
+    // rocker) using the c_* coefficients from foxbody.h.  In the original
+    // FOX_KFA engine these enter the WLS solver as Jacobian rows; without
+    // a WLS step we apply them deterministically as a weighted log-map
+    // partition (foxcoupling.cpp).
+    {
+        // Spine rhythm: distribute Pelvis→T8 across L5, L3, T12, T8.
+        std::array<Quat, 4> spineOut{};
+        fox::coupling::applySpineRhythm(oriented[SEG_Pelvis], oriented[SEG_T8], spineOut);
+        oriented[SEG_L5]  = spineOut[0];
+        oriented[SEG_L3]  = spineOut[1];
+        oriented[SEG_T12] = spineOut[2];
+        // SEG_T8 stays as the input — the redistribution sums to it exactly
+        // so we don't overwrite a sensored segment with the chain result.
+
+        // Scapulo-humeral coupling: shoulder follows the humerus.
+        oriented[SEG_RShoulder] = fox::coupling::applyScapuloHumeral(
+            oriented[SEG_T8], oriented[SEG_RShoulder], oriented[SEG_RUpperArm]);
+        oriented[SEG_LShoulder] = fox::coupling::applyScapuloHumeral(
+            oriented[SEG_T8], oriented[SEG_LShoulder], oriented[SEG_LUpperArm]);
+
+        // Knee screw-home (small obligatory tibial rotation near full extension).
+        oriented[SEG_RLowerLeg] = fox::coupling::applyKneeScrew(
+            oriented[SEG_RUpperLeg], oriented[SEG_RLowerLeg], /*leftSide=*/false);
+        oriented[SEG_LLowerLeg] = fox::coupling::applyKneeScrew(
+            oriented[SEG_LUpperLeg], oriented[SEG_LLowerLeg], /*leftSide=*/true);
+
+        // Ankle plantar-flex limit + toe rocker.
+        Quat rFootOut, rToeOut, lFootOut, lToeOut;
+        fox::coupling::applyAnkleToe(
+            oriented[SEG_RLowerLeg], oriented[SEG_RFoot], oriented[SEG_RToe],
+            rFootOut, rToeOut);
+        fox::coupling::applyAnkleToe(
+            oriented[SEG_LLowerLeg], oriented[SEG_LFoot], oriented[SEG_LToe],
+            lFootOut, lToeOut);
+        oriented[SEG_RFoot] = rFootOut;
+        oriented[SEG_RToe]  = rToeOut;
+        oriented[SEG_LFoot] = lFootOut;
+        oriented[SEG_LToe]  = lToeOut;
+    }
+
     // Step 2: expand to 27 (add dummy stubs).
     const auto global = addDummySegments(oriented);
 
@@ -525,12 +571,16 @@ SkeletonXsens::computeKeypoints(const std::array<Quat, kXsensSegmentCount>& raw,
     }
     // -test single-source capture: every FK intermediate exactly as used here.
     if (diag) {
-        diag->oriented = oriented;
-        diag->global   = global;
-        diag->boneVec  = boneVec;
-        diag->len      = m_len;
-        diag->kp       = kp;
-        diag->rootPos  = rootPos;
+        diag->oriented    = oriented;
+        diag->global      = global;
+        diag->boneVec     = boneVec;
+        diag->len         = m_len;
+        diag->kp          = kp;
+        diag->rootPos     = rootPos;
+        diag->couplingOut = oriented;   // post-§40 result (same array — spine+arms+legs already applied)
+        // Spec §30 — ergonomic joint angles computed from the post-coupling
+        // segment-world orientations.  Cheap (22 small SO(3) decompositions).
+        diag->ergo        = fox::ergo::jointAnglesErgoAll(oriented);
     }
     return kp;
 }

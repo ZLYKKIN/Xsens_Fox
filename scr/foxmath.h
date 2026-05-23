@@ -133,6 +133,18 @@ Euler3 matrix_to_euler_B(const Matrix3& R);  // (atan2(-m20,m22), asin(m21), ata
 // This is the *exact* formula extracted from fox_types_engine.dll.
 QVector3D angular_velocity_from_quat(const Quat& dq, double dtSec);
 
+// Spec §3.2 — Shepperd's algorithm: matrix → quaternion via the largest
+// diagonal candidate (numerically stable when one component is near zero).
+// Result is canonicalised to w ≥ 0 and normalised.
+Quat matrix_to_quat_sheppard(const Matrix3& R);
+
+// Spec §40 — fractional power of a unit quaternion via log/exp:
+//     q^t = exp( t · log(q) ).
+// For t = w_j / Σw, this distributes a single «total» rotation across
+// several joints in proportion to their coupling weights (spine rhythm,
+// scapulo-humeral ratio, knee screw, ankle/toe rocker).  Identity for t = 0.
+Quat quat_pow(const Quat& q, double t);
+
 // Mirror a rotation across the body XZ-plane (Y-flip).  j·q·j⁻¹ = (w,-x,y,-z);
 // a homomorphism, so it composes correctly with quat_mult.
 inline Quat mirror_y_quat(const Quat& q) {

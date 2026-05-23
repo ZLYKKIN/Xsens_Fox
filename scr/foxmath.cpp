@@ -90,14 +90,18 @@ Quat slerp_quat(const Quat& a, const Quat& b, double t)
         b2 = Quat(-b.w, -b.x, -b.y, -b.z);
         dot = -dot;
     }
-    if (dot > 0.9995) {
+    // Spec §8.1 — small-angle branch is gated on sin(Ω), not on dot itself.
+    // sinT0 < 6.1e-6 implies Ω is small enough that sin(Ω)/Ω ≈ 1 and the
+    // SLERP weights degenerate to plain lerp.  Computing it once up front
+    // (rather than the looser dot > 0.9995 shortcut) matches the engine.
+    const double theta0 = clamp_acos(dot);
+    const double sinT0  = std::sin(theta0);
+    if (sinT0 < 6.1e-6) {
         Quat r(a.w + t*(b2.w - a.w), a.x + t*(b2.x - a.x),
                a.y + t*(b2.y - a.y), a.z + t*(b2.z - a.z));
         return r.normalized();
     }
-    const double theta0 = std::acos(dot);
     const double theta  = theta0 * t;
-    const double sinT0  = std::sin(theta0);
     const double s0 = std::sin(theta0 - theta) / sinT0;
     const double s1 = std::sin(theta) / sinT0;
     return Quat(s0*a.w + s1*b2.w, s0*a.x + s1*b2.x,
@@ -175,6 +179,60 @@ Euler3 matrix_to_euler_B(const Matrix3& R)
     e.e1 = clamp_asin( R.m[7] );                // asin(m21)
     e.e2 = std::atan2( -R.m[1], R.m[4] );       // atan2(-m01, m11)
     return e;
+}
+
+Quat matrix_to_quat_sheppard(const Matrix3& R)
+{
+    // Spec §3.2 — Shepperd's algorithm with the largest-trace pivot.  The
+    // four candidates t0..t3 equal 4·w², 4·x², 4·y², 4·z² respectively;
+    // picking the largest keeps the divisor 2·√(t_k) far from zero, which
+    // is what the naive form (just w² from the trace) gets wrong when w ≈ 0.
+    const double m00 = R.m[0], m01 = R.m[1], m02 = R.m[2];
+    const double m10 = R.m[3], m11 = R.m[4], m12 = R.m[5];
+    const double m20 = R.m[6], m21 = R.m[7], m22 = R.m[8];
+
+    const double t0 = 1.0 + m00 + m11 + m22;   // 4w²
+    const double t1 = 1.0 + m00 - m11 - m22;   // 4x²
+    const double t2 = 1.0 - m00 + m11 - m22;   // 4y²
+    const double t3 = 1.0 - m00 - m11 + m22;   // 4z²
+
+    Quat q;
+    if (t0 >= t1 && t0 >= t2 && t0 >= t3) {
+        const double s = 0.5 / std::sqrt(std::max(t0, 1e-24));
+        q.w = 0.25 / s;
+        q.x = (m21 - m12) * s;
+        q.y = (m02 - m20) * s;
+        q.z = (m10 - m01) * s;
+    } else if (t1 >= t2 && t1 >= t3) {
+        const double s = 0.5 / std::sqrt(std::max(t1, 1e-24));
+        q.w = (m21 - m12) * s;
+        q.x = 0.25 / s;
+        q.y = (m01 + m10) * s;
+        q.z = (m02 + m20) * s;
+    } else if (t2 >= t3) {
+        const double s = 0.5 / std::sqrt(std::max(t2, 1e-24));
+        q.w = (m02 - m20) * s;
+        q.x = (m01 + m10) * s;
+        q.y = 0.25 / s;
+        q.z = (m12 + m21) * s;
+    } else {
+        const double s = 0.5 / std::sqrt(std::max(t3, 1e-24));
+        q.w = (m10 - m01) * s;
+        q.x = (m02 + m20) * s;
+        q.y = (m12 + m21) * s;
+        q.z = 0.25 / s;
+    }
+    if (q.w < 0.0) { q.w = -q.w; q.x = -q.x; q.y = -q.y; q.z = -q.z; }
+    return q.normalized();
+}
+
+Quat quat_pow(const Quat& q, double t)
+{
+    // Spec §40 — q^t = exp(t · log(q)).  Identity is the unique fixed point
+    // (any t leaves it unchanged); for non-identity q the small-angle path
+    // in quat_log/quat_exp_rotvec handles the limit.
+    const QVector3D phi = quat_log(q);
+    return quat_exp_rotvec(t * double(phi.x()), t * double(phi.y()), t * double(phi.z()));
 }
 
 QVector3D angular_velocity_from_quat(const Quat& dq, double dtSec)
