@@ -1,96 +1,21 @@
-// Fox Mocap — biomechanical joint-coupling post-filter (spec §40 / §45–§48).
+// Fox Mocap — biomechanical coupling header (spec §40 / §45–§48).
 //
-// In the original FOX_KFA engine, the joint-coupling weights c_spine / c_arms /
-// c_knees / c_ankles / c_toes enter the weighted-LSM solver as Jacobian rows.
-// In this reduced-scope build (Level 1 of the migration plan, no WLS solver)
-// we apply the coupling deterministically as a redistribution of the parent→
-// child rotation across an anatomical chain, using log-map weighted blending:
+// All coupling laws (spine rhythm, scapulo-humeral ratio, knee screw-home,
+// ankle clamp + toe rocker, hyper-extension barriers) are now embedded as
+// Jacobian rows in the weighted least-squares pose solver located in
+// fox::pose_solver (main.cpp).  The c_* coefficient tables live in
+// foxbody.h (kCSpine, kCArms, kCKnees, kCAnkles, kCToes, kCPelvis) and
+// foxbody.h::kSpineNeck / kScapHumThetaLowDeg, etc.
 //
-//     φ_total = log( q_parent ⊗ conj(q_child) )            (spec §5.2, §11.3)
-//     w_j     = c_j / Σ c                                  (normalised weights)
-//     q_j     = exp( w_j · φ_total )                       (spec §5.1, §40)
-//
-// This is mathematically equivalent to the WLS minimum when all hint weights
-// are equal (gradient zero ↔ weight-proportional partition of the total
-// rotation).  It is NOT a Kalman-style update — there is no covariance
-// tracking — but it captures the anatomical realism the c_* coefficients
-// encode (spine rhythm, scapulo-humeral ratio, knee screw-home, ankle/toe
-// rocker) without requiring the sparse linear-algebra stack.
-//
-// Conventions (spec §25.2):
-//   X = forward, Y = left, Z = up; quaternions WXYZ scalar-first;
-//   all functions operate on segment-world quaternions (oriented[i] in the
-//   existing SkeletonXsens pipeline).
+// This header is kept (and listed in CMakeLists.txt) for build-graph
+// stability across the refactor.  It declares no functions — the
+// previous deterministic post-FK pass has been replaced by the
+// single-strategy WLS solver.
 #pragma once
 
 #include "foxbody.h"
 #include "foxmath.h"
 
-#include <array>
-
 namespace fox::coupling {
-
-// Spec §45 — spine rhythm.  Inputs are world-frame Pelvis and T8
-// orientations.  Output is the redistributed world-frame orientations for
-// the four intermediate spinal segments L5, L3, T12 and T8 itself (T8 is
-// reconstructed from the chain composition and may differ slightly from
-// the input qT8 when the redistribution doesn't sum to the total — which
-// is why we normalise weights to keep that error at zero).
-//
-// out[0..3] = world orientations of L5, L3, T12, T8 (in that order).
-// The neck and head (joints jT1C7 / jC1Head) keep their input orientations
-// — they're modelled separately as «free» (weight 0.9 each), and the
-// spine block redistributes only the trunk total.
-void applySpineRhythm(const Quat& qPelvisWorld,
-                      const Quat& qT8World,
-                      std::array<Quat, 4>& outL5_L3_T12_T8);
-
-// Spec §46 — scapulo-humeral ratio.  When the humerus (UpperArm) is
-// elevated relative to T8, the scapula (Shoulder) follows along with
-// coefficient kCArms.  Inputs: T8 and UpperArm in world frame plus the raw
-// Shoulder orientation (which we override).  Output: corrected Shoulder.
-//
-// The mirror happens automatically: feeding R-UpperArm/R-Shoulder yields
-// right-side coupling; feeding L-UpperArm/L-Shoulder yields left-side.
-Quat applyScapuloHumeral(const Quat& qT8World,
-                         const Quat& qShoulderRawWorld,
-                         const Quat& qUpperArmWorld);
-
-// Spec §47 — knee «screw-home» mechanism.  When the knee approaches full
-// extension (flexion < ~20°), the tibia obligatorily rotates externally
-// (right leg) / internally (left leg) by a small coupled angle (~5°).
-// Input: thigh and shank in world frame.  Output: corrected shank.
-Quat applyKneeScrew(const Quat& qUpperLegWorld,
-                    const Quat& qLowerLegRawWorld,
-                    bool leftSide);
-
-// Spec §48 — ankle plantar-flexion limit + toe rocker.  Applies the kCAnkles
-// limit (30° plantar, 45° dorsi) as a soft clamp, eversion coupling
-// θ_ev_corr = c_ankles[0]·θ_ev + c_ankles[2]·sin(θ_plantar), and a piecewise
-// toe rocker that lifts the toe linearly between 5° and 30°.
-//
-// Inputs: shank, foot, toe (raw) in world frame; outputs: corrected foot,
-// corrected toe.
-void applyAnkleToe(const Quat& qLowerLegWorld,
-                   const Quat& qFootRawWorld,
-                   const Quat& qToeRawWorld,
-                   Quat& qFootOut,
-                   Quat& qToeOut);
-
-// Spec §45 — extended spinal distribution covering Pelvis → L5 → L3 → T12 →
-// T8 → Neck → Head with c_spine[5..8] cervical weights.
-void applySpineRhythmFull(const Quat& qPelvisWorld,
-                          const Quat& qT8World,
-                          const Quat& qHeadWorld,
-                          Quat& outL5, Quat& outL3, Quat& outT12,
-                          Quat& outT8, Quat& outNeck, Quat& outHead);
-
-// Spec §47.4 — soft hyper-extension barrier (knee, elbow).
-Quat applyHyperExtensionBarrier(const Quat& qParentWorld,
-                                const Quat& qChildWorld);
-
-// Spec §48.2 — toe rocker weights for a given metatarsal-phalangeal angle.
-struct ToeRockerWeights { double heel; double toe; };
-ToeRockerWeights toeRockerWeights(double thetaToeRad);
-
+// No public API — see file-level comment above.
 }  // namespace fox::coupling
