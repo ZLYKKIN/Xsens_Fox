@@ -316,8 +316,11 @@ void SkeletonXsens::buildDefaultAngles()
 void SkeletonXsens::buildLengths(const ActorConfig& actor)
 {
     // Segment lengths come from the reverse-engineered FOX_KFA model
-    // (spec §37.6 — fox::body::kBoneVec at reference height 1.75 m), with
-    // per-region scale factors derived from the user's actor measurements.
+    // (spec §39 / §37.6 — fox::body::kSensorToBone[i].L_bone at reference
+    // height 1.75 m), with per-region scale factors derived from the user's
+    // actor measurements.  The full per-bone table in foxbody.h is the
+    // canonical decryption of fox_definitions.xsb (XOR-101); the older
+    // kBoneVec array there is a 3-decimal mirror kept for compatibility.
     //
     // Layout — 27 bones in seg_start_pts/seg_end_pts order (buildTopology()):
     //   [0..5]   spine: Pelvis→L5, L5→L3, L3→T12, T12→T8, T8→Neck, Neck→Head
@@ -327,11 +330,17 @@ void SkeletonXsens::buildLengths(const ActorConfig& actor)
     //   [17..21] R leg: pelvis-stub, upper-leg, lower-leg, foot, toe
     //   [22..26] L leg (mirror)
     //
-    // Per-segment lengths = |kBoneVec[i]| × regionScale.  Anthropometric
+    // Per-segment lengths = |L_bone[i]| × regionScale.  Anthropometric
     // overrides (trunkLengthCm, armSpanCm, legLengthCm, footLengthCm,
     // hipWidthCm, shoulderWidthCm) tighten the regional scale when supplied
-    // by the actor; otherwise we use heightScale = h / 1.75 (spec §17.3).
+    // by the actor; otherwise we use heightScale = h / 1.75 (spec §17.3 /
+    // §57.1 uniform scaling model).
     namespace fb = fox::body;
+
+    // Spec §39 bone-vector helper: |L_bone(seg)|.
+    auto specLen = [](int seg) {
+        return double(fb::kSensorToBone[seg].L_bone.length());
+    };
 
     const double h  = actor.heightCm     / 100.0;
     const double fl = actor.footLengthCm / 100.0;
@@ -339,29 +348,37 @@ void SkeletonXsens::buildLengths(const ActorConfig& actor)
 
     // --- arm scale: prefer arm-span if given, else fall back to heightScale.
     // Reference arm-from-acromion = |shoulder lateral| + upper-arm + forearm + hand
-    //   = 0.140 + 0.300 + 0.245 + 0.183 = 0.868 m at h=1.75.  Full arm-span =
-    //   2·arm + shoulder-width 0.32 m ≈ 2.06 m (matches anthropometric tables).
+    // computed from the spec §39 L_bone table so the reference span stays in
+    // sync with foxbody.h if those numbers ever update.  Plus shoulder-width
+    // = 2 · kShoulderHalfY at ref height.
     double armScale = heightScale;
     if (actor.armSpanCm > 0.0) {
-        constexpr double refSpanM = 2.0 * (0.140 + 0.300 + 0.245 + 0.183) + 0.32;
+        const double refArmOneSide =
+            specLen(fb::kSEG_RShoulder) +
+            specLen(fb::kSEG_RShoulder + 1) +   // RUpperArm = SEG 8
+            specLen(fb::kSEG_RShoulder + 2) +   // RForearm  = SEG 9
+            specLen(fb::kSEG_RShoulder + 3);    // RHand     = SEG 10
+        const double refSpanM = 2.0 * refArmOneSide + 2.0 * double(fb::kShoulderHalfY);
         armScale = std::max(0.30, actor.armSpanCm / 100.0) / refSpanM;
     }
 
     // --- leg scale: prefer leg-length if given (hip joint to floor), else height.
-    // Reference leg = upper-leg + lower-leg + ankle-height-stub
-    //   = 0.4165 + 0.4063 + 0.08 (approx ankle to floor) ≈ 0.903 m at h=1.75.
+    // Reference leg = upper-leg + lower-leg + ankle-stub (spec §39 numbers).
     double legScale = heightScale;
     if (actor.legLengthCm > 0.0) {
-        constexpr double refLegM = 0.4165 + 0.4063 + 0.08;
+        const double refLegM = specLen(fb::kSEG_RUpperLeg)
+                             + specLen(fb::kSEG_RLowerLeg)
+                             + 0.08;          // approx ankle to floor (anthropometric)
         legScale = std::max(0.30, actor.legLengthCm / 100.0) / refLegM;
     }
 
     // --- foot scale: user's footLengthCm replaces the spec foot length.
-    // Spec heel-to-ball = 0.161 m, ball-to-tip = 0.066 m (≈ 71 / 29 split).
+    // Spec heel-to-ball = |L_bone(RFoot)| = 0.16070 m, ball-to-tip =
+    // |L_bone(RToe)| = 0.06573 m (≈ 71 / 29 split).
     double heelToBallM, ballToTipM;
     {
-        const double specFoot = double(fb::kBoneVec[fb::kSEG_RFoot].length());
-        const double specToe  = double(fb::kBoneVec[18].length());
+        const double specFoot = specLen(fb::kSEG_RFoot);
+        const double specToe  = specLen(18);    // SEG_RToe (kSensorToBone[18])
         if (fl > 0.05) {
             const double frac = specFoot / (specFoot + specToe);   // ≈ 0.709
             heelToBallM = fl * frac;
@@ -381,17 +398,18 @@ void SkeletonXsens::buildLengths(const ActorConfig& actor)
         : double(fb::kShoulderHalfY) * heightScale;
 
     // --- trunk: optional total-trunk-length override rescales the spine bones.
-    // Spec spine = 0.098+0.108+0.099+0.098+0.138+0.092 = 0.633 m at h=1.75.
+    // Spec spine = sum of |L_bone| for SEG_Pelvis..SEG_Neck (0..5) per §39.
     double trunkScale = heightScale;
     if (actor.trunkLengthCm > 0.0) {
-        constexpr double refTrunkM = 0.098 + 0.108 + 0.099 + 0.098 + 0.138 + 0.092;
+        double refTrunkM = 0.0;
+        for (int s = 0; s <= 5; ++s) refTrunkM += specLen(s);
         trunkScale = std::max(0.40, actor.trunkLengthCm / 100.0) / refTrunkM;
     }
 
-    // Helper: length of a spec bone vector at the appropriate regional scale.
-    auto spineLen = [&](int s) { return float(fb::kBoneVec[s].length() * trunkScale); };
-    auto armLen   = [&](int s) { return float(fb::kBoneVec[s].length() * armScale);   };
-    auto legLen   = [&](int s) { return float(fb::kBoneVec[s].length() * legScale);   };
+    // Helper: length of a spec §39 bone vector at the appropriate regional scale.
+    auto spineLen = [&](int s) { return float(specLen(s) * trunkScale); };
+    auto armLen   = [&](int s) { return float(specLen(s) * armScale);   };
+    auto legLen   = [&](int s) { return float(specLen(s) * legScale);   };
 
     // Gleno-humeral inner offset: spec doesn't model this as a separate bone
     // (its arm chain attaches the shoulder joint directly to the upper-arm
