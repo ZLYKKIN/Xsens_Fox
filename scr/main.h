@@ -60,7 +60,7 @@ constexpr int     kFingerSegmentsHand = 20;
 constexpr double  kRenderFps          = 90.0;
 constexpr double  kStaleSeconds       = 2.0;
 constexpr int     kCalibrationSamples = 500;    // fixed-count average; valid at any suit rate
-constexpr int     kCountdownSeconds   = 6;    // 6 s prep / Madgwick warm-up
+constexpr int     kCountdownSeconds   = 3;    // §174 pose-preparation countdown (matches Stage budget)
                                               // (5 s convergence at 240 Hz × β=0.35
                                               //  comfortably flattens all 17 filters)
 
