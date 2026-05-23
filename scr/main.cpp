@@ -1162,6 +1162,20 @@ void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
         ss << "\n";
     }
 
+    // -test solver-saturation event: when the adaptive LM has been
+    // forced to back off every step (rejectedSteps ≥ kMaxLambdaRetries)
+    // and the inner descent is stuck, surface a one-line event next to
+    // the [wls] dump.  The pose is at the spec's noise floor; the LM
+    // cannot find a descent direction.  Useful for diagnosing held-
+    // still / dark-mode drift, where the residual is dominated by
+    // measurement noise rather than geometric error.
+    if (d.rejectedSteps >= BodyPoseSolver::kMaxLambdaRetries) {
+        ss << "[wls-event] no descent direction"
+           << "  lambda=" << std::scientific << std::setprecision(2)
+                          << d.lambda
+           << "  rej=" << std::fixed << d.rejectedSteps << "\n";
+    }
+
     std::cout << ss.str();
     std::cout.flush();
 }
@@ -1748,6 +1762,7 @@ static double parallelDeviationDeg(const Quat& qR, const Quat& qL)
         m_committedR = m_committedL = false;
         m_anchorR = m_anchorL = QVector3D(0, 0, 0);
         m_pose = PoseUnknown;
+        m_posePrev = PoseUnknown;
         m_poseTicks = 0;
         m_zuptTicks = 0;
         m_lowZTicksR = m_lowZTicksL = 0;
@@ -2310,7 +2325,12 @@ QVector3D LocomotionSolver::update(const Quat& qR,
         if (didCommitThisFrame) m_recentCommitTicks = m_commitFadeTicks;
         else if (m_recentCommitTicks > 0) --m_recentCommitTicks;
 
-        if (m_verbose) {
+        // Commit/release edge log — operational under Settings UI verbose
+        // toggle (m_verbose) AND automatically under -test, so a test
+        // session captures the foot anchor transitions without needing
+        // the UI flag.
+        if (m_verbose || pose_solver::g_testFlag().load(
+                std::memory_order_relaxed)) {
             if (!wasCommittedR && m_committedR) {
                 std::cout << "[loco commit R] anchor=("
                           << std::fixed << std::setprecision(3)
@@ -2457,6 +2477,32 @@ QVector3D LocomotionSolver::update(const Quat& qR,
 
         m_offsetLast = newOff;
         m_offsetReady = true;
+
+        // -test event: surface action-class transitions (§29) so a log
+        // diff over a session lines pose changes up against [wls] /
+        // [zupt] / [skin] state.  Quiet otherwise; just an edge log.
+        if (m_pose != m_posePrev && pose_solver::g_testFlag().load(
+                std::memory_order_relaxed)) {
+            auto poseName = [](LocomotionSolver::PoseKind p) -> const char* {
+                switch (p) {
+                    case LocomotionSolver::PoseUnknown:  return "Unknown";
+                    case LocomotionSolver::PoseStand:    return "Stand";
+                    case LocomotionSolver::PoseSit:      return "Sit";
+                    case LocomotionSolver::PoseSquat:    return "Squat";
+                    case LocomotionSolver::PoseLying:    return "Lying";
+                    case LocomotionSolver::PoseAirborne: return "Airborne";
+                }
+                return "?";
+            };
+            std::cout << "[loco-event] pose: " << poseName(m_posePrev)
+                      << " -> " << poseName(m_pose)
+                      << "  ticks=" << m_poseTicks
+                      << "  off=(" << std::fixed << std::setprecision(3)
+                      << newOff.x() << "," << newOff.y() << "," << newOff.z()
+                      << ")\n" << std::flush;
+        }
+        m_posePrev = m_pose;
+
         // m_yawFrozenPrev now tracks "ring buffer was frozen on the previous
         // frame" — driven by the §29 airborne action class (see step 3).
         // Kept under the original name to avoid touching every diagnostic
@@ -2889,6 +2935,7 @@ struct MocapReceiver::Impl {
     std::atomic<int> activeTrackers{0};
 
     double           lastDump   = 0.0;
+    double           lastAhrsDump = 0.0;   // -test compact AHRS/MAG line (~0.4 s)
     double           lastPacket = 0.0;     // monotonic, for stale detection
 
     // Manus SDK handle.  `manusDllLoaded` just means the DLL is present next
@@ -4797,6 +4844,49 @@ void MocapReceiver::run()
                 emit fpsUpdated(framesThisSec / (now - fpsT0));
                 framesThisSec = 0;
                 fpsT0 = now;
+            }
+
+            // Compact per-AHRS / per-MAG line — every ~0.4 s.  Reuses
+            // the per-sensor diagnostic arrays already captured under
+            // -test (I.dbgAccErr / I.dbgDynAccRej / I.dbgDynMagRej /
+            // I.dbgGyrFused) and prints a single representative line
+            // for the Pelvis (seg 0) — its sensor is always present
+            // and is the reference for the rest of the chain.  The
+            // 1.5-s FUSED SNAPSHOT below still prints the full per-
+            // sensor dump; this faster cadence is the "is the filter
+            // healthy right now" pulse.
+            if (I.test && (now - I.lastAhrsDump) > 0.4) {
+                QMutexLocker lk(&I.lock);
+                constexpr int kPelvis = 0;
+                const QVector3D& gf = I.dbgGyrFused[kPelvis];
+                const double gyrNorm = std::sqrt(double(gf.x())*gf.x()
+                                              + double(gf.y())*gf.y()
+                                              + double(gf.z())*gf.z());
+                std::ostringstream ss;
+                ss << std::fixed << std::setprecision(3);
+                ss << "[ahrs] Pelvis"
+                   << "  accErr=" << std::setw(6) << I.dbgAccErr[kPelvis]
+                   << "  dynAccRej=" << std::setw(5) << std::setprecision(2)
+                                     << I.dbgDynAccRej[kPelvis] << "deg"
+                   << "  magErr=" << std::setw(5) << std::setprecision(2)
+                                  << I.dbgDynMagRej[kPelvis] << "deg"
+                   << "  gyr|w|=" << std::setw(6) << std::setprecision(2)
+                                  << gyrNorm << "deg/s"
+                   << "\n";
+                // accGate / magGate use the same 5°-error threshold the
+                // AHRS itself uses to flag a measurement as suspect.
+                // Below this the filter is fusing accel/mag normally;
+                // above this the inner gate likely held the update.
+                ss << "[mag]  Pelvis"
+                   << "  magErr=" << std::setw(5) << std::setprecision(2)
+                                  << I.dbgDynMagRej[kPelvis] << "deg"
+                   << "  accGate=" << (I.dbgDynAccRej[kPelvis] > 5.0
+                                        ? "REJECTED" : "open")
+                   << "  magGate=" << (I.dbgDynMagRej[kPelvis] > 5.0
+                                        ? "REJECTED" : "open")
+                   << "\n";
+                std::cout << ss.str() << std::flush;
+                I.lastAhrsDump = now;
             }
 
             // Once-every-1.5-seconds full snapshot of every tracker's

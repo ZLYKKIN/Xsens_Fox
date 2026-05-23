@@ -376,6 +376,7 @@ private:
         enum PoseKind { PoseUnknown = 0, PoseStand = 1, PoseSit = 2,
                         PoseSquat = 3, PoseLying = 4, PoseAirborne = 5 };
         PoseKind  m_pose              = PoseUnknown;
+        PoseKind  m_posePrev          = PoseUnknown;   // -test event tracker
         int       m_poseTicks         = 0;
 
         // v3: ZUPT ticks counter.  When pelvis + both feet still for

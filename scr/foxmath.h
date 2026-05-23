@@ -56,7 +56,7 @@ struct Quat {
     Quat inv() const {
         const double n2 = w*w + x*x + y*y + z*z;
         if (!std::isfinite(n2) || n2 < 1e-12) return Quat(1, 0, 0, 0);
-        return Quat(w/n2, -x/n2, -y/n2, -z/n2);
+        return Quat(w/n2, -x/n2, -y/n2, -z/n2).normalized();
     }
 };
 
