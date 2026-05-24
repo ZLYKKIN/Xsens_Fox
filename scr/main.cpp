@@ -965,21 +965,32 @@ public:
                 }
             }
 
-            // (F) Pelvic tilt transmission (§45.3): c_pelvis[0]·phi_pelvis.Y is
-            // forwarded into L5/S1 (the stiffest lumbar joint).  Uses the
-            // pelvis-world quat directly because the tilt is a deviation from
-            // the world Y axis, not from a parent segment.
+            // (F) Pelvic tilt transmission (§45.3): c_pelvis[0]=0.35 ASYMPTOTIC
+            // fraction of phi_pelvis.Y is forwarded into L5/S1 via a degree
+            // ramp set by c_pelvis[1]=25°.  At |tilt|=0 the transmission is
+            // zero; it ramps linearly to the full 0.35 at |tilt|≥25°.  This
+            // matches the spec "масштабный коэффициент / порог" and removes
+            // the step-discontinuity that the fixed-fraction form had at zero
+            // tilt — small posture wobble no longer drags the lumbar with it.
             {
-                const double frac = fb::kCPelvis[0];     // 0.35
+                const double frac  = fb::kCPelvis[0];   // 0.35
+                const double scale = fb::kCPelvis[1];   // 25° engagement scale
                 if (std::abs(frac) > 1e-6) {
                     const QVector3D phiPel = quat_log(o[0]);  // 0 = Pelvis
-                    const Quat dq = quat_exp_rotvec(0.0,
-                                                    frac * double(phiPel.y()),
-                                                    0.0);
-                    const Quat targetL5 = quat_mult(dq, o[0]).normalized();
-                    const QVector3D r = quat_log(quat_mult(targetL5,
-                                                           o[1].conj()).normalized());
-                    sum += r.length();
+                    const double tiltDeg = std::abs(double(phiPel.y())) *
+                                           fb::constants::kRad2Deg;
+                    const double ramp   = (scale > 1e-6)
+                        ? std::min(1.0, tiltDeg / scale) : 1.0;
+                    const double frac_eff = frac * ramp;
+                    if (std::abs(frac_eff) > 1e-9) {
+                        const Quat dq = quat_exp_rotvec(0.0,
+                                                        frac_eff * double(phiPel.y()),
+                                                        0.0);
+                        const Quat targetL5 = quat_mult(dq, o[0]).normalized();
+                        const QVector3D r = quat_log(quat_mult(targetL5,
+                                                               o[1].conj()).normalized());
+                        sum += r.length();
+                    }
                 }
             }
             // (G) Neck rhythm (§45 + spineNeck.cNeck): place Neck halfway on
@@ -1001,24 +1012,28 @@ public:
                                                        o[5].conj()).normalized());
                 sum += r.length();
             }
-            // (H) Scapulo-humeral ratio (§46): scapula picks up c_eff·(X,Y)
-            // of the humerus elevation; Z (axial twist) stays with humerus.
+            // (H) Scapulo-humeral ratio (§46.2 + §46.4): per-axis c_eff.
+            //   c_eff_X = piecewise(|phi.X|, c_arms[0]→c_arms[2])  ← abduction
+            //   c_eff_Y = piecewise(|phi.Y|, c_arms[1]→c_arms[2])  ← flexion
+            // Spec §46.4 — "ритм действует на КАЖДЫЙ компонент отдельно".  Z
+            // (axial twist) stays with the humerus (clinical convention).
+            auto axisCEff = [&](double thetaAxisRad, double cLow) {
+                const double low  = fb::kScapHumThetaLowDeg;
+                const double high = fb::kScapHumThetaHighDeg;
+                const double a = std::abs(thetaAxisRad) *
+                                 fb::constants::kRad2Deg;
+                if (a <= low)  return cLow;
+                if (a >= high) return fb::kCArms[2];
+                return cLow + (a - low) / (high - low) *
+                              (fb::kCArms[2] - cLow);
+            };
             auto evalScap = [&](int shoulderSeg, int upperArmSeg) {
                 const QVector3D phiH = quat_log(quat_mult(o[upperArmSeg],
                                                           o[4].conj()).normalized());
-                const double thetaH = std::sqrt(double(phiH.x())*double(phiH.x()) +
-                                                double(phiH.y())*double(phiH.y()) +
-                                                double(phiH.z())*double(phiH.z())) *
-                                       fb::constants::kRad2Deg;
-                double cEff;
-                const double low  = fb::kScapHumThetaLowDeg;
-                const double high = fb::kScapHumThetaHighDeg;
-                if      (thetaH <= low)  cEff = fb::kCArms[0];
-                else if (thetaH >= high) cEff = fb::kCArms[2];
-                else cEff = fb::kCArms[0] + (thetaH - low)/(high - low) *
-                                            (fb::kCArms[2] - fb::kCArms[0]);
-                const Quat dqScap = quat_exp_rotvec(cEff * double(phiH.x()),
-                                                    cEff * double(phiH.y()),
+                const double cEffX = axisCEff(double(phiH.x()), fb::kCArms[0]);
+                const double cEffY = axisCEff(double(phiH.y()), fb::kCArms[1]);
+                const Quat dqScap = quat_exp_rotvec(cEffX * double(phiH.x()),
+                                                    cEffY * double(phiH.y()),
                                                     0.0);
                 const Quat targetScap = quat_mult(dqScap, o[4]).normalized();
                 const QVector3D r = quat_log(quat_mult(targetScap,
@@ -1435,25 +1450,37 @@ public:
             const double w_lax  = 1.0 / (fb::kJointLaxitySolver *
                                          fb::kJointLaxitySolver);
 
-            // (F) Pelvic tilt transmission (§45.3, c_pelvis[0] = 0.35).
+            // (F) Pelvic tilt transmission (§45.3, c_pelvis = [0.35, 25]).
+            //   transmission(|tilt|) = c_pelvis[0]·saturate(|tilt|/c_pelvis[1])
+            // The c_pelvis[1]=25° engagement scale dampens transmission near
+            // the neutral pose so small posture wobble doesn't drag the lumbar
+            // 1:1 with the pelvis.  Beyond 25° the full 0.35 share kicks in.
             {
-                const double frac = fb::kCPelvis[0];
+                const double frac  = fb::kCPelvis[0];
+                const double scale = fb::kCPelvis[1];
                 if (std::abs(frac) > 1e-6) {
                     const QVector3D phiPel = quat_log(orient[0]);
-                    const Quat dq = quat_exp_rotvec(0.0,
-                                                    frac * double(phiPel.y()),
-                                                    0.0);
-                    const Quat targetL5 = quat_mult(dq, orient[0]).normalized();
-                    const QVector3D r = quat_log(quat_mult(targetL5,
-                                                           orient[1].conj()).normalized());
-                    const int rowL5 = 1 * 3;
-                    for (int k = 0; k < 3; ++k) {
-                        JtWJ(rowL5 + k, rowL5 + k) += w_coup;
-                        JtWr(rowL5 + k)            -= w_coup *
-                            (k == 0 ? r.x() : k == 1 ? r.y() : r.z());
+                    const double tiltDeg = std::abs(double(phiPel.y())) *
+                                           fb::constants::kRad2Deg;
+                    const double ramp   = (scale > 1e-6)
+                        ? std::min(1.0, tiltDeg / scale) : 1.0;
+                    const double frac_eff = frac * ramp;
+                    if (std::abs(frac_eff) > 1e-9) {
+                        const Quat dq = quat_exp_rotvec(0.0,
+                                                        frac_eff * double(phiPel.y()),
+                                                        0.0);
+                        const Quat targetL5 = quat_mult(dq, orient[0]).normalized();
+                        const QVector3D r = quat_log(quat_mult(targetL5,
+                                                               orient[1].conj()).normalized());
+                        const int rowL5 = 1 * 3;
+                        for (int k = 0; k < 3; ++k) {
+                            JtWJ(rowL5 + k, rowL5 + k) += w_coup;
+                            JtWr(rowL5 + k)            -= w_coup *
+                                (k == 0 ? r.x() : k == 1 ? r.y() : r.z());
+                        }
+                        residSum += r.length();
+                        ++residN;
                     }
-                    residSum += r.length();
-                    ++residN;
                 }
             }
             // (G) Neck rhythm (§45 + spineNeck.cNeck = 0.35).
@@ -1484,7 +1511,21 @@ public:
                 residSum += r.length();
                 ++residN;
             }
-            // (H) Scapulo-humeral ratio (§46, c_arms = [0.95, 0.95, 0.99]).
+            // (H) Scapulo-humeral ratio (§46.2 + §46.4): per-axis c_eff so the
+            // abduction (X, c_arms[0]) and flexion (Y, c_arms[1]) components
+            // ramp INDEPENDENTLY between c_arms[0/1]=0.95 and c_arms[2]=0.99
+            // as each component's magnitude grows from 60° to 90°.  Spec
+            // §46.4 — "ритм действует на КАЖДЫЙ компонент отдельно".
+            auto axisCEffWLS = [&](double thetaAxisRad, double cLow) {
+                const double low  = fb::kScapHumThetaLowDeg;
+                const double high = fb::kScapHumThetaHighDeg;
+                const double a = std::abs(thetaAxisRad) *
+                                 fb::constants::kRad2Deg;
+                if (a <= low)  return cLow;
+                if (a >= high) return fb::kCArms[2];
+                return cLow + (a - low) / (high - low) *
+                              (fb::kCArms[2] - cLow);
+            };
             auto applyScap = [&](int shoulderSeg, int upperArmSeg, bool isRight) {
                 const QVector3D phiH = quat_log(quat_mult(orient[upperArmSeg],
                                                           orient[4].conj()).normalized());
@@ -1492,15 +1533,10 @@ public:
                                                 double(phiH.y())*double(phiH.y()) +
                                                 double(phiH.z())*double(phiH.z())) *
                                        fb::constants::kRad2Deg;
-                double cEff;
-                const double low  = fb::kScapHumThetaLowDeg;
-                const double high = fb::kScapHumThetaHighDeg;
-                if      (thetaH <= low)  cEff = fb::kCArms[0];
-                else if (thetaH >= high) cEff = fb::kCArms[2];
-                else cEff = fb::kCArms[0] + (thetaH - low)/(high - low) *
-                                            (fb::kCArms[2] - fb::kCArms[0]);
-                const Quat dqScap = quat_exp_rotvec(cEff * double(phiH.x()),
-                                                    cEff * double(phiH.y()),
+                const double cEffX = axisCEffWLS(double(phiH.x()), fb::kCArms[0]);
+                const double cEffY = axisCEffWLS(double(phiH.y()), fb::kCArms[1]);
+                const Quat dqScap = quat_exp_rotvec(cEffX * double(phiH.x()),
+                                                    cEffY * double(phiH.y()),
                                                     0.0);
                 const Quat targetScap = quat_mult(dqScap, orient[4]).normalized();
                 const QVector3D r = quat_log(quat_mult(targetScap,
@@ -1513,8 +1549,11 @@ public:
                 }
                 residSum += r.length();
                 ++residN;
-                if (isRight) { d.scapThetaRDeg = thetaH; d.scapCEffR = cEff; }
-                else         { d.scapThetaLDeg = thetaH; d.scapCEffL = cEff; }
+                // Report the averaged X/Y c_eff so the existing diag dump
+                // semantics keep working (single c_eff number per arm).
+                const double cEffAvg = 0.5 * (cEffX + cEffY);
+                if (isRight) { d.scapThetaRDeg = thetaH; d.scapCEffR = cEffAvg; }
+                else         { d.scapThetaLDeg = thetaH; d.scapCEffL = cEffAvg; }
             };
             applyScap(7, 8, true);
             applyScap(11, 12, false);
@@ -2075,6 +2114,48 @@ void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
                       << " (skull)  feet ×" << fb::kMagGateRelax[17].angleMul
                       << " (sole steel)  T8 ×" << fb::kMagGateRelax[4].angleMul
                       << "  (spec §51.3 / §51.6)\n";
+            // Spec §40/§45-§48 — biomechanical coupling coefficients in active
+            // use.  Visible at boot so the auditor can sanity-check the per-
+            // axis spec numbers feeding the WLS solver this session.
+            std::cout << "[bio §45.1] c_spine=["
+                      << fb::kCSpine[0] << ", " << fb::kCSpine[1] << ", "
+                      << fb::kCSpine[2] << ", " << fb::kCSpine[3] << ", "
+                      << fb::kCSpine[4] << " (axial), "
+                      << fb::kCSpine[5] << ", " << fb::kCSpine[6] << ", "
+                      << fb::kCSpine[7] << ", " << fb::kCSpine[8]
+                      << "]  (Pelvis→T8 distribution + cervical chain)\n";
+            std::cout << "[bio §45.3] c_pelvis=[" << fb::kCPelvis[0]
+                      << " (frac), " << fb::kCPelvis[1] << "° (ramp scale)]\n";
+            std::cout << "[bio §46.1] c_arms=[" << fb::kCArms[0]
+                      << " (X), " << fb::kCArms[1] << " (Y), "
+                      << fb::kCArms[2]
+                      << " (max)]  scapulo-humeral piecewise-linear\n";
+            std::cout << "[bio §47.1] c_knees=[" << fb::kCKnees[0]
+                      << ", " << fb::kCKnees[1] << "]"
+                      << "  screw-home max " << fb::kKneeScrewMaxDeg << "°\n";
+            std::cout << "[bio §48.1] c_ankles=[" << fb::kCAnkles[0]
+                      << ", " << fb::kCAnkles[1] << " (=" << (fb::kCAnkles[1]
+                        * fb::constants::kRad2Deg) << "° pf), "
+                      << fb::kCAnkles[2] << ", " << fb::kCAnkles[3] << "]\n";
+            std::cout << "[bio §48.2] c_toes=[" << fb::kCToes[0]
+                      << ", " << fb::kCToes[1] << ", " << fb::kCToes[2]
+                      << ", " << fb::kCToes[3] << ", " << fb::kCToes[4]
+                      << ", " << fb::kCToes[5] << " (= sin5°)]"
+                      << "  rocker " << (fb::kToeRockerLowRad *
+                          fb::constants::kRad2Deg) << "°→"
+                      << (fb::kToeRockerHighRad *
+                          fb::constants::kRad2Deg) << "°\n";
+            // Spec §37.4 — lump-group coupling stiffness (1/sd² = 1600).
+            std::cout << "[bio §37.4] sd_lump_joint=" << fb::kSdLumpRad
+                      << "  weight=" << fb::kLumpStiffness
+                      << " (7 groups: upperbody, R/L leg, R/L foot, R/L arm)\n";
+            // Spec §38.5 — skin artifact Gauss-Markov (τ adaptive between
+            // tauFastSec and tauSlowSec based on per-segment angular rate).
+            std::cout << "[bio §38.5] skin GM tau=" << fb::kSkin.tauSec
+                      << " s base, fast=" << fb::kSkin.tauFastSec
+                      << " s slow=" << fb::kSkin.tauSlowSec
+                      << " s  σ_ori=" << fb::kSkin.sigmaOriDeg
+                      << "° σ_pos=" << fb::kSkin.sigmaPosM << " m\n";
             std::cout << std::setprecision(4);
             std::cout.flush();
         }
@@ -2169,11 +2250,24 @@ void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
            << "/" << d.spineFracL3
            << "/" << d.spineFracT12
            << "  c_axial(Z)=" << fb::kCSpine[4] << "\n";
+        // Spec §45.3 — c_pelvis = [0.35 fraction, 25° ramp]; show the lookup
+        // so the auditor can see both numbers active in the WLS row above.
+        ss << "[coupling-wls pelvis] c_pelvis=[" << fb::kCPelvis[0]
+           << ", " << fb::kCPelvis[1] << "°]"
+           << "  (frac=0.35, ramp=25° engagement scale)\n";
+        // Spec §46.4 — per-axis c_eff means abduction (X, c_arms[0]=0.95) and
+        // flexion (Y, c_arms[1]=0.95) ramp independently; report the averaged
+        // value in the [arm] line and call out the spec coefficients here.
         ss << "[coupling-wls arm]    R: humerusInT8=" << d.scapThetaRDeg
-           << "° scap=" << (d.scapCEffR * d.scapThetaRDeg) << "° c_eff=" << d.scapCEffR
+           << "° scap=" << (d.scapCEffR * d.scapThetaRDeg) << "° c_eff_avg=" << d.scapCEffR
            << "   L: humerusInT8=" << d.scapThetaLDeg
-           << "° scap=" << (d.scapCEffL * d.scapThetaLDeg) << "° c_eff=" << d.scapCEffL
+           << "° scap=" << (d.scapCEffL * d.scapThetaLDeg) << "° c_eff_avg=" << d.scapCEffL
            << "\n";
+        ss << "[coupling-wls arm-c]  c_arms=["
+           << fb::kCArms[0] << " (X), " << fb::kCArms[1] << " (Y), "
+           << fb::kCArms[2] << " (max)]"
+           << "  ramp=[" << fb::kScapHumThetaLowDeg << "°, "
+           << fb::kScapHumThetaHighDeg << "°]\n";
         ss << "[coupling-wls knee]   R: flex=" << d.kneeFlexRDeg
            << "° screw=" << d.kneeScrewRDeg
            << "°   L: flex=" << d.kneeFlexLDeg
