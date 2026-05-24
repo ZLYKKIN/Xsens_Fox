@@ -3849,6 +3849,9 @@ struct MocapReceiver::Impl {
     std::array<FusionAhrsSettings, kXsensSegmentCount>   ahrsCfg{};
     double           freqHz       = 240.0;
 
+    std::array<quint32, kXsensSegmentCount> lastStf{};
+    std::array<bool,    kXsensSegmentCount> haveLastStf{};
+
     std::array<Quat, kXsensSegmentCount> s2s{};
     std::array<Quat, kXsensSegmentCount> s2sInv{};
     bool                                 s2sActive = false;
@@ -5143,7 +5146,22 @@ void MocapReceiver::run()
                 stf = api.dataPacketSTF(pkt); haveStf = true;
             }
 
-            const double dt = 1.0 / I.freqHz;
+            double dt = 1.0 / I.freqHz;
+            if (haveStf && targetSeg >= 0 && targetSeg < kXsensSegmentCount) {
+                if (I.haveLastStf[targetSeg]) {
+                    const quint32 last = I.lastStf[targetSeg];
+                    const quint32 diff = stf - last;
+                    if (diff > 0 && diff < 100000) {
+                        const double measured = double(diff) * 1.0e-4;
+                        const double nominal = 1.0 / I.freqHz;
+                        if (measured > 0.25 * nominal && measured < 4.0 * nominal) {
+                            dt = measured;
+                        }
+                    }
+                }
+                I.lastStf[targetSeg]     = stf;
+                I.haveLastStf[targetSeg] = true;
+            }
             constexpr double kRadToDeg = 57.29577951308232;
             constexpr double kMs2ToG   = 1.0 / 9.80665;
             QVector3D accForFilter, gyrForFilter;
