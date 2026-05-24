@@ -7701,6 +7701,22 @@ void NewSessionWizard::abortCalibration()
     m_samples.clear();
     m_havePrev = false;
     m_calibComplete = false;
+
+    for (int i = 0; i < kXsensSegmentCount; ++i) {
+        m_accAccumT[i]    = QVector3D(0, 0, 0);
+        m_gyrAccumT[i]    = QVector3D(0, 0, 0);
+        m_magAccumT[i]    = QVector3D(0, 0, 0);
+        m_accMagAccumT[i] = 0.0;
+        m_magMagAccumT[i] = 0.0;
+        m_accumCountT[i]  = 0;
+        m_accAccumN[i]    = QVector3D(0, 0, 0);
+        m_gyrAccumN[i]    = QVector3D(0, 0, 0);
+        m_magAccumN[i]    = QVector3D(0, 0, 0);
+        m_accMagAccumN[i] = 0.0;
+        m_magMagAccumN[i] = 0.0;
+        m_accumCountN[i]  = 0;
+    }
+
     m_phase = CalibPhase::Idle;
     logCalibPhaseTransition("aborted");
     refreshPoseImage();
