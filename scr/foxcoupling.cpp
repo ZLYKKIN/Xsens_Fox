@@ -189,7 +189,7 @@ void applyOneKnee(std::array<Quat, fox::body::kSegmentCount>& orient,
 
     const double thetaKneeRad = std::abs(double(phi.y()));
     const double thetaScrewRad =
-        fb::kCKnees[1] * (1.0 - std::cos(thetaKneeRad))
+        (fb::kCKnees[0] + fb::kCKnees[2] * (1.0 - std::cos(thetaKneeRad)))
         * fb::kKneeScrewMaxDeg * kD2R;
     const double signedScrew = isRight ? thetaScrewRad : -thetaScrewRad;
 
