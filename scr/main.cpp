@@ -306,13 +306,6 @@ public:
         const double K = m_varPos[seg] / (m_varPos[seg] + R);
         m_xPos[seg] = m_xPos[seg] + float(K) * rMeas;
         m_varPos[seg] = (1.0 - K) * m_varPos[seg];
-
-        const double maxNorm = 3.0 * fb::kSkin.sigmaPosM;
-        const double n = std::sqrt(
-            double(m_xPos[seg].x()) * double(m_xPos[seg].x()) +
-            double(m_xPos[seg].y()) * double(m_xPos[seg].y()) +
-            double(m_xPos[seg].z()) * double(m_xPos[seg].z()));
-        if (n > maxNorm) m_xPos[seg] = m_xPos[seg] * float(maxNorm / n);
     }
 
     QVector3D driftPos(int seg) const {
@@ -336,12 +329,6 @@ public:
         const double K = m_var[seg] / (m_var[seg] + R);
         m_x[seg]   = m_x[seg] + float(K) * r;
         m_var[seg] = (1.0 - K) * m_var[seg];
-
-        const double maxNorm = 3.0 * fb::kSkin.sigmaOriDeg * kD2R;
-        const double n = std::sqrt(double(m_x[seg].x())*double(m_x[seg].x()) +
-                                   double(m_x[seg].y())*double(m_x[seg].y()) +
-                                   double(m_x[seg].z())*double(m_x[seg].z()));
-        if (n > maxNorm) m_x[seg] = m_x[seg] * float(maxNorm / n);
     }
 
     QVector3D drift(int seg) const {
