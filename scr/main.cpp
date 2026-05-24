@@ -4676,7 +4676,7 @@ bool MocapReceiver::connectGloves()
     return glovesOn;
 }
 
-bool MocapReceiver::glovesReady()     const { return m_impl->manusGloveCount > 0; }
+bool MocapReceiver::glovesReady()     const { return m_impl->manusGloveCount >= 2; }
 bool MocapReceiver::glovesCoreReady() const { return m_impl->manusCoreReady; }
 bool MocapReceiver::glovesDllLoaded() const { return m_impl->manusDllLoaded; }
 
