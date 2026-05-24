@@ -3208,7 +3208,13 @@ QVector3D LocomotionSolver::update(const Quat& qR,
         m_confL = applyRollHyst(rollingL, m_confL, newConfL,
                                 m_confLFrozenForRoll, m_confLFrozenValue);
 
-        const double pelvisRotKill = std::max(0.0, std::min(1.0, (m_pelvisAngV - 0.6) / 0.8));
+        const double pelvisStill = std::max(1e-3, m_pelvisStillRad);
+        const double pelvisRange = std::max(pelvisStill,
+                                            fox::body::kContact.highVelTh);
+        const double pelvisRotKill =
+            std::max(0.0,
+                     std::min(1.0,
+                              (m_pelvisAngV - pelvisStill) / pelvisRange));
         const bool pelvisRotating = pelvisRotKill > 0.5;
         m_dbgPelvisRotKill = pelvisRotKill;
 
