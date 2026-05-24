@@ -6827,7 +6827,7 @@ static PlacementReport analyzePlacement(
 
         if (assignedClass == expectedClass) {
             ++rep.verified;
-        } else if (maxP >= 0.5f) {
+        } else if (maxP >= fox::body::kSpcAcceptanceP) {
             rep.mismatches << QString("%1→%2 (p=%3)")
                                 .arg(QString::fromUtf8(kSegmentNames[seg]))
                                 .arg(QString::fromUtf8(
@@ -6843,7 +6843,7 @@ static PlacementReport analyzePlacement(
         const float maxP = *std::max_element(probs[r].begin(), probs[r].end());
         suitUncertainty += (1.0f - maxP);
     }
-    rep.suitUncertaintyAlarm = suitUncertainty > 4.0f;
+    rep.suitUncertaintyAlarm = suitUncertainty > fox::body::kSpcSuitUncertSum;
 
     return rep;
 }

@@ -697,6 +697,9 @@ inline constexpr std::array<Quat, kFingerSegmentsPerHand> kFingerQBSLeft = {{
     Quat(1, 0, 0, 0), Quat(1, 0, 0, 0), Quat(1, 0, 0, 0), Quat(1, 0, 0, 0),
 }};
 
+inline constexpr float kSpcAcceptanceP   = 0.5f;
+inline constexpr float kSpcSuitUncertSum = 4.0f;
+
 struct JumpDetectParams {
     double threshDeg;
     double blendRangeDeg;
