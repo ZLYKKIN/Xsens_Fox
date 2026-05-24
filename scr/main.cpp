@@ -3034,7 +3034,11 @@ static Quat matToQuat(double m00, double m01, double m02,
         q.y = (m12 + m21) / s;
         q.z = 0.25 * s;
     }
-    return q.normalized();
+    Quat n = q.normalized();
+    if (n.w < 0.0) {
+        n.w = -n.w; n.x = -n.x; n.y = -n.y; n.z = -n.z;
+    }
+    return n;
 }
 
 static double mirrorYDeviationDeg(const Quat& qR, const Quat& qL)
