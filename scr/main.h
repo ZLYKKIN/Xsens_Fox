@@ -1023,7 +1023,7 @@ private:
     WristAnatomicalCfg m_wristCfgR{};
     WristAnatomicalCfg m_wristCfgL{};
 
-    float m_yaw   = 35.0f;
+    float m_yaw   = 180.0f;
     float m_pitch = 12.0f;
     float m_dist  = 3.2f;
     QPoint m_lastMouse;
