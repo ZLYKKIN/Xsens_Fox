@@ -588,6 +588,25 @@ inline constexpr ContactParams kContact = {
     .secondWinWidthAfter       = 0.01,
 };
 
+inline constexpr int kFingerSensorsPerHand = 17;
+inline constexpr int kFingerSegmentsPerHand = 20;
+
+inline constexpr std::array<Quat, kFingerSegmentsPerHand> kFingerQBSRight = {{
+    Quat(1, 0, 0, 0), Quat(1, 0, 0, 0), Quat(1, 0, 0, 0), Quat(1, 0, 0, 0),
+    Quat(1, 0, 0, 0), Quat(1, 0, 0, 0), Quat(1, 0, 0, 0), Quat(1, 0, 0, 0),
+    Quat(1, 0, 0, 0), Quat(1, 0, 0, 0), Quat(1, 0, 0, 0), Quat(1, 0, 0, 0),
+    Quat(1, 0, 0, 0), Quat(1, 0, 0, 0), Quat(1, 0, 0, 0), Quat(1, 0, 0, 0),
+    Quat(1, 0, 0, 0), Quat(1, 0, 0, 0), Quat(1, 0, 0, 0), Quat(1, 0, 0, 0),
+}};
+
+inline constexpr std::array<Quat, kFingerSegmentsPerHand> kFingerQBSLeft = {{
+    Quat(1, 0, 0, 0), Quat(1, 0, 0, 0), Quat(1, 0, 0, 0), Quat(1, 0, 0, 0),
+    Quat(1, 0, 0, 0), Quat(1, 0, 0, 0), Quat(1, 0, 0, 0), Quat(1, 0, 0, 0),
+    Quat(1, 0, 0, 0), Quat(1, 0, 0, 0), Quat(1, 0, 0, 0), Quat(1, 0, 0, 0),
+    Quat(1, 0, 0, 0), Quat(1, 0, 0, 0), Quat(1, 0, 0, 0), Quat(1, 0, 0, 0),
+    Quat(1, 0, 0, 0), Quat(1, 0, 0, 0), Quat(1, 0, 0, 0), Quat(1, 0, 0, 0),
+}};
+
 struct FingerSmoothParams {
     float emaAlphaThumb;
     float emaAlphaFinger;
