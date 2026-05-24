@@ -50,17 +50,17 @@ inline constexpr AnthroProportions kAnthroMale = {
 
 inline constexpr AnthroProportions kAnthroFemale = {
     .trunkRatio          = 0.292,
-    .thighRatio          = 0.245,
-    .shankRatio          = 0.246,
-    .handRatio           = 0.108,
-    .forearmRatio        = 0.146,
-    .upperArmRatio       = 0.186,
+    .thighRatio          = 0.250,
+    .shankRatio          = 0.241,
+    .handRatio           = 0.106,
+    .forearmRatio        = 0.144,
+    .upperArmRatio       = 0.182,
     .shoulderWidthRatio  = 0.222,
     .hipWidthRatio       = 0.184,
     .hipHeightRatio      = 0.505,
     .kneeHeightRatio     = 0.290,
     .ankleHeightRatio    = 0.039,
-    .footRatio           = 0.144,
+    .footRatio           = 0.149,
 };
 
 inline constexpr AnthroProportions kAnthroLegacy = {
