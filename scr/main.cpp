@@ -3532,14 +3532,14 @@ QVector3D LocomotionSolver::update(const Quat& qR,
 const char* connStatusName(ConnStatus s)
 {
     switch (s) {
-        case ConnStatus::NotInitialized: return "not initialised";
-        case ConnStatus::NoDriver:       return "driver missing";
-        case ConnStatus::Scanning:       return "scanning";
-        case ConnStatus::NoDevice:       return "no device";
-        case ConnStatus::Connecting:     return "connecting";
-        case ConnStatus::Streaming:      return "streaming";
-        case ConnStatus::Stale:          return "stale";
-        case ConnStatus::Failed:         return "failed";
+        case ConnStatus::NotInitialized: return "не инициализирован";
+        case ConnStatus::NoDriver:       return "драйвер отсутствует";
+        case ConnStatus::Scanning:       return "сканирование";
+        case ConnStatus::NoDevice:       return "устройство не найдено";
+        case ConnStatus::Connecting:     return "подключение";
+        case ConnStatus::Streaming:      return "поток";
+        case ConnStatus::Stale:          return "устаревший поток";
+        case ConnStatus::Failed:         return "сбой";
     }
     return "?";
 }
