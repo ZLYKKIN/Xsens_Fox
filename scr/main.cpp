@@ -2820,7 +2820,7 @@ SkeletonXsens::computeKeypoints(const std::array<Quat, kXsensSegmentCount>& raw,
         if (!sensorRbsDumped) {
             sensorRbsDumped = true;
             std::cout << "[sensor-rbs §89] per-segment IMU mount r_bs (m) — sensor"
-                         " offset on the bone, used for GPS aiding and rendering\n";
+                         " offset on the bone, used for rendering and contact reasoning\n";
             for (int i = 0; i < kXsensSegmentCount; ++i) {
                 const QVector3D r_bs = fox::body::kSensorToBone[i].r_bs;
                 if (r_bs.lengthSquared() < 1e-12f) continue;
