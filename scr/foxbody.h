@@ -974,14 +974,16 @@ inline constexpr SkinParams kSkin = {
 struct FilterParams {
     double tauAcc;                 // 10  — accelerometer smoothing
     double tauFGyrLpfDynamic;      // 6
-    double tauM0AvgFast;           // 30
-    double tauM0AvgMedium;         // 120
+    double tauM0AvgFast;           // 30   — low dynamics
+    double tauM0AvgMedium;         // 120  — medium dynamics
+    double tauM0AvgSlow;           // 300  — high dynamics (§43.9 A)
 };
 inline constexpr FilterParams kFilter = {
     .tauAcc            = 10.0,
     .tauFGyrLpfDynamic = 6.0,
     .tauM0AvgFast      = 30.0,
     .tauM0AvgMedium    = 120.0,
+    .tauM0AvgSlow      = 300.0,
 };
 
 struct EstimatorWeights {
@@ -1122,6 +1124,12 @@ inline constexpr std::array<double, 7> kPeakDetection = {
 inline constexpr std::array<double, 8> kSamepos = {
     0.02, 0.02, 0.07, 0.05, 0.005, 0.005, 0.15, 0.8
 };
+// §44.10 / §1102.7 — boost[]: joint acc+vel contact-likelihood boost.
+// Spec form: boost = boost[0]·f_acc + boost[1]·f_vel.
+inline constexpr std::array<double, 2> kBoost = { 2.0, 4.0 };
+// §44.10 / §1102.8 — pos[]: small positive contact-bias floor.
+// Spec form: f_pos = pos[0] (additional pos[1..2] reserved).
+inline constexpr std::array<double, 3> kPos = { 0.12, 0.0, 0.0 };
 // §42.3 — outlier rejection thresholds.
 struct OutlierRej {
     double outRejTh1;             // 100
