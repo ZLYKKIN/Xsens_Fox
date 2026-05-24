@@ -10669,7 +10669,7 @@ static bool writeFbxAscii(const QString& path,
         os << "        Properties70:  {\n";
         os << "            P: \"Lcl Translation\", \"Lcl Translation\", \"\", \"A+\","
            << offCm[i].x() << "," << offCm[i].y() << "," << offCm[i].z() << "\n";
-        os << "            P: \"RotationOrder\", \"enum\", \"\", \"\", 2\n";
+        os << "            P: \"RotationOrder\", \"enum\", \"\", \"\", 4\n";
         os << "        }\n";
         os << "    }\n";
     }
