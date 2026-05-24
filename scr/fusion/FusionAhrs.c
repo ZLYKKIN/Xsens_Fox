@@ -220,7 +220,7 @@ static void Sub3x3(const float *P15, int rowStart, int colStart, float out9[9]) 
             out9[i * 3 + j] = P15[(rowStart + i) * N15 + (colStart + j)];
 }
 
-static void ApplyDeltaX(FusionAhrs *ahrs, const float dx[15]) {
+static void ApplyDeltaX(FusionAhrs *ahrs, const float dx[N15]) {
 
     FusionVector dth = { .axis = { dx[0], dx[1], dx[2] } };
     ahrs->q = FusionQuaternionNormalise(FusionQuaternionProduct(ahrs->q, ExpQuat(dth)));
@@ -229,6 +229,8 @@ static void ApplyDeltaX(FusionAhrs *ahrs, const float dx[15]) {
     ahrs->b_a.axis.x += dx[6];  ahrs->b_a.axis.y += dx[7];  ahrs->b_a.axis.z += dx[8];
     ahrs->m0.axis.x  += dx[9];  ahrs->m0.axis.y  += dx[10]; ahrs->m0.axis.z  += dx[11];
     ahrs->v_lp.axis.x+= dx[12]; ahrs->v_lp.axis.y+= dx[13]; ahrs->v_lp.axis.z+= dx[14];
+    ahrs->magNormBias   += dx[IDX_MAGNORM];
+    ahrs->skinPhiScalar += dx[IDX_SKINPHI];
 }
 
 const FusionAhrsSettings fusionAhrsDefaultSettings = {
@@ -272,6 +274,13 @@ void FusionAhrsRestart(FusionAhrs *ahrs) {
     for (int i = 0; i < 3; ++i) ahrs->P[(6  + i) * N15 + (6  + i)] = sA * sA;
     for (int i = 0; i < 3; ++i) ahrs->P[(9  + i) * N15 + (9  + i)] = sM * sM;
     for (int i = 0; i < 3; ++i) ahrs->P[(12 + i) * N15 + (12 + i)] = sV * sV;
+
+    const float sN = 0.05f;
+    const float sS = 3.0f * 0.017453292519943295f;
+    ahrs->P[IDX_MAGNORM * N15 + IDX_MAGNORM] = sN * sN;
+    ahrs->P[IDX_SKINPHI * N15 + IDX_SKINPHI] = sS * sS;
+    ahrs->magNormBias   = 0.0f;
+    ahrs->skinPhiScalar = 0.0f;
 
     ahrs->a_lp = FUSION_VECTOR_ZERO;
     ahrs->a_lp_ready = false;
@@ -372,6 +381,17 @@ static void Predict(FusionAhrs *ahrs, FusionVector gyroDegS, float dt) {
     for (int i = 0; i < 3; ++i) ahrs->P[(6  + i) * N15 + (6  + i)] += qA * dt;
     for (int i = 0; i < 3; ++i) ahrs->P[(9  + i) * N15 + (9  + i)] += qM * dt;
     for (int i = 0; i < 3; ++i) ahrs->P[(12 + i) * N15 + (12 + i)] += qV * dt;
+
+    const float qN = 1.0e-4f * 1.0e-4f;
+    ahrs->P[IDX_MAGNORM * N15 + IDX_MAGNORM] += qN * dt;
+
+    const float skinSigma = 3.0f * 0.017453292519943295f;
+    const float skinTau   = KFA_SKIN_TAU_S;
+    const float skinDecay = expf(-2.0f * dt / skinTau);
+    ahrs->P[IDX_SKINPHI * N15 + IDX_SKINPHI] *= skinDecay;
+    ahrs->skinPhiScalar  *= expf(-dt / skinTau);
+    const float qS = (skinSigma * skinSigma) * (1.0f - skinDecay);
+    ahrs->P[IDX_SKINPHI * N15 + IDX_SKINPHI] += qS;
 
     Symm15(ahrs->P);
 }
