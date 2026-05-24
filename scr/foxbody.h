@@ -822,6 +822,36 @@ inline constexpr std::array<double, 7> kPeakDetection = {
     3.6515, 0.1667, 20.0, 10.0, 1.5, 1.0, 0.025
 };
 
+struct ContactWeights {
+    double wAcc;
+    double wVel;
+    double wCom;
+    double wAir;
+    double wGeneral;
+    double wLevel;
+    double wBoost;
+    double wPos;
+    double wPeakDetection;
+    double wSamepos;
+    double bias;
+};
+
+inline constexpr ContactWeights kContactWeights = {
+    .wAcc           = 1.0,
+    .wVel           = 1.0,
+    .wCom           = 1.0,
+    .wAir           = 1.0,
+    .wGeneral       = 1.0,
+    .wLevel         = 1.0,
+    .wBoost         = 1.0,
+    .wPos           = 1.0,
+    .wPeakDetection = 1.0,
+    .wSamepos       = 1.0,
+    .bias           = 0.0,
+};
+
+inline constexpr std::array<double, 2> kLevelProb = { 0.1, 0.0 };
+
 inline constexpr std::array<double, 8> kSamepos = {
     0.02, 0.02, 0.07, 0.05, 0.005, 0.005, 0.15, 0.8
 };

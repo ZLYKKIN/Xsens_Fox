@@ -510,19 +510,40 @@ public:
                                  fb::kAir[9] * std::min(1.0, double(v_world.z())) +
                                  fb::kAir[10] * std::min(1.0, std::abs(double(v_world.z())) / 0.5);
 
-            const double f_general = fb::kGeneralProb[0];
+            const double f_general = fb::kGeneralProb[0] +
+                                     fb::kGeneralProb[1] * 1.0 +
+                                     fb::kGeneralProb[2] * std::max(0.0, lowZ);
 
             const double f_boost = fb::kBoost[0] * f_acc +
                                    fb::kBoost[1] * f_vel;
 
             const double f_pos = fb::kPos[0];
 
+            const double f_level = fb::kLevelProb[0] *
+                                   (1.0 - std::min(1.0,
+                                       std::abs(double(p_world.z()) - in.floorLevelZ) /
+                                       std::max(1e-6, fb::kDLevelDefault)));
+
             const double f_peak = (out.impactDetected && (seg == out.impactSeg))
                                 ? fb::kPeakDetection[5]
                                 : 0.0;
 
-            const double score = f_air + f_acc + f_vel + f_com + f_general
-                               + f_boost + f_pos + f_peak;
+            const double samePosDist = (p_xy - cop_xy).length();
+            const double f_samepos = fb::kSamepos[7] *
+                                     std::exp(-samePosDist /
+                                              std::max(1e-6, fb::kSamepos[6]));
+
+            const double score = fb::kContactWeights.wAcc           * f_acc
+                               + fb::kContactWeights.wVel           * f_vel
+                               + fb::kContactWeights.wCom           * f_com
+                               + fb::kContactWeights.wAir           * f_air
+                               + fb::kContactWeights.wGeneral       * f_general
+                               + fb::kContactWeights.wLevel         * f_level
+                               + fb::kContactWeights.wBoost         * f_boost
+                               + fb::kContactWeights.wPos           * f_pos
+                               + fb::kContactWeights.wPeakDetection * f_peak
+                               + fb::kContactWeights.wSamepos       * f_samepos
+                               + fb::kContactWeights.bias;
             const double P = sigmoid(score);
 
             cands[nCand].seg          = seg;
