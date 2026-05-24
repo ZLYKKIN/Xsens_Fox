@@ -2624,7 +2624,7 @@ void SkeletonXsens::buildLengths(const ActorConfig& actor)
     const double refSpanM = 2.0 * refArmOneSide + 2.0 * refScapHalfY;
     const double anthroArmSpanM = 2.0 * (anthro.upperArmRatio + anthro.forearmRatio + anthro.handRatio) * h;
     const double targetArmSpanM = (actor.armSpanCm > 0.0)
-        ? std::max(0.30, actor.armSpanCm / 100.0)
+        ? std::max(fb::kAnthroFloors.armSpanMin, actor.armSpanCm / 100.0)
         : anthroArmSpanM;
     double armScale = (refSpanM > 1e-6) ? targetArmSpanM / refSpanM : heightScale;
 
@@ -2633,7 +2633,7 @@ void SkeletonXsens::buildLengths(const ActorConfig& actor)
                          + fb::ankleHeightM(fb::kRefHeightM);
     const double anthroLegM = (anthro.thighRatio + anthro.shankRatio + anthro.ankleHeightRatio) * h;
     const double targetLegM = (actor.legLengthCm > 0.0)
-        ? std::max(0.30, actor.legLengthCm / 100.0)
+        ? std::max(fb::kAnthroFloors.legLengthMin, actor.legLengthCm / 100.0)
         : anthroLegM;
     double legScale = (refLegM > 1e-6) ? targetLegM / refLegM : heightScale;
 
@@ -2655,16 +2655,16 @@ void SkeletonXsens::buildLengths(const ActorConfig& actor)
     }
 
     const double pelvisHalfM = (actor.hipWidthCm > 0.0)
-        ? std::max(0.04, actor.hipWidthCm / 200.0)
+        ? std::max(fb::kAnthroFloors.hipHalfMin, actor.hipWidthCm / 200.0)
         : 0.5 * anthro.hipWidthRatio * h;
     const double scapHalfM = (actor.shoulderWidthCm > 0.0)
-        ? std::max(0.05, actor.shoulderWidthCm / 200.0)
+        ? std::max(fb::kAnthroFloors.scapHalfMin, actor.shoulderWidthCm / 200.0)
         : 0.5 * anthro.shoulderWidthRatio * h * (0.08 / (0.5 * 0.234));
 
     double refTrunkM = 0.0;
     for (int s = 0; s <= 5; ++s) refTrunkM += specLen(s);
     const double targetTrunkM = (actor.trunkLengthCm > 0.0)
-        ? std::max(0.40, actor.trunkLengthCm / 100.0)
+        ? std::max(fb::kAnthroFloors.trunkLengthMin, actor.trunkLengthCm / 100.0)
         : anthro.trunkRatio * h;
     double trunkScale = (refTrunkM > 1e-6) ? targetTrunkM / refTrunkM : heightScale;
 

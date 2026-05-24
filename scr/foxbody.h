@@ -700,6 +700,21 @@ inline constexpr std::array<Quat, kFingerSegmentsPerHand> kFingerQBSLeft = {{
 inline constexpr float kSpcAcceptanceP   = 0.5f;
 inline constexpr float kSpcSuitUncertSum = 4.0f;
 
+struct AnthroFloors {
+    double armSpanMin;
+    double legLengthMin;
+    double trunkLengthMin;
+    double hipHalfMin;
+    double scapHalfMin;
+};
+inline constexpr AnthroFloors kAnthroFloors = {
+    .armSpanMin     = 0.30,
+    .legLengthMin   = 0.30,
+    .trunkLengthMin = 0.40,
+    .hipHalfMin     = 0.04,
+    .scapHalfMin    = 0.05,
+};
+
 struct JumpDetectParams {
     double threshDeg;
     double blendRangeDeg;
