@@ -12008,7 +12008,7 @@ void MainWindow::onRenderTick()
                 ss << "--- [COM] §12.1 body centre of mass ---\n";
                 ss << "  com=(" << std::setw(7) << com.x() << ","
                    << std::setw(7) << com.y() << ","
-                   << std::setw(7) << com.z() << ")  Σm%=" << M << "\n";
+                   << std::setw(7) << com.z() << ")  m=" << M << " kg\n";
 
                 const auto ergo = fox::ergo::jointAnglesErgoAll(fk.oriented);
                 ss << "--- [ROM] joints approaching limits (≥90% range) ---\n";
