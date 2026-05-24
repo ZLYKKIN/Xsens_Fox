@@ -1719,7 +1719,6 @@ public:
         NA = 0,
         HS,
         FF,
-        MS,
         HO,
         TO,
         SW
@@ -1728,7 +1727,6 @@ public:
         switch (p) {
             case GaitPhase::HS: return "HS";
             case GaitPhase::FF: return "FF";
-            case GaitPhase::MS: return "MS";
             case GaitPhase::HO: return "HO";
             case GaitPhase::TO: return "TO";
             case GaitPhase::SW: return "SW";
