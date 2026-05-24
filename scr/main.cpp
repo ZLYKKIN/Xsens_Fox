@@ -1760,9 +1760,67 @@ public:
                           double rFootPitchZ, double lFootPitchZ,
                           double rFootVelZ,   double lFootVelZ,
                           double dt) {
+        const GaitPhase prevR = m_phaseR;
+        const GaitPhase prevL = m_phaseL;
         m_phaseR = classifyLeg(m_phaseR, rContact, rFootPitchZ, rFootVelZ, dt, m_durR);
         m_phaseL = classifyLeg(m_phaseL, lContact, lFootPitchZ, lFootVelZ, dt, m_durL);
+        if (prevR != GaitPhase::HS && m_phaseR == GaitPhase::HS) ++m_heelStrikeR;
+        if (prevL != GaitPhase::HS && m_phaseL == GaitPhase::HS) ++m_heelStrikeL;
     }
+
+    void updateStepMetrics(const QVector3D& rHeelWorld,
+                           const QVector3D& lHeelWorld,
+                           const QVector3D& comWorld,
+                           double dt)
+    {
+        (void)dt;
+        if (m_phaseR == GaitPhase::HS && m_lastPhaseR != GaitPhase::HS) {
+            const double sl = (rHeelWorld - m_lastHeelR_HS).length();
+            const double sh = std::abs(double(rHeelWorld.z() - m_lastHeelR_HS.z()));
+            if (m_haveLastHeelR && sl > 0.01 && sl < 2.5) {
+                m_lastStepLengthR = sl;
+                m_lastStepHeightR = sh;
+            }
+            m_lastHeelR_HS = rHeelWorld;
+            m_haveLastHeelR = true;
+        }
+        if (m_phaseL == GaitPhase::HS && m_lastPhaseL != GaitPhase::HS) {
+            const double sl = (lHeelWorld - m_lastHeelL_HS).length();
+            const double sh = std::abs(double(lHeelWorld.z() - m_lastHeelL_HS.z()));
+            if (m_haveLastHeelL && sl > 0.01 && sl < 2.5) {
+                m_lastStepLengthL = sl;
+                m_lastStepHeightL = sh;
+            }
+            m_lastHeelL_HS = lHeelWorld;
+            m_haveLastHeelL = true;
+        }
+        m_lastPhaseR = m_phaseR;
+        m_lastPhaseL = m_phaseL;
+
+        if (m_haveLastCom) {
+            const double z = double(comWorld.z());
+            if (z > m_comZMax) m_comZMax = z;
+            if (z < m_comZMin) m_comZMin = z;
+            m_lastVertCoMOscM = m_comZMax - m_comZMin;
+            if (m_comOscDecayTicks++ > 240) {
+                m_comZMin =  1e9;
+                m_comZMax = -1e9;
+                m_comOscDecayTicks = 0;
+            }
+        } else {
+            m_comZMin = double(comWorld.z());
+            m_comZMax = double(comWorld.z());
+            m_haveLastCom = true;
+        }
+    }
+
+    double lastStepLengthR() const { return m_lastStepLengthR; }
+    double lastStepLengthL() const { return m_lastStepLengthL; }
+    double lastStepHeightR() const { return m_lastStepHeightR; }
+    double lastStepHeightL() const { return m_lastStepHeightL; }
+    double vertCoMOscillationM() const { return m_lastVertCoMOscM; }
+    int    heelStrikeCountR() const { return m_heelStrikeR; }
+    int    heelStrikeCountL() const { return m_heelStrikeL; }
 
     enum class BodyPosture : std::uint8_t {
         Vertical = 0,
@@ -1886,8 +1944,25 @@ private:
 
     GaitPhase       m_phaseR          = GaitPhase::NA;
     GaitPhase       m_phaseL          = GaitPhase::NA;
+    GaitPhase       m_lastPhaseR      = GaitPhase::NA;
+    GaitPhase       m_lastPhaseL      = GaitPhase::NA;
     double          m_durR            = 0.0;
     double          m_durL            = 0.0;
+    int             m_heelStrikeR     = 0;
+    int             m_heelStrikeL     = 0;
+    QVector3D       m_lastHeelR_HS    {0, 0, 0};
+    QVector3D       m_lastHeelL_HS    {0, 0, 0};
+    bool            m_haveLastHeelR   = false;
+    bool            m_haveLastHeelL   = false;
+    double          m_lastStepLengthR = 0.0;
+    double          m_lastStepLengthL = 0.0;
+    double          m_lastStepHeightR = 0.0;
+    double          m_lastStepHeightL = 0.0;
+    double          m_comZMin         =  1e9;
+    double          m_comZMax         = -1e9;
+    bool            m_haveLastCom     = false;
+    int             m_comOscDecayTicks = 0;
+    double          m_lastVertCoMOscM = 0.0;
 };
 
 class PoseRefiner {
