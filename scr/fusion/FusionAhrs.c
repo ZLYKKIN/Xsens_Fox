@@ -56,6 +56,9 @@
 
 #define KFA_SKIN_TAU_S           0.15f
 
+#define KFA_P_DIAG_MIN           1.0e-12f
+#define KFA_P_DIAG_MAX           1.0e+6f
+
 #define N15 17
 #define IDX_MAGNORM 15
 #define IDX_SKINPHI 16
@@ -70,8 +73,12 @@ static void Symm15(float *P) {
             P[i * N15 + j] = avg;
             P[j * N15 + i] = avg;
         }
-    for (int i = 0; i < N15; ++i)
-        if (P[i * N15 + i] < 0.0f) P[i * N15 + i] = 0.0f;
+    for (int i = 0; i < N15; ++i) {
+        float d = P[i * N15 + i];
+        if (!(d > KFA_P_DIAG_MIN)) d = KFA_P_DIAG_MIN;
+        else if (d > KFA_P_DIAG_MAX) d = KFA_P_DIAG_MAX;
+        P[i * N15 + i] = d;
+    }
 }
 
 static void Joseph_3x15(float *P,
