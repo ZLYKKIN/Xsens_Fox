@@ -6495,6 +6495,9 @@ static const Tr kTr[] = {
     {"body_panel_sub",     "0 = расчёт по росту",               "0 = derived from height"},
     {"dims_primary",       "Основные размеры",                  "Primary dimensions"},
     {"dims_breakdown",     "Расчётные длины сегментов",         "Derived segment lengths"},
+    {"gender_label",       "Пол",                               "Gender"},
+    {"gender_male",        "Мужской",                           "Male"},
+    {"gender_female",      "Женский",                           "Female"},
     {"calib_pose_box",     "Поза актёра",                       "Actor pose"},
     {"calib_status_box",   "Статус",                            "Status"},
     {"calib_progress_box", "Прогресс калибровки",               "Calibration progress"},
@@ -7605,6 +7608,13 @@ void NewSessionWizard::buildPages()
         m_trunk    = new QDoubleSpinBox(p);
         configSpin(m_trunk,    0.0,   0.0, 120.0, 0.5);
 
+        m_gender = new QComboBox(p);
+        m_gender->addItem(Lang::t("gender_male"));
+        m_gender->addItem(Lang::t("gender_female"));
+        m_gender->setCurrentIndex(0);
+        m_lblGender = new QLabel(p);
+        m_lblGender->setStyleSheet("font-weight:600;");
+
         struct SelAllFilter : QObject {
             bool eventFilter(QObject* o, QEvent* e) override {
                 if (e->type() == QEvent::FocusIn) {
@@ -7642,21 +7652,23 @@ void NewSessionWizard::buildPages()
         primaryLay->setContentsMargins(24, 20, 24, 20);
         primaryLay->setHorizontalSpacing(32);
         primaryLay->setVerticalSpacing(10);
-        primaryLay->addWidget(m_lblHeight, 0, 0, Qt::AlignRight | Qt::AlignVCenter);
-        primaryLay->addWidget(m_height,    0, 1);
-        primaryLay->addWidget(m_lblFoot,   1, 0, Qt::AlignRight | Qt::AlignVCenter);
-        primaryLay->addWidget(m_foot,      1, 1);
-        primaryLay->addWidget(m_lblArm,    2, 0, Qt::AlignRight | Qt::AlignVCenter);
-        primaryLay->addWidget(m_arm,       2, 1);
-        primaryLay->addWidget(m_lblLeg,    3, 0, Qt::AlignRight | Qt::AlignVCenter);
-        primaryLay->addWidget(m_leg,       3, 1);
+        primaryLay->addWidget(m_lblGender, 0, 0, Qt::AlignRight | Qt::AlignVCenter);
+        primaryLay->addWidget(m_gender,    0, 1);
+        primaryLay->addWidget(m_lblHeight, 1, 0, Qt::AlignRight | Qt::AlignVCenter);
+        primaryLay->addWidget(m_height,    1, 1);
+        primaryLay->addWidget(m_lblFoot,   2, 0, Qt::AlignRight | Qt::AlignVCenter);
+        primaryLay->addWidget(m_foot,      2, 1);
+        primaryLay->addWidget(m_lblArm,    3, 0, Qt::AlignRight | Qt::AlignVCenter);
+        primaryLay->addWidget(m_arm,       3, 1);
+        primaryLay->addWidget(m_lblLeg,    4, 0, Qt::AlignRight | Qt::AlignVCenter);
+        primaryLay->addWidget(m_leg,       4, 1);
 
-        primaryLay->addWidget(m_lblHip,      4, 0, Qt::AlignRight | Qt::AlignVCenter);
-        primaryLay->addWidget(m_hip,         4, 1);
-        primaryLay->addWidget(m_lblShoulder, 5, 0, Qt::AlignRight | Qt::AlignVCenter);
-        primaryLay->addWidget(m_shoulder,    5, 1);
-        primaryLay->addWidget(m_lblTrunk,    6, 0, Qt::AlignRight | Qt::AlignVCenter);
-        primaryLay->addWidget(m_trunk,       6, 1);
+        primaryLay->addWidget(m_lblHip,      5, 0, Qt::AlignRight | Qt::AlignVCenter);
+        primaryLay->addWidget(m_hip,         5, 1);
+        primaryLay->addWidget(m_lblShoulder, 6, 0, Qt::AlignRight | Qt::AlignVCenter);
+        primaryLay->addWidget(m_shoulder,    6, 1);
+        primaryLay->addWidget(m_lblTrunk,    7, 0, Qt::AlignRight | Qt::AlignVCenter);
+        primaryLay->addWidget(m_trunk,       7, 1);
 
         auto* breakdownBox = new QGroupBox(p);
         breakdownBox->setProperty("isBreakdownBox", true);
@@ -7689,6 +7701,10 @@ void NewSessionWizard::buildPages()
         auto updateBreakdown = [this, p]() {
             const double h  = m_height->value() / 100.0;
             const double fl = m_foot->value()   / 100.0;
+            const fox::body::Gender g =
+                (m_gender && m_gender->currentIndex() == 1)
+                    ? fox::body::GenderFemale : fox::body::GenderMale;
+            const auto& anthro = fox::body::anthroFor(g);
 
             double armScale = 1.0;
             const double armSpanCm = m_arm ? m_arm->value() : 0.0;
@@ -7719,11 +7735,11 @@ void NewSessionWizard::buildPages()
                                                    : fox::body::trunkLengthM(h);
             struct V { const char* k; double m; };
             V vals[9] = {
-                { "bk_trunk",     0.288 * h               },
-                { "bk_upper_arm", 0.186 * h * armScale    },
-                { "bk_forearm",   0.146 * h * armScale    },
-                { "bk_thigh",     0.245 * h * legScale    },
-                { "bk_shin",      0.246 * h * legScale    },
+                { "bk_trunk",     anthro.trunkRatio    * h            },
+                { "bk_upper_arm", anthro.upperArmRatio * h * armScale },
+                { "bk_forearm",   anthro.forearmRatio  * h * armScale },
+                { "bk_thigh",     anthro.thighRatio    * h * legScale },
+                { "bk_shin",      anthro.shankRatio    * h * legScale },
                 { "bk_foot",      fl                      },
                 { "bk_hip",       hipM * 2.0              },
                 { "bk_shoulder",  shldM * 2.0             },
@@ -7750,6 +7766,8 @@ void NewSessionWizard::buildPages()
                 p, [updateBreakdown](double){ updateBreakdown(); });
         connect(m_trunk,  QOverload<double>::of(&QDoubleSpinBox::valueChanged),
                 p, [updateBreakdown](double){ updateBreakdown(); });
+        connect(m_gender, QOverload<int>::of(&QComboBox::currentIndexChanged),
+                p, [updateBreakdown](int){ updateBreakdown(); });
         updateBreakdown();
 
         m_dimsHint = new QLabel(p);
@@ -8015,6 +8033,11 @@ void NewSessionWizard::retranslate()
         m_gloveText->setText(Lang::t(k));
     }
     if (m_dimsTitle)      m_dimsTitle->setText(Lang::t("dims_title"));
+    if (m_lblGender)      m_lblGender->setText(Lang::t("gender_label") + ":");
+    if (m_gender && m_gender->count() >= 2) {
+        m_gender->setItemText(0, Lang::t("gender_male"));
+        m_gender->setItemText(1, Lang::t("gender_female"));
+    }
     if (m_lblHeight)      m_lblHeight->setText(Lang::t("body_height") + ":");
     if (m_lblFoot)        m_lblFoot->setText(Lang::t("foot_length") + ":");
 
@@ -8167,6 +8190,8 @@ void NewSessionWizard::goNext()
     } else if (m_pageIdx == 2) {
         m_result.heightCm     = m_height->value();
         m_result.footLengthCm = m_foot->value();
+        m_result.gender = (m_gender && m_gender->currentIndex() == 1)
+                              ? fox::body::GenderFemale : fox::body::GenderMale;
 
         m_result.armSpanCm        = m_arm      ? m_arm->value()      : 0.0;
         m_result.legLengthCm      = m_leg      ? m_leg->value()      : 0.0;
