@@ -5331,7 +5331,8 @@ void MocapReceiver::run()
                         I.dbgGyrFused[targetSeg]  = QVector3D(g.axis.x, g.axis.y, g.axis.z);
                     }
                     const float dtF = float(dt);
-                    const float aEma = float(1.0 - std::exp(-double(dtF) / 5.0));
+                    const double tauEma = std::max(0.1, fox::body::kFilter.tauAcc);
+                    const float aEma = float(1.0 - std::exp(-double(dtF) / tauEma));
                     I.segAccErrEma[targetSeg] = (1.0f - aEma) * I.segAccErrEma[targetSeg]
                                               + aEma * st.accelerationError;
                     I.segMagErrEma[targetSeg] = (1.0f - aEma) * I.segMagErrEma[targetSeg]
