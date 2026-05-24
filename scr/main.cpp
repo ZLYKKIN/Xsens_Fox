@@ -517,8 +517,10 @@ public:
                                  fb::kAir[10] * std::min(1.0, std::abs(double(v_world.z())) / 0.5);
 
             const double f_general = fb::kGeneralProb[0] +
-                                     fb::kGeneralProb[1] * 1.0 +
-                                     fb::kGeneralProb[2] * std::max(0.0, lowZ);
+                                     fb::kGeneralProb[1] *
+                                         sigmoid(std::max(0.0, lowZ) /
+                                                 std::max(1e-6, fb::kGeneralProb[2])) +
+                                     fb::kGeneralProb[3] * std::max(0.0, lowZ);
 
             const double f_boost = fb::kBoost[0] * f_acc +
                                    fb::kBoost[1] * f_vel;
