@@ -144,6 +144,7 @@ double scapCEffAxis(double thetaAxisDeg, double cArmLow)
 void applyOneScap(std::array<Quat, fox::body::kSegmentCount>& orient,
                   int shoulderSeg, int upperArmSeg, bool diagIsR)
 {
+    namespace fb = fox::body;
 
     const Quat qT8       = orient[kSEG_T8];
     const Quat qUpperArm = orient[upperArmSeg];

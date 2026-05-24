@@ -463,9 +463,26 @@ struct ContactRow {
     double th1, th2, th3, th4;
 };
 
+inline constexpr int kSEG_Pelvis    = 0;
+inline constexpr int kSEG_L5        = 1;
+inline constexpr int kSEG_L3        = 2;
+inline constexpr int kSEG_T12       = 3;
+inline constexpr int kSEG_T8        = 4;
+inline constexpr int kSEG_Neck      = 5;
+inline constexpr int kSEG_Head      = 6;
+inline constexpr int kSEG_RShoulder = 7;
+inline constexpr int kSEG_RUpperArm = 8;
+inline constexpr int kSEG_RForearm  = 9;
+inline constexpr int kSEG_RHand     = 10;
+inline constexpr int kSEG_LShoulder = 11;
+inline constexpr int kSEG_LUpperArm = 12;
+inline constexpr int kSEG_LForearm  = 13;
+inline constexpr int kSEG_LHand     = 14;
+inline constexpr int kSEG_RUpperLeg = 15;
 inline constexpr int kSEG_RLowerLeg = 16;
 inline constexpr int kSEG_RFoot     = 17;
 inline constexpr int kSEG_RToe      = 18;
+inline constexpr int kSEG_LUpperLeg = 19;
 inline constexpr int kSEG_LLowerLeg = 20;
 inline constexpr int kSEG_LFoot     = 21;
 inline constexpr int kSEG_LToe      = 22;

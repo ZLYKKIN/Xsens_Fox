@@ -273,6 +273,9 @@ void FusionAhrsRestart(FusionAhrs *ahrs) {
 
     ahrs->a_lp = FUSION_VECTOR_ZERO;
     ahrs->a_lp_ready = false;
+    ahrs->a_lin_body  = FUSION_VECTOR_ZERO;
+    ahrs->a_lin_world = FUSION_VECTOR_ZERO;
+    ahrs->a_lin_ready = false;
     ahrs->fAccBoost = 1.0f;
     ahrs->dAccHighTime = 0.0f;
     ahrs->sBg = DegToRad(KFA_GYR_BIAS_MIN_DEG);
@@ -379,6 +382,10 @@ static void UpdateLPAAndDivMon(FusionAhrs *ahrs, FusionVector aSensorMs2, float 
     ahrs->dAcc = sqrtf(resid.axis.x * resid.axis.x +
                        resid.axis.y * resid.axis.y +
                        resid.axis.z * resid.axis.z);
+
+    ahrs->a_lin_body  = resid;
+    ahrs->a_lin_world = RotByQ(ahrs->q, resid);
+    ahrs->a_lin_ready = true;
 
     const float bv = expf(-dt / KFA_VEL_TAU_S);
     const FusionVector aWorld = RotByQ(ahrs->q, aCorr);
@@ -789,17 +796,23 @@ FusionVector FusionAhrsGetGravity(const FusionAhrs *ahrs) {
 
 FusionVector FusionAhrsGetLinearAcceleration(const FusionAhrs *ahrs) {
 
-    const FusionVector g = FusionAhrsGetGravity(ahrs);
+    if (!ahrs->a_lin_ready) return FUSION_VECTOR_ZERO;
     const FusionVector r = {{
-        ahrs->a_lp.axis.x / KFA_GRAVITY_MS2 - g.axis.x,
-        ahrs->a_lp.axis.y / KFA_GRAVITY_MS2 - g.axis.y,
-        ahrs->a_lp.axis.z / KFA_GRAVITY_MS2 - g.axis.z,
+        ahrs->a_lin_body.axis.x / KFA_GRAVITY_MS2,
+        ahrs->a_lin_body.axis.y / KFA_GRAVITY_MS2,
+        ahrs->a_lin_body.axis.z / KFA_GRAVITY_MS2,
     }};
     return r;
 }
 
 FusionVector FusionAhrsGetEarthAcceleration(const FusionAhrs *ahrs) {
-    return RotByQ(ahrs->q, FusionAhrsGetLinearAcceleration(ahrs));
+    if (!ahrs->a_lin_ready) return FUSION_VECTOR_ZERO;
+    const FusionVector r = {{
+        ahrs->a_lin_world.axis.x / KFA_GRAVITY_MS2,
+        ahrs->a_lin_world.axis.y / KFA_GRAVITY_MS2,
+        ahrs->a_lin_world.axis.z / KFA_GRAVITY_MS2,
+    }};
+    return r;
 }
 
 FusionAhrsInternalStates FusionAhrsGetInternalStates(const FusionAhrs *ahrs) {

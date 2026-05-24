@@ -65,14 +65,12 @@ Quat euler_to_quat(double a, double b, double c, const char* seq)
 
 Quat yaw_only_quat(const Quat& q)
 {
-    double w = q.w, z = q.z;
-
+    Quat swing, twist;
+    swingTwistDecompose(q, QVector3D(0.0f, 0.0f, 1.0f), swing, twist);
+    double w = twist.w, z = twist.z;
     if (w < 0.0) { w = -w; z = -z; }
-    const double n2 = w*w + z*z;
-    if (n2 < 1e-12) {
-
-        return Quat(1, 0, 0, 0);
-    }
+    const double n2 = w * w + z * z;
+    if (n2 < 1e-12) return Quat(1, 0, 0, 0);
     const double n = 1.0 / std::sqrt(n2);
     return Quat(w * n, 0.0, 0.0, z * n);
 }

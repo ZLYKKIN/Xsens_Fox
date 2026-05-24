@@ -33,6 +33,10 @@ typedef struct {
     FusionVector a_lp;
     bool         a_lp_ready;
 
+    FusionVector a_lin_body;
+    FusionVector a_lin_world;
+    bool         a_lin_ready;
+
     float fAccBoost;
     float dAccHighTime;
 
