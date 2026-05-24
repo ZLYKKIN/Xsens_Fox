@@ -7840,7 +7840,7 @@ void NewSessionWizard::onCaptureTick()
     }
 
     auto clampBias = [](float v) {
-        const float kMax = 0.2f;
+        const float kMax = float(fox::body::kEstimator.gyrBiasStdMaxDeg);
         return v > kMax ? kMax : (v < -kMax ? -kMax : v);
     };
 
