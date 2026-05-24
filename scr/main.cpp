@@ -4778,31 +4778,44 @@ bool MocapReceiver::connectGloves()
             testLog("[manus] InitCoordSystemVUH rc=" + std::to_string(cRc), I.test);
         }
 
-        int lRc = -1;
-        sehCall([&]() { lRc = lookFor(1, true); });
-        testLog("[manus] CoreSdk_LookForHosts rc=" + std::to_string(lRc), I.test);
+        constexpr int kMaxRetries = 5;
+        int backoffSec = 1;
+        for (int attempt = 0; attempt < kMaxRetries && !coreUp; ++attempt) {
+            int lRc = -1;
+            sehCall([&]() { lRc = lookFor(1, true); });
+            testLog(std::string("[manus] CoreSdk_LookForHosts attempt ")
+                    + std::to_string(attempt + 1) + "/" + std::to_string(kMaxRetries)
+                    + " rc=" + std::to_string(lRc), I.test);
 
-        std::uint32_t hostCount = 0;
-        sehCall([&]() { getNumH(&hostCount); });
-        testLog("[manus] hosts found = " + std::to_string(hostCount), I.test);
+            std::uint32_t hostCount = 0;
+            sehCall([&]() { getNumH(&hostCount); });
+            testLog("[manus] hosts found = " + std::to_string(hostCount), I.test);
 
-        if (hostCount > 0) {
-            std::vector<Host> hosts(hostCount);
-            int hRc = -1;
-            sehCall([&]() { hRc = getHosts(hosts.data(), hostCount); });
-            for (std::uint32_t i = 0; i < hostCount && !coreUp; ++i) {
-                int cRc = -1;
-                sehCall([&]() { cRc = connectH(hosts[i]); });
-                testLog(std::string("[manus] ConnectToHost[")
-                        + std::to_string(i) + "] rc=" + std::to_string(cRc),
-                        I.test);
-                if (cRc != 0) continue;
-                for (int k = 0; k < 10; ++k) {
-                    bool flag = false;
-                    sehCall([&]() { isConn(&flag); });
-                    if (flag) { coreUp = true; break; }
-                    Sleep(100);
+            if (hostCount > 0) {
+                std::vector<Host> hosts(hostCount);
+                int hRc = -1;
+                sehCall([&]() { hRc = getHosts(hosts.data(), hostCount); });
+                for (std::uint32_t i = 0; i < hostCount && !coreUp; ++i) {
+                    int cRc = -1;
+                    sehCall([&]() { cRc = connectH(hosts[i]); });
+                    testLog(std::string("[manus] ConnectToHost[")
+                            + std::to_string(i) + "] rc=" + std::to_string(cRc),
+                            I.test);
+                    if (cRc != 0) continue;
+                    for (int k = 0; k < 10; ++k) {
+                        bool flag = false;
+                        sehCall([&]() { isConn(&flag); });
+                        if (flag) { coreUp = true; break; }
+                        Sleep(100);
+                    }
                 }
+            }
+
+            if (!coreUp && attempt + 1 < kMaxRetries) {
+                testLog(std::string("[manus] retry in ")
+                        + std::to_string(backoffSec) + "s", I.test);
+                Sleep(static_cast<DWORD>(backoffSec * 1000));
+                backoffSec *= 2;
             }
         }
     }
