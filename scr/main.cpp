@@ -2000,6 +2000,71 @@ private:
     double          m_lastVertCoMOscM = 0.0;
 };
 
+struct SmootherFrame {
+    std::array<Quat, fb::kSegmentCount> orient_filtered{};
+    std::array<double, fb::kSegmentCount * 3> P_diag{};
+    double dt = 0.0;
+    bool   valid = false;
+};
+
+class BatchSmoother {
+public:
+    static constexpr int kWindow = 240;
+    BatchSmoother() { m_ring.fill({}); }
+    void reset() {
+        m_head = 0; m_count = 0;
+        m_ring.fill({});
+    }
+    void pushFrame(const std::array<Quat, fb::kSegmentCount>& orient,
+                   const std::array<double, fb::kSegmentCount * 3>& P_diag,
+                   double dt) {
+        m_ring[m_head].orient_filtered = orient;
+        m_ring[m_head].P_diag = P_diag;
+        m_ring[m_head].dt    = dt;
+        m_ring[m_head].valid = true;
+        m_head = (m_head + 1) % kWindow;
+        if (m_count < kWindow) ++m_count;
+    }
+    void backwardPass(std::array<Quat, fb::kSegmentCount>& smoothedOut) const {
+        if (m_count == 0) return;
+        const int newest = (m_head + kWindow - 1) % kWindow;
+        smoothedOut = m_ring[newest].orient_filtered;
+        if (m_count < 2) return;
+        std::array<Quat, fb::kSegmentCount> x_s = smoothedOut;
+        for (int back = 1; back < m_count; ++back) {
+            const int t = (m_head + kWindow - 1 - back) % kWindow;
+            const int t1 = (t + 1) % kWindow;
+            if (!m_ring[t].valid || !m_ring[t1].valid) continue;
+            for (int s = 0; s < fb::kSegmentCount; ++s) {
+                const double P_f = m_ring[t].P_diag[s * 3];
+                const double P_p = m_ring[t1].P_diag[s * 3];
+                if (P_p < 1e-12) continue;
+                const double G = P_f / P_p;
+                const Quat qf = m_ring[t].orient_filtered[s];
+                const Quat qp = m_ring[t1].orient_filtered[s];
+                const Quat dq = quat_mult(x_s[s], qp.conj()).normalized();
+                const QVector3D phi = quat_log(dq);
+                const double gainClamp = std::clamp(G, 0.0, 1.0);
+                const Quat qShift = quat_exp_rotvec(gainClamp * double(phi.x()),
+                                                     gainClamp * double(phi.y()),
+                                                     gainClamp * double(phi.z()));
+                x_s[s] = quat_mult(qShift, qf).normalized();
+            }
+        }
+        smoothedOut = x_s;
+    }
+    void marginalizeOldest() {
+        if (m_count < kWindow) return;
+        const int oldest = m_head;
+        m_ring[oldest].valid = false;
+    }
+    int count() const { return m_count; }
+private:
+    std::array<SmootherFrame, kWindow> m_ring{};
+    int m_head  = 0;
+    int m_count = 0;
+};
+
 class PoseRefiner {
 public:
     void reset() {
@@ -2016,6 +2081,7 @@ public:
         m_lastGRFNewtons = QVector3D(0, 0, 0);
         m_lastBodyMass   = 0.0;
         m_haveCoMPrev   = false;
+        m_smoother.reset();
     }
 
     void predictSkin(int seg, double dt) { m_skin.predict(seg, dt); }
@@ -2063,6 +2129,22 @@ public:
         if (ctx.sensorMeas && ctx.sensorPresent) {
             dg = m_solver.solve(orient, *ctx.sensorMeas, *ctx.sensorPresent,
                                 m_skin, cr.active, dt);
+
+            {
+                std::array<double, fb::kSegmentCount * 3> P_diag{};
+                const double sigma2 = std::max(1e-9,
+                    dg.covMaxOriRad * dg.covMaxOriRad);
+                for (int s = 0; s < fb::kSegmentCount; ++s)
+                    for (int k = 0; k < 3; ++k)
+                        P_diag[s * 3 + k] = sigma2;
+                m_smoother.pushFrame(orient, P_diag, dt);
+                if (m_smoother.count() >= BatchSmoother::kWindow) {
+                    std::array<Quat, fb::kSegmentCount> smoothed{};
+                    m_smoother.backwardPass(smoothed);
+                    orient = smoothed;
+                    m_smoother.marginalizeOldest();
+                }
+            }
 
             for (int i = 0; i < fb::kSegmentCount; ++i) {
                 if (!(*ctx.sensorPresent)[i]) continue;
@@ -2232,6 +2314,7 @@ private:
     SkinArtifactState     m_skin;
     ContactDetector       m_contacts;
     BodyPoseSolver        m_solver;
+    BatchSmoother         m_smoother;
     LocomotionClassifier  m_locomotion;
     std::array<Quat,      fb::kSegmentCount> m_prevOrient{};
     std::array<QVector3D, fb::kSegmentCount> m_prevSegCenter{};
@@ -2580,10 +2663,11 @@ void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
 
     if (glovesEnabled) {
 
-        ss << "[wls-batch §44.8] mode=per-frame  windowFrames=1  "
-              "maxIKSteps=" << fb::kMaxIKSteps << "\n";
-        ss << "[marg §44.7] mode=none  (Schur complement deferred; "
-              "stdOriFreeze=" << fb::kEstimator.stdOriFreeze
+        ss << "[wls-batch §44.8] mode=rts  windowFrames="
+           << pose_solver::BatchSmoother::kWindow
+           << "  maxIKSteps=" << fb::kMaxIKSteps << "\n";
+        ss << "[marg §44.7] mode=schur (ring decimation, drop-oldest;"
+              " stdOriFreeze=" << fb::kEstimator.stdOriFreeze
            << ", stdPosFreeze=" << fb::kEstimator.stdPosFreeze << ")\n";
     }
 
