@@ -2751,7 +2751,14 @@ SkeletonXsens::computeKeypoints(const std::array<Quat, kXsensSegmentCount>& raw,
         g_renderDiag.spineW_L5  = dg.spineFracL5;
         g_renderDiag.spineW_L3  = dg.spineFracL3;
         g_renderDiag.spineW_T12 = dg.spineFracT12;
-        g_renderDiag.neckW      = 0.5;
+        {
+            const double cNeck = 0.5 * (fox::body::kCSpine[5] +
+                                        fox::body::kCSpine[6]);
+            const double cHead = 0.5 * (fox::body::kCSpine[7] +
+                                        fox::body::kCSpine[8]);
+            const double sumNH = cNeck + cHead;
+            g_renderDiag.neckW = (sumNH > 1e-9) ? (cNeck / sumNH) : 0.5;
+        }
         g_renderDiag.scapUpZR   = std::sin(dg.scapThetaRDeg * M_PI / 180.0);
         g_renderDiag.scapUpZL   = std::sin(dg.scapThetaLDeg * M_PI / 180.0);
         g_renderDiag.scapActiveR= dg.scapThetaRDeg > 0.0;
