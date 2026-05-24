@@ -2709,6 +2709,39 @@ void SkeletonXsens::buildDefaultAngles()
     }
 }
 
+std::array<double, 5> SkeletonXsens::defaultLimbCm(fox::body::Gender gender, double heightCm)
+{
+    namespace fb = fox::body;
+    auto specLen = [](int seg) {
+        return double(fb::kSensorToBone[seg].L_bone.length());
+    };
+    const double h = heightCm / 100.0;
+    const double heightScale = (h > 1e-3) ? (h / fb::kRefHeightM) : 1.0;
+    const auto&  anthro = fb::anthroFor(gender);
+
+    const double refArmOneSide =
+        specLen(fb::kSEG_RShoulder)     + specLen(fb::kSEG_RShoulder + 1) +
+        specLen(fb::kSEG_RShoulder + 2) + specLen(fb::kSEG_RShoulder + 3);
+    const double refSpanM = 2.0 * refArmOneSide + 2.0 * 0.08;
+    const double anthroArmSpanM =
+        2.0 * (anthro.upperArmRatio + anthro.forearmRatio + anthro.handRatio) * h;
+    const double armScale = (refSpanM > 1e-6) ? anthroArmSpanM / refSpanM : heightScale;
+
+    const double refLegM = specLen(fb::kSEG_RUpperLeg) + specLen(fb::kSEG_RLowerLeg)
+                         + fb::ankleHeightM(fb::kRefHeightM);
+    const double anthroLegM =
+        (anthro.thighRatio + anthro.shankRatio + anthro.ankleHeightRatio) * h;
+    const double legScale = (refLegM > 1e-6) ? anthroLegM / refLegM : heightScale;
+
+    return {{
+        specLen(fb::kSEG_RShoulder + 1) * armScale * 100.0,
+        specLen(fb::kSEG_RShoulder + 2) * armScale * 100.0,
+        specLen(fb::kSEG_RShoulder + 3) * armScale * 100.0,
+        specLen(fb::kSEG_RUpperLeg)     * legScale * 100.0,
+        specLen(fb::kSEG_RLowerLeg)     * legScale * 100.0,
+    }};
+}
+
 void SkeletonXsens::buildLengths(const ActorConfig& actor)
 {
 
@@ -2855,6 +2888,24 @@ void SkeletonXsens::buildLengths(const ActorConfig& actor)
         localFor(23, 19, legScale),  localFor(24, 20, legScale),
         localFor(25, 21, footScaleR), localFor(26, 22, toeScaleR),
     }};
+
+    // Per-bone length overrides ("all bones" mode): a positive actor field pins that
+    // bone's length; 0 leaves the default arm/leg scaling above untouched. Fed the
+    // defaultLimbCm() value it reproduces the default exactly (no regression). Both
+    // m_len and m_localOffset are patched so FK keypoints stay consistent.
+    auto overrideBone = [&](int arrayIdx, int origSeg, double cm) {
+        if (cm <= 0.0) return;
+        const double spec = specLen(origSeg);
+        if (spec < 1e-9) return;
+        const double sc = (cm / 100.0) / spec;
+        m_len[arrayIdx] = float(cm / 100.0);
+        m_localOffset[arrayIdx] = localFor(arrayIdx, origSeg, sc);
+    };
+    overrideBone(9,  8,  actor.upperArmCm); overrideBone(14, 12, actor.upperArmCm);
+    overrideBone(10, 9,  actor.forearmCm);  overrideBone(15, 13, actor.forearmCm);
+    overrideBone(11, 10, actor.handCm);     overrideBone(16, 14, actor.handCm);
+    overrideBone(18, 15, actor.thighCm);    overrideBone(23, 19, actor.thighCm);
+    overrideBone(19, 16, actor.shankCm);    overrideBone(24, 20, actor.shankCm);
 
     if (fox::pose_solver::g_testFlag().load(std::memory_order_relaxed) &&
         fox::pose_solver::g_glovesFlag().load(std::memory_order_relaxed)) {
