@@ -44,6 +44,34 @@ inline constexpr std::array<double, kSegmentCount> kMassRatio = {
      0.3906,
 };
 
+inline constexpr std::array<double, kSegmentCount> kWinterProxToComRatio = {
+    0.500,
+    0.500,
+    0.500,
+    0.500,
+    0.500,
+    0.500,
+    0.500,
+    0.000,
+    0.436,
+    0.430,
+    0.506,
+    0.000,
+    0.436,
+    0.430,
+    0.506,
+    0.433,
+    0.433,
+    0.500,
+    0.500,
+    0.433,
+    0.433,
+    0.500,
+    0.500,
+};
+
+inline constexpr double kDefaultBodyMassKg = 70.0;
+
 inline constexpr std::array<QVector3D, kSegmentCount> kBoneVec = {{
     { -0.011f, 0.0f,   0.097f },
     {  0.0f,   0.0f,   0.108f },
@@ -1450,7 +1478,8 @@ inline double trunkLengthM(double subjectHeightM) {
 }
 
 inline QVector3D centerOfMass(const std::array<QVector3D, kSegmentCount>& segCenters,
-                              double* M = nullptr) {
+                              double* M = nullptr,
+                              double bodyMassKg = kDefaultBodyMassKg) {
     double sx = 0.0, sy = 0.0, sz = 0.0, sm = 0.0;
     for (int i = 0; i < kSegmentCount; ++i) {
         const double m = kMassRatio[i];
@@ -1459,7 +1488,10 @@ inline QVector3D centerOfMass(const std::array<QVector3D, kSegmentCount>& segCen
         sz += m * double(segCenters[i].z());
         sm += m;
     }
-    if (M) *M = sm;
+    if (M) {
+        const double total100 = totalMassRatio();
+        *M = (total100 > 1e-9) ? (bodyMassKg * (sm / total100)) : 0.0;
+    }
     if (sm <= 0.0) return QVector3D(0, 0, 0);
     const double inv = 1.0 / sm;
     return QVector3D(float(sx * inv), float(sy * inv), float(sz * inv));
