@@ -3503,7 +3503,17 @@ const char* connStatusName(ConnStatus s)
 static double monotonicSec()
 {
     using clk = std::chrono::steady_clock;
-    return std::chrono::duration<double>(clk::now().time_since_epoch()).count();
+    static std::atomic<double> sLastT{0.0};
+    const double now =
+        std::chrono::duration<double>(clk::now().time_since_epoch()).count();
+    constexpr double kEps = 1e-6;
+    double last = sLastT.load(std::memory_order_relaxed);
+    double t    = (now > last + kEps) ? now : (last + kEps);
+    while (!sLastT.compare_exchange_weak(last, t,
+                                         std::memory_order_relaxed)) {
+        t = (now > last + kEps) ? now : (last + kEps);
+    }
+    return t;
 }
 
 static int segmentFromLocationId(int loc)
