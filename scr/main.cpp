@@ -5779,7 +5779,7 @@ void MocapReceiver::run()
                 I.haveLastStf[targetSeg] = true;
             }
             constexpr double kRadToDeg = 57.29577951308232;
-            constexpr double kMs2ToG   = 1.0 / 9.80665;
+            constexpr double kMs2ToG   = 1.0 / fox::body::constants::kGravityMs2;
             QVector3D accForFilter, gyrForFilter;
             bool fuseReady = false;
             if (haveVelInc && haveDq) {
