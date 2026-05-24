@@ -2,7 +2,6 @@
 #include "main.h"
 #include "foxwire.h"
 #include "foxbody.h"
-#include "foxcoupling.h"
 #include "foxergo.h"
 
 #include <onnxruntime_cxx_api.h>
@@ -484,7 +483,7 @@ public:
             const QVector3D p_xy  (p_world.x(),    p_world.y(),    0.0f);
             const double dCom = (cop_xy - p_xy).length();
             const double f_com = fb::kCom[1] + (fb::kCom[4] - fb::kCom[1]) *
-                                 sigmoid((dCom - fb::kCom[1]) /
+                                 sigmoid((dCom - fb::kCom[3]) /
                                          std::max(1e-6, fb::kCom[2]));
 
             const double lowZ        = std::max(0.0,
@@ -990,8 +989,7 @@ public:
                 const QVector3D phiK = quat_log(quat_mult(o[lowerSeg],
                                                           o[upperSeg].conj()).normalized());
                 const double thKnee = std::abs(double(phiK.y()));
-                const double thScrew = (fb::kCKnees[0] +
-                                         fb::kCKnees[2] * (1.0 - std::cos(thKnee))) *
+                const double thScrew = fb::kCKnees[1] * (1.0 - std::cos(thKnee)) *
                                         fb::kKneeScrewMaxDeg *
                                         fb::constants::kDeg2Rad;
                 const double signed_screw = isRight ? thScrew : -thScrew;
@@ -1464,8 +1462,7 @@ public:
                 const QVector3D phiK = quat_log(quat_mult(orient[lowerSeg],
                                                           orient[upperSeg].conj()).normalized());
                 const double thKnee = std::abs(double(phiK.y()));
-                const double thScrew = (fb::kCKnees[0] +
-                                         fb::kCKnees[2] * (1.0 - std::cos(thKnee))) *
+                const double thScrew = fb::kCKnees[1] * (1.0 - std::cos(thKnee)) *
                                         fb::kKneeScrewMaxDeg *
                                         fb::constants::kDeg2Rad;
                 const double signedScrew = isRight ? thScrew : -thScrew;
@@ -1491,7 +1488,7 @@ public:
                         (k == 0 ? r.x() : k == 1 ? r.y() : r.z());
                 }
                 const double thKneeSlope =
-                    fb::kCKnees[2] * std::sin(thKnee) *
+                    fb::kCKnees[1] * std::sin(thKnee) *
                     fb::kKneeScrewMaxDeg * fb::constants::kDeg2Rad;
                 const double w_couple = w_lax * thKneeSlope;
                 JtWJ(rowL + 2, rowU + 1) -= w_couple;
@@ -1629,7 +1626,9 @@ public:
                 Eigen::LDLT<Eigen::MatrixXd> ldlt(JtWJ_damped);
                 if (ldlt.info() != Eigen::Success) {
 
-                    break;
+                    m_lambda = std::min(kLambdaMax, m_lambda * 10.0);
+                    ++d.rejectedSteps;
+                    continue;
                 }
                 Eigen::VectorXd dx = ldlt.solve(-JtWr);
 
@@ -2036,18 +2035,19 @@ public:
             const int t1 = (t + 1) % kWindow;
             if (!m_ring[t].valid || !m_ring[t1].valid) continue;
             for (int s = 0; s < fb::kSegmentCount; ++s) {
-                const double P_f = m_ring[t].P_diag[s * 3];
-                const double P_p = m_ring[t1].P_diag[s * 3];
-                if (P_p < 1e-12) continue;
-                const double G = P_f / P_p;
                 const Quat qf = m_ring[t].orient_filtered[s];
                 const Quat qp = m_ring[t1].orient_filtered[s];
                 const Quat dq = quat_mult(x_s[s], qp.conj()).normalized();
                 const QVector3D phi = quat_log(dq);
-                const double gainClamp = std::clamp(G, 0.0, 1.0);
-                const Quat qShift = quat_exp_rotvec(gainClamp * double(phi.x()),
-                                                     gainClamp * double(phi.y()),
-                                                     gainClamp * double(phi.z()));
+                double g[3];
+                for (int k = 0; k < 3; ++k) {
+                    const double P_f = m_ring[t].P_diag[s * 3 + k];
+                    const double P_p = m_ring[t1].P_diag[s * 3 + k];
+                    g[k] = (P_p > 1e-12) ? std::clamp(P_f / P_p, 0.0, 1.0) : 0.0;
+                }
+                const Quat qShift = quat_exp_rotvec(g[0] * double(phi.x()),
+                                                     g[1] * double(phi.y()),
+                                                     g[2] * double(phi.z()));
                 x_s[s] = quat_mult(qShift, qf).normalized();
             }
         }
@@ -2405,14 +2405,10 @@ void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
                       << " (anti-pelvic-tilt on hip flexion)\n";
             std::cout << "[bio §46.1] c_arms=[" << fb::kCArms[0]
                       << " (X), " << fb::kCArms[1] << " (Y), "
-                      << fb::kCArms[2] << " (max), "
-                      << fb::kCArms[3] << ", " << fb::kCArms[4]
-                      << ", " << fb::kCArms[5]
-                      << "]  scapulo-humeral piecewise-linear\n";
+                      << fb::kCArms[2] << " (max)]"
+                      << "  scapulo-humeral piecewise-linear\n";
             std::cout << "[bio §47.1] c_knees=[" << fb::kCKnees[0]
-                      << ", " << fb::kCKnees[1]
-                      << ", " << fb::kCKnees[2]
-                      << ", " << fb::kCKnees[3] << "]"
+                      << ", " << fb::kCKnees[1] << "]"
                       << "  screw-home max " << fb::kKneeScrewMaxDeg << "°\n";
             std::cout << "[bio §48.1] c_ankles=[" << fb::kCAnkles[0]
                       << ", " << fb::kCAnkles[1] << " (=" << (fb::kCAnkles[1]
@@ -5786,7 +5782,7 @@ void MocapReceiver::run()
                 I.haveLastStf[targetSeg] = true;
             }
             constexpr double kRadToDeg = 57.29577951308232;
-            constexpr double kMs2ToG   = 1.0 / 9.80665;
+            constexpr double kMs2ToG   = 1.0 / fox::body::constants::kGravityMs2;
             QVector3D accForFilter, gyrForFilter;
             bool fuseReady = false;
             if (haveVelInc && haveDq) {
@@ -5941,7 +5937,7 @@ void MocapReceiver::run()
                             fox::body::chipNoiseFor(chipForSeg(targetSeg));
                         FusionAhrsSetNoise(&ahrs, nz.sigmaAccMs2,
                                                    nz.sigmaGyrDegS,
-                                                   -1.0f);
+                                                   nz.sigmaMagNorm);
                     }
                     I.fusionReady[targetSeg] = true;
                 }
@@ -11259,7 +11255,7 @@ static void hdQuatSmooth(std::vector<RecordedFrame>& fr,
 static void hdRootLowpass(std::vector<RecordedFrame>& fr, int fps)
 {
     if (fr.size() < 4) return;
-    const double fc = 5.0;
+    const double fc = 10.0;
     const double fs = std::max(30.0, double(fps));
     const double c = std::tan(M_PI * fc / fs);
     const double c2 = c * c;
@@ -11424,9 +11420,9 @@ static void hdJointLimits(std::vector<RecordedFrame>& fr, const SkeletonXsens& s
                           const std::function<void(double)>& cb = {})
 {
     const int N = int(fr.size());
-    const double kneeSwing  = 175.0 * M_PI / 180.0;
+    const double kneeSwing  = 135.0 * M_PI / 180.0;
     const double kneeTwist  =  40.0 * M_PI / 180.0;
-    const double elbowSwing = 175.0 * M_PI / 180.0;
+    const double elbowSwing = 150.0 * M_PI / 180.0;
     const double elbowTwist = M_PI;
     for (int i = 0; i < N; ++i) {
         if (cb && (i & 0x0FFF) == 0) cb(double(i) / double(N));
@@ -12219,9 +12215,9 @@ void MainWindow::onRenderTick()
     s_haveOut[SEG_Neck] = s_haveOut[SEG_RToe] = s_haveOut[SEG_LToe] = true;
 
     if (m_skel) {
-        const double kneeSwing  = 178.0 * M_PI / 180.0;
+        const double kneeSwing  = 135.0 * M_PI / 180.0;
         const double kneeTwist  =  45.0 * M_PI / 180.0;
-        const double elbowSwing = 178.0 * M_PI / 180.0;
+        const double elbowSwing = 150.0 * M_PI / 180.0;
         projectHingeLimit(q, SEG_RUpperLeg, SEG_RLowerLeg, *m_skel, kneeSwing,  kneeTwist);
         projectHingeLimit(q, SEG_LUpperLeg, SEG_LLowerLeg, *m_skel, kneeSwing,  kneeTwist);
         projectHingeLimit(q, SEG_RUpperArm, SEG_RForearm,  *m_skel, elbowSwing, M_PI);

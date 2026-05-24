@@ -50,17 +50,17 @@ inline constexpr AnthroProportions kAnthroMale = {
 
 inline constexpr AnthroProportions kAnthroFemale = {
     .trunkRatio          = 0.292,
-    .thighRatio          = 0.245,
-    .shankRatio          = 0.246,
-    .handRatio           = 0.108,
-    .forearmRatio        = 0.146,
-    .upperArmRatio       = 0.186,
+    .thighRatio          = 0.250,
+    .shankRatio          = 0.241,
+    .handRatio           = 0.106,
+    .forearmRatio        = 0.144,
+    .upperArmRatio       = 0.182,
     .shoulderWidthRatio  = 0.222,
     .hipWidthRatio       = 0.184,
     .hipHeightRatio      = 0.505,
     .kneeHeightRatio     = 0.290,
     .ankleHeightRatio    = 0.039,
-    .footRatio           = 0.144,
+    .footRatio           = 0.149,
 };
 
 inline constexpr AnthroProportions kAnthroLegacy = {
@@ -107,29 +107,29 @@ enum class ConfigurationLabel : std::uint8_t {
 inline constexpr int kConfigurationLabelCount = 13;
 
 inline constexpr std::array<double, kSegmentCount> kMassRatio = {
-    11.7188,
-     7.8125,
-     6.8359,
-     5.8594,
-     5.8594,
-     1.9531,
-     5.8594,
-     1.9531,
-     2.9297,
-     1.5625,
-     0.5859,
-     1.9531,
-     2.9297,
-     1.5625,
-     0.5859,
-    14.1602,
-     4.3945,
-     1.0742,
-     0.3906,
-    14.1602,
-     4.3945,
-     1.0742,
-     0.3906,
+    11.7,
+     7.8,
+     6.8,
+     5.9,
+     5.9,
+     2.0,
+     5.9,
+     2.0,
+     2.9,
+     1.6,
+     0.6,
+     2.0,
+     2.9,
+     1.6,
+     0.6,
+    14.2,
+     4.4,
+     1.1,
+     0.4,
+    14.2,
+     4.4,
+     1.1,
+     0.4,
 };
 
 inline constexpr std::array<double, kSegmentCount> kWinterProxToComRatio = {
@@ -140,11 +140,11 @@ inline constexpr std::array<double, kSegmentCount> kWinterProxToComRatio = {
     0.500,
     0.500,
     0.500,
-    0.000,
+    0.500,
     0.436,
     0.430,
     0.506,
-    0.000,
+    0.500,
     0.436,
     0.430,
     0.506,
@@ -159,32 +159,6 @@ inline constexpr std::array<double, kSegmentCount> kWinterProxToComRatio = {
 };
 
 inline constexpr double kDefaultBodyMassKg = 70.0;
-
-inline constexpr std::array<QVector3D, kSegmentCount> kBoneVec = {{
-    { -0.011f, 0.0f,   0.097f },
-    {  0.0f,   0.0f,   0.108f },
-    {  0.0f,   0.0f,   0.099f },
-    {  0.0f,   0.0f,   0.098f },
-    {  0.0f,   0.0f,   0.138f },
-    {  0.0f,   0.0f,   0.092f },
-    {  0.0f,   0.0f,   0.170f },
-    {  0.0f,  -0.140f, 0.0f   },
-    {  0.0f,  -0.300f, 0.0f   },
-    {  0.0f,  -0.245f, 0.0f   },
-    {  0.0f,  -0.183f, 0.0f   },
-    {  0.0f,   0.140f, 0.0f   },
-    {  0.0f,   0.300f, 0.0f   },
-    {  0.0f,   0.245f, 0.0f   },
-    {  0.0f,   0.183f, 0.0f   },
-    {  0.0f,   0.0f,  -0.4165f},
-    {  0.0f,   0.0f,  -0.4063f},
-    {  0.147f, 0.0f,  -0.065f },
-    {  0.064f, 0.0f,  -0.015f },
-    {  0.0f,   0.0f,  -0.4165f},
-    {  0.0f,   0.0f,  -0.4063f},
-    {  0.147f, 0.0f,  -0.065f },
-    {  0.064f, 0.0f,  -0.015f },
-}};
 
 struct SensorToBone {
     Quat       q_bs;
@@ -461,17 +435,16 @@ inline constexpr double kCFemoropelvic = 0.12;
 
 inline constexpr std::array<double, 3> kCPelvis = { 0.35, 25.0, 0.30 };
 
-inline constexpr std::array<double, 6> kCArms =
-    { 0.95, 0.95, 0.99, 0.20, 0.15, 0.05 };
+inline constexpr std::array<double, 3> kCArms = { 0.95, 0.95, 0.99 };
 
 inline constexpr std::array<double, 3> kCLegs  = { 0.5, 0.3, 0.15 };
 
-inline constexpr std::array<double, 4> kCKnees = { 0.05, 0.1, 0.95, 1.0 };
+inline constexpr std::array<double, 2> kCKnees = { 0.9, 0.95 };
 
 inline constexpr std::array<double, 4> kCAnkles = { 2.0, 0.523599, 0.5, 0.0 };
 
 inline constexpr std::array<double, 6> kCToes =
-    { 0.1, 1.05, 0.5, 0.785, 0.1, 0.0872 };
+    { 0.2, 1.05, -0.5, 1.0, 0.1, 0.0872 };
 
 inline constexpr std::array<double, 3> kALumpA_sub   = { 1.000, 1.000, 1.000  };
 inline constexpr std::array<double, 3> kALumpA_jump1 = { 0.900, 0.900, 0.900  };
@@ -681,7 +654,7 @@ inline constexpr ContactParams kContact = {
 inline constexpr int kFingerSensorsPerHand = 17;
 inline constexpr int kFingerSegmentsPerHand = 20;
 
-inline constexpr std::array<int, 5> kFingerBoneCount = { 3, 3, 4, 4, 3 };
+inline constexpr std::array<int, 5> kFingerBoneCount = { 3, 4, 4, 4, 4 };
 
 
 
@@ -899,6 +872,7 @@ inline float magNoiseScaleForChip(ImuChipType c) {
 struct ImuChipNoise {
     float sigmaAccMs2;
     float sigmaGyrDegS;
+    float sigmaMagNorm;
     float dynRangeAccMs2;
     float dynRangeGyrDegS;
     float gainErrorAcc;
@@ -907,6 +881,7 @@ struct ImuChipNoise {
 inline constexpr ImuChipNoise kImuChipNoiseW2 = {
     .sigmaAccMs2     = 0.0232f,
     .sigmaGyrDegS    = 0.20f,
+    .sigmaMagNorm    = 0.028f,
     .dynRangeAccMs2  = 157.0f,
     .dynRangeGyrDegS = 2000.0f,
     .gainErrorAcc    = 0.004f,
@@ -915,6 +890,7 @@ inline constexpr ImuChipNoise kImuChipNoiseW2 = {
 inline constexpr ImuChipNoise kImuChipNoiseX2 = {
     .sigmaAccMs2     = 0.0232f,
     .sigmaGyrDegS    = 0.20f,
+    .sigmaMagNorm    = 0.028f,
     .dynRangeAccMs2  = 157.0f,
     .dynRangeGyrDegS = 2000.0f,
     .gainErrorAcc    = 0.004f,
@@ -923,6 +899,7 @@ inline constexpr ImuChipNoise kImuChipNoiseX2 = {
 inline constexpr ImuChipNoise kImuChipNoiseX3 = {
     .sigmaAccMs2     = 0.00899f,
     .sigmaGyrDegS    = 0.075f,
+    .sigmaMagNorm    = 0.2215f,
     .dynRangeAccMs2  = 157.0f,
     .dynRangeGyrDegS = 2000.0f,
     .gainErrorAcc    = 0.004f,
@@ -1079,7 +1056,7 @@ inline constexpr double kScapHumThetaHighDeg = 90.0;
 
 inline constexpr double kKneeScrewMaxDeg     = 15.0;
 
-inline constexpr double kAnkleDorsiLimitRad  = 0.349066;
+inline constexpr double kAnkleDorsiLimitRad  = 0.785398;
 
 inline constexpr double kToeRockerLowRad     = 5.0  * 0.017453292519943295;
 inline constexpr double kToeRockerHighRad    = 30.0 * 0.017453292519943295;

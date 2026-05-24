@@ -118,8 +118,6 @@ add_executable(fox_mocap WIN32
     scr/foxbody.h
     scr/foxergo.cpp
     scr/foxergo.h
-    scr/foxcoupling.cpp
-    scr/foxcoupling.h
     scr/foxwire.cpp
     scr/foxwire.h
     scr/resources.qrc
