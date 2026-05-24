@@ -160,32 +160,6 @@ inline constexpr std::array<double, kSegmentCount> kWinterProxToComRatio = {
 
 inline constexpr double kDefaultBodyMassKg = 70.0;
 
-inline constexpr std::array<QVector3D, kSegmentCount> kBoneVec = {{
-    { -0.011f, 0.0f,   0.097f },
-    {  0.0f,   0.0f,   0.108f },
-    {  0.0f,   0.0f,   0.099f },
-    {  0.0f,   0.0f,   0.098f },
-    {  0.0f,   0.0f,   0.138f },
-    {  0.0f,   0.0f,   0.092f },
-    {  0.0f,   0.0f,   0.170f },
-    {  0.0f,  -0.140f, 0.0f   },
-    {  0.0f,  -0.300f, 0.0f   },
-    {  0.0f,  -0.245f, 0.0f   },
-    {  0.0f,  -0.183f, 0.0f   },
-    {  0.0f,   0.140f, 0.0f   },
-    {  0.0f,   0.300f, 0.0f   },
-    {  0.0f,   0.245f, 0.0f   },
-    {  0.0f,   0.183f, 0.0f   },
-    {  0.0f,   0.0f,  -0.4165f},
-    {  0.0f,   0.0f,  -0.4063f},
-    {  0.147f, 0.0f,  -0.065f },
-    {  0.064f, 0.0f,  -0.015f },
-    {  0.0f,   0.0f,  -0.4165f},
-    {  0.0f,   0.0f,  -0.4063f},
-    {  0.147f, 0.0f,  -0.065f },
-    {  0.064f, 0.0f,  -0.015f },
-}};
-
 struct SensorToBone {
     Quat       q_bs;
     QVector3D  r_bs;
