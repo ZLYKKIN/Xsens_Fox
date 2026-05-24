@@ -1978,6 +1978,31 @@ public:
                 }
                 m_skin.predictPos(i, dt, accMag);
             }
+
+            // §50.5 / §50.6 — for every active contact with high probability
+            // the spec says the contact point should be ZUPT-clamped to the
+            // floor.  Any remaining vertical drift between the FK-derived
+            // contact-point Z and the floor estimate is interpreted as
+            // soft-tissue play: feed it into the per-segment GM position
+            // state via updatePos() so the rendered chain absorbs the slow
+            // drift rather than fighting it every frame.  Only contacts
+            // with probability > 0.5 contribute (avoids pumping noise from
+            // swing-phase candidates that briefly cross the floor plane).
+            int updatedSegs = 0;
+            for (const auto& ac : cr.active) {
+                if (ac.probability < 0.5) continue;
+                if (ac.seg < 0 || ac.seg >= fb::kSegmentCount) continue;
+                const double dz = ctx.floorLevelZ - double(ac.p_world.z());
+                if (std::abs(dz) < 1e-5) continue;
+                // R_pos = stdHeightMeas² (m²) — same weight the WLS row
+                // uses for the floor-z constraint.
+                const double sdH = fb::stdHeightMeasFor(ac.seg);
+                const double R_pos = sdH * sdH + 1e-9;
+                m_skin.updatePos(ac.seg,
+                                 QVector3D(0.0f, 0.0f, float(dz)), R_pos);
+                ++updatedSegs;
+            }
+            m_lastSkinPosUpdates = updatedSegs;
         }
 
         // §29.2 — drive the locomotion-phase classifier off the contact
@@ -2024,6 +2049,7 @@ public:
     const SkinArtifactState&    skin()     const { return m_skin; }
     const ContactDetector&      contacts() const { return m_contacts; }
     const LocomotionClassifier& locomotion() const { return m_locomotion; }
+    int                         lastSkinPosUpdates() const { return m_lastSkinPosUpdates; }
 
 private:
     SkinArtifactState     m_skin;
@@ -2034,6 +2060,9 @@ private:
     std::array<QVector3D, fb::kSegmentCount> m_prevSegCenter{};
     bool   m_havePrev = false;
     double m_lastT    = 0.0;
+    // §50.5 — number of segments that received an updatePos() call this
+    // frame (driven by the active contact set).  Visible in -test -gloves.
+    int    m_lastSkinPosUpdates = 0;
 };
 
 // Process-wide refiner instance shared between the network thread (skin
@@ -2324,6 +2353,9 @@ void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
             }
         }
         if (!any) ss << " (all <0.5 mm)";
+        // §50.5 — number of segments whose position skin-state was updated
+        // this frame by ZUPT residuals (active contacts with high prob).
+        ss << "  updatedSegs=" << pose_solver::g_refiner().lastSkinPosUpdates();
         ss << "\n";
     }
 
