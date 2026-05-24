@@ -2370,43 +2370,7 @@ void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
 
 void SkeletonXsens::buildDefaultAngles()
 {
-
-    const double P = M_PI;
-
-    auto E = [](double x, double y, double z) {
-        return euler_to_quat(x, y, z, "XYZ");
-    };
-
-    if (m_pose == "tpose") {
-        m_defAng = {
-            E(0, -P/2, 0), E(0, -P/2, 0), E(0, -P/2, 0), E(0, -P/2, 0),
-            E(0, -P/2, 0), E(0, -P/2, 0), E(0, -P/2, 0),
-
-            E(0, 0, -P/2), E(0, 0, -P/2), E(0, 0, -P/2), E(0, 0, -P/2),
-
-            E(0, 0,  P/2), E(0, 0,  P/2), E(0, 0,  P/2), E(0, 0,  P/2),
-
-            E(0,  P/2, 0), E(0,  P/2, 0), E(0, 0, 0),     E(0, 0, 0),
-
-            E(0,  P/2, 0), E(0,  P/2, 0), E(0, 0, 0),     E(0, 0, 0),
-        };
-    } else {
-
-        m_defAng = {
-            E(0, -P/2, 0), E(0, -P/2, 0), E(0, -P/2, 0), E(0, -P/2, 0),
-            E(0, -P/2, 0), E(0, -P/2, 0), E(0, -P/2, 0),
-
-            E(0,    0, -P/2),
-            E( P/2, 0, -P/2), E( P/2, 0, -P/2), E( P/2, 0, -P/2),
-
-            E(0,    0,  P/2),
-            E(-P/2, 0,  P/2), E(-P/2, 0,  P/2), E(-P/2, 0,  P/2),
-
-            E(0,  P/2, 0), E(0,  P/2, 0), E(0, 0, 0), E(0, 0, 0),
-
-            E(0,  P/2, 0), E(0,  P/2, 0), E(0, 0, 0), E(0, 0, 0),
-        };
-    }
+    m_defAng = defaultSegAnglesFor(m_pose);
 
     if (fox::pose_solver::g_testFlag().load(std::memory_order_relaxed) &&
         fox::pose_solver::g_glovesFlag().load(std::memory_order_relaxed)) {
