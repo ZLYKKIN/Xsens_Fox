@@ -400,7 +400,8 @@ inline constexpr std::array<double, 4> kCKnees = { 0.05, 0.1, 0.95, 1.0 };
 
 inline constexpr std::array<double, 4> kCAnkles = { 2.0, 0.523599, 0.5, 0.0 };
 
-inline constexpr std::array<double, 6> kCToes = { 0.2, 1.05, -0.5, 1.0, 0.1, 0.0872 };
+inline constexpr std::array<double, 6> kCToes =
+    { 0.1, 1.05, 0.5, 0.785, 0.1, 0.0872 };
 
 inline constexpr std::array<double, 3> kALumpA_sub   = { 1.000, 1.000, 1.000  };
 inline constexpr std::array<double, 3> kALumpA_jump1 = { 0.900, 0.900, 0.900  };
