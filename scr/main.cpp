@@ -11931,7 +11931,8 @@ void MainWindow::onRenderTick()
                 for (int i = 0; i < fox::body::kSegmentCount && i < kXsensSegmentCount; ++i) {
                     QVector3D origin = pts[i];
                     QVector3D end    = (i + 1 < kXsensKeypointCount) ? pts[i + 1] : pts[i];
-                    segCenters[i] = (origin + end) * 0.5f;
+                    const double ratio = fox::body::kWinterProxToComRatio[i];
+                    segCenters[i] = origin + (end - origin) * float(ratio);
                 }
                 double M = 0.0;
                 const QVector3D com = fox::body::centerOfMass(segCenters, &M);
