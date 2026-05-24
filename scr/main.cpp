@@ -10674,12 +10674,16 @@ exportBakedOffsetsCm(const SkeletonXsens& skel)
     return off;
 }
 
-static QVector3D exportEndSiteOffsetCm(int j, const SkeletonXsens& skel)
+static QVector3D exportEndSiteOffsetCm(int j, const SkeletonXsens& skel,
+                                       double heightMeters)
 {
     const int seg = kBoneToSeg[j];
     if (seg < 0 || seg >= kXsensSegmentCount) return QVector3D(0, 0, 0);
     const QVector3D Lspec = fox::body::kSensorToBone[seg].L_bone;
-    const QVector3D localTipNwu = vec_rotate(Lspec, skel.defAngFor(seg).inv());
+    const double scale = (heightMeters > 1e-3)
+                       ? (heightMeters / fox::body::kRefHeightM) : 1.0;
+    const QVector3D Lscaled = Lspec * float(scale);
+    const QVector3D localTipNwu = vec_rotate(Lscaled, skel.defAngFor(seg).inv());
     return localTipNwu * 100.0f;
 }
 
@@ -10738,7 +10742,7 @@ static bool writeBvh(const QString& path,
             if (int(kBvh[j].parent) == idx) emitBone(int(j), indent + 1);
         }
         if (childCount[idx] == 0) {
-            const QVector3D end = exportEndSiteOffsetCm(idx, skel);
+            const QVector3D end = exportEndSiteOffsetCm(idx, skel, heightMeters);
             os << pad(indent+1) << "End Site\n";
             os << pad(indent+1) << "{\n";
             os << pad(indent+2) << "OFFSET "
