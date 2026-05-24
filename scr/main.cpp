@@ -850,6 +850,9 @@ public:
         double     toeMtpLDeg          = 0.0;
         double     toeWeightR          = 0.0;  // w_toe in {0..1} (heel→ball)
         double     toeWeightL          = 0.0;
+        // §18.5 / §61 — Takahashi-derived orientation uncertainty.
+        double     covMaxOriRad        = 0.0;  // largest per-segment σ_ori (rad)
+        int        covMaxOriSeg        = -1;   // which segment carries it
     };
 
     // Adaptive Levenberg-Marquardt damping bounds.  The lower bound matches
@@ -1800,6 +1803,54 @@ public:
             ? (initialResidSum / double(initialResidN)) : 0.0;
         d.poseQualityBand = fb::poseQualityFromResidual(d.residualMeanPostRad);
         d.lambda          = m_lambda;
+
+        // Spec §18.5 / §61 — Takahashi-style diagonal of the covariance
+        // Σ = (JᵀWJ + λI)⁻¹.  For dense LDLT we compute it via N solves
+        // against the identity columns: Σ_ii = (LDLᵀ)⁻¹ e_i · e_i.  At
+        // N = 69 (23 segments × 3 DOF) this is sub-millisecond and far
+        // cheaper than the full inverse, while still exposing the per-
+        // segment uncertainty the spec uses for poseQuality and the
+        // [wls] cov_max diag line.
+        {
+            Eigen::MatrixXd A = JtWJ;
+            for (int k = 0; k < DOF; ++k) A(k, k) += m_lambda;
+            Eigen::LDLT<Eigen::MatrixXd> ldlt(A);
+            if (ldlt.info() == Eigen::Success) {
+                // Per-segment σ_ori² = trace of the 3×3 block for that segment.
+                double maxCov = 0.0;
+                int    maxSeg = -1;
+                Eigen::VectorXd ei = Eigen::VectorXd::Zero(DOF);
+                for (int i = 0; i < N; ++i) {
+                    double segCov = 0.0;
+                    for (int k = 0; k < 3; ++k) {
+                        ei.setZero();
+                        ei[i * 3 + k] = 1.0;
+                        Eigen::VectorXd sigCol = ldlt.solve(ei);
+                        segCov += sigCol[i * 3 + k];  // Σ_jj on the diagonal
+                    }
+                    // segCov = sum of 3 variance terms → mean σ²-per-axis.
+                    const double sigmaRad = std::sqrt(std::max(0.0, segCov / 3.0));
+                    if (sigmaRad > maxCov) { maxCov = sigmaRad; maxSeg = i; }
+                }
+                d.covMaxOriRad = maxCov;
+                d.covMaxOriSeg = maxSeg;
+                // Refine poseQualityBand by combining residual + Takahashi
+                // σ.  The residual-based band is the spec §44.12 fallback;
+                // when σ is meaningful (< 1 rad, i.e. solver converged) we
+                // use the tighter of the two thresholds so a quiet residual
+                // with high uncertainty correctly reads "poor" rather than
+                // "excellent".
+                if (maxCov > 0.0 && maxCov < 1.0) {
+                    const int sigmaBand =
+                        (maxCov < 0.005) ? fb::PoseQualityExcellent :
+                        (maxCov < 0.02 ) ? fb::PoseQualityGood      :
+                        (maxCov < 0.05 ) ? fb::PoseQualityAdequate  :
+                        (maxCov < 0.1  ) ? fb::PoseQualityPoor      :
+                                            fb::PoseQualityInvalid;
+                    d.poseQualityBand = std::min(d.poseQualityBand, sigmaBand);
+                }
+            }
+        }
         return d;
     }
 
@@ -2389,6 +2440,9 @@ void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
        << "  lambda=" << std::scientific << std::setprecision(2) << d.lambda
        << std::fixed << std::setprecision(4)
        << "  rej=" << d.rejectedSteps
+       << "  σ_ori_max=" << std::setprecision(3) << (d.covMaxOriRad * 180.0 / M_PI) << "°"
+       << "  σ_seg=" << d.covMaxOriSeg
+       << std::setprecision(4)
        << "  poseQ=" << d.poseQualityBand
        << " (" << (d.poseQualityBand == fb::PoseQualityExcellent ? "excellent"
                   : d.poseQualityBand == fb::PoseQualityGood      ? "good"
