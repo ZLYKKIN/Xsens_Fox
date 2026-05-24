@@ -11255,7 +11255,7 @@ static void hdQuatSmooth(std::vector<RecordedFrame>& fr,
 static void hdRootLowpass(std::vector<RecordedFrame>& fr, int fps)
 {
     if (fr.size() < 4) return;
-    const double fc = 5.0;
+    const double fc = 10.0;
     const double fs = std::max(30.0, double(fps));
     const double c = std::tan(M_PI * fc / fs);
     const double c2 = c * c;
