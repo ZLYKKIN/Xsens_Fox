@@ -2299,6 +2299,38 @@ void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
                       << "  C₂=" << fox::kSolverC2
                       << "  (C₂−C₁)=" << (fox::kSolverC2 - fox::kSolverC1)
                       << "  (rational direction helper)\n";
+            // Spec §91/§92 — 19-joint hand model with per-joint anatomical
+            // type and ROM.  The glove pipeline today drives a simplified
+            // 5×4 chain; this dump documents the full spec model so the
+            // operator can audit which joint receives which clamp.
+            std::cout << "[finger-fk §91] 19-joint hand model (per joint: "
+                      "type, flex range, abd range):\n";
+            for (int j = 0; j < int(fb::kFingerRom.size()); ++j) {
+                const auto& r = fb::kFingerRom[j];
+                std::cout << "[finger-fk §91]  j=" << std::setw(2) << j
+                          << "  " << std::left << std::setw(10) << r.label
+                          << std::right
+                          << "  " << std::left << std::setw(18)
+                          << fb::fingerJointTypeName(fb::kFingerJointTypes[j])
+                          << std::right
+                          << "  flex=[" << std::setw(6) << std::fixed
+                          << std::setprecision(1) << r.flxMin << "°,"
+                          << std::setw(6) << r.flxMax << "°]"
+                          << "  abd=[" << std::setw(6) << r.abdMin << "°,"
+                          << std::setw(6) << r.abdMax << "°]"
+                          << "\n";
+            }
+            // Spec §92.1 — Carpus geometry (palm length 0.027 m, fingertip
+            // spread ±0.0274 m).  Left hand mirrors Y.
+            std::cout << "[finger-fk §92.1] Right Carpus 6 anchor points "
+                      "(m, hand-local):\n";
+            for (const auto& cp : fb::kRightCarpusPoints) {
+                std::cout << "[finger-fk §92.1]  " << std::left << std::setw(14)
+                          << cp.label << std::right << "  ("
+                          << std::setw(7) << std::fixed << std::setprecision(4)
+                          << cp.x << "," << std::setw(8) << cp.y << ","
+                          << std::setw(8) << cp.z << ")\n";
+            }
             std::cout << std::setprecision(4);
             std::cout.flush();
         }

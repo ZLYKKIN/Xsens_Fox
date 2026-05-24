@@ -1276,6 +1276,79 @@ inline constexpr std::array<FingerRom, 19> kFingerRom = {{
     /* 18 reserved / fillers */ { "RSV",       -5.0,   5.0,    0.0,   0.0,    0.0,  0.0 },
 }};
 
+// §92 — Carpus segment geometry: 6 anchor points (origin + 5 CMC joints)
+// in the hand's local frame.  Palm length 0.027 m, finger spread ±0.0274 m.
+// Right hand uses negative Y for the CMC offsets, left hand mirrors (+Y).
+struct CarpusPoint {
+    const char* label;   // anatomical CMC name
+    double      x, y, z; // m, local frame, right-hand version
+};
+inline constexpr std::array<CarpusPoint, 6> kRightCarpusPoints = {{
+    { "wrist origin", 0.0000,  0.0000,  0.0 },
+    { "Thumb CMC",    0.0270, -0.0274,  0.0 },
+    { "Index CMC",    0.0270, -0.0137,  0.0 },
+    { "Middle CMC",   0.0270,  0.0000,  0.0 },
+    { "Ring CMC",     0.0270,  0.0137,  0.0 },
+    { "Little CMC",   0.0270,  0.0274,  0.0 },
+}};
+
+// §91 — joint-type tag for each of the 19 finger joints.  Matches the
+// kFingerRom[] index order so the diagnostic dump can label every joint
+// with its anatomical character (saddle = 3 DOF, hinge = 1-2 DOF,
+// carpal/opposition/spread = auxiliary single-DOF).  No runtime branching
+// — the tag is purely descriptive; the WLS coupling uses kFingerRom for
+// the ROM clamp regardless of joint type.
+enum class FingerJointType : std::uint8_t {
+    SaddleCMC,    // 3-DOF saddle (thumb base)
+    HingeCMC,     // limited 1-DOF (fingers 2-5 base, near-rigid)
+    HingeMCP2DOF, // 2-DOF (flexion + spread) for finger MCPs
+    HingeMCP1DOF, // 1-DOF (flexion only) for thumb MCP
+    HingePIP,     // 1-DOF pure flexion
+    HingeDIP,     // 1-DOF pure flexion
+    HingeIP,      // 1-DOF (thumb IP, equivalent to combined PIP/DIP)
+    Carpal,       // wrist rotation
+    Opposition,   // thumb opposition
+    Spread,       // generic finger spread
+    Reserved,
+};
+inline constexpr std::array<FingerJointType, 19> kFingerJointTypes = {{
+    FingerJointType::SaddleCMC,    // 0 thumb CMC
+    FingerJointType::HingeMCP1DOF, // 1 thumb MCP
+    FingerJointType::HingeIP,      // 2 thumb IP
+    FingerJointType::HingeMCP2DOF, // 3 index MCP
+    FingerJointType::HingePIP,     // 4 index PIP
+    FingerJointType::HingeDIP,     // 5 index DIP
+    FingerJointType::HingeMCP2DOF, // 6 middle MCP
+    FingerJointType::HingePIP,     // 7 middle PIP
+    FingerJointType::HingeDIP,     // 8 middle DIP
+    FingerJointType::HingeMCP2DOF, // 9 ring MCP
+    FingerJointType::HingePIP,     // 10 ring PIP
+    FingerJointType::HingeDIP,     // 11 ring DIP
+    FingerJointType::HingeMCP2DOF, // 12 little MCP
+    FingerJointType::HingePIP,     // 13 little PIP
+    FingerJointType::HingeDIP,     // 14 little DIP
+    FingerJointType::Carpal,       // 15 carpus rotate
+    FingerJointType::Opposition,   // 16 thumb opposition
+    FingerJointType::Spread,       // 17 generic spread
+    FingerJointType::Reserved,     // 18 reserved
+}};
+inline const char* fingerJointTypeName(FingerJointType t) {
+    switch (t) {
+        case FingerJointType::SaddleCMC:    return "saddle-CMC-3DOF";
+        case FingerJointType::HingeCMC:     return "hinge-CMC-1DOF";
+        case FingerJointType::HingeMCP2DOF: return "hinge-MCP-2DOF";
+        case FingerJointType::HingeMCP1DOF: return "hinge-MCP-1DOF";
+        case FingerJointType::HingePIP:     return "hinge-PIP-1DOF";
+        case FingerJointType::HingeDIP:     return "hinge-DIP-1DOF";
+        case FingerJointType::HingeIP:      return "hinge-IP-1DOF";
+        case FingerJointType::Carpal:       return "carpal";
+        case FingerJointType::Opposition:   return "opposition";
+        case FingerJointType::Spread:       return "spread";
+        case FingerJointType::Reserved:     return "reserved";
+    }
+    return "?";
+}
+
 // §44.12 — pose-quality residual bands (mean |r| across active rows).
 inline constexpr std::array<double, 5> kPoseQualityResidBands = {
     0.005, 0.02, 0.05, 0.1, 1.0      // <0.005 excellent, ..., >0.1 invalid
