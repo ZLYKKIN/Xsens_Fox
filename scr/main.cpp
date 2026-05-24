@@ -6491,6 +6491,11 @@ static const Tr kTr[] = {
     {"foot_length",        "Длина стопы",                       "Foot length"},
     {"body_arm_span",      "Размах",                            "Arm span"},
     {"body_leg_length",    "Длина ноги",                        "Leg length"},
+    {"body_upper_arm",     "Плечо",                             "Upper arm"},
+    {"body_forearm",       "Предплечье",                        "Forearm"},
+    {"body_hand",          "Кисть",                             "Hand"},
+    {"body_thigh",         "Бедро",                             "Thigh"},
+    {"body_shank",         "Голень",                            "Shank"},
     {"body_panel_label",   "Размеры (см)",                      "Body sizes (cm)"},
     {"body_panel_sub",     "0 = расчёт по росту",               "0 = derived from height"},
     {"dims_primary",       "Основные размеры",                  "Primary dimensions"},
@@ -7596,10 +7601,16 @@ void NewSessionWizard::buildPages()
         m_foot   = new QDoubleSpinBox(p);
         configSpin(m_foot,    26.0,  15.0,  35.0, 0.5);
 
-        m_arm = new QDoubleSpinBox(p);
-        configSpin(m_arm,      0.0,   0.0, 250.0, 0.5);
-        m_leg = new QDoubleSpinBox(p);
-        configSpin(m_leg,      0.0,   0.0, 130.0, 0.5);
+        m_upperArm = new QDoubleSpinBox(p);
+        configSpin(m_upperArm, 0.0,   0.0,  70.0, 0.5);
+        m_forearm  = new QDoubleSpinBox(p);
+        configSpin(m_forearm,  0.0,   0.0,  60.0, 0.5);
+        m_hand     = new QDoubleSpinBox(p);
+        configSpin(m_hand,     0.0,   0.0,  35.0, 0.5);
+        m_thigh    = new QDoubleSpinBox(p);
+        configSpin(m_thigh,    0.0,   0.0,  90.0, 0.5);
+        m_shank    = new QDoubleSpinBox(p);
+        configSpin(m_shank,    0.0,   0.0,  85.0, 0.5);
 
         m_hip      = new QDoubleSpinBox(p);
         configSpin(m_hip,      0.0,   0.0,  60.0, 0.5);
@@ -7625,26 +7636,26 @@ void NewSessionWizard::buildPages()
             }
         };
         static SelAllFilter s_selAll;
-        for (auto* s : { m_height, m_foot, m_arm, m_leg,
-                         m_hip, m_shoulder, m_trunk }) {
+        for (auto* s : { m_height, m_foot, m_upperArm, m_forearm, m_hand,
+                         m_thigh, m_shank, m_hip, m_shoulder, m_trunk }) {
             if (auto* le = s->findChild<QLineEdit*>())
                 le->installEventFilter(&s_selAll);
         }
 
         m_lblHeight   = new QLabel(p);
         m_lblFoot     = new QLabel(p);
-        m_lblArm      = new QLabel(p);
-        m_lblLeg      = new QLabel(p);
+        m_lblUpperArm = new QLabel(p);
+        m_lblForearm  = new QLabel(p);
+        m_lblHand     = new QLabel(p);
+        m_lblThigh    = new QLabel(p);
+        m_lblShank    = new QLabel(p);
         m_lblHip      = new QLabel(p);
         m_lblShoulder = new QLabel(p);
         m_lblTrunk    = new QLabel(p);
-        m_lblHeight  ->setStyleSheet("font-weight:600;");
-        m_lblFoot    ->setStyleSheet("font-weight:600;");
-        m_lblArm     ->setStyleSheet("font-weight:600;");
-        m_lblLeg     ->setStyleSheet("font-weight:600;");
-        m_lblHip     ->setStyleSheet("font-weight:600;");
-        m_lblShoulder->setStyleSheet("font-weight:600;");
-        m_lblTrunk   ->setStyleSheet("font-weight:600;");
+        for (auto* lb : { m_lblHeight, m_lblFoot, m_lblUpperArm, m_lblForearm,
+                          m_lblHand, m_lblThigh, m_lblShank, m_lblHip,
+                          m_lblShoulder, m_lblTrunk })
+            lb->setStyleSheet("font-weight:600;");
 
         auto* primaryBox = new QGroupBox(p);
         primaryBox->setProperty("isPrimaryDims", true);
@@ -7652,23 +7663,29 @@ void NewSessionWizard::buildPages()
         primaryLay->setContentsMargins(24, 20, 24, 20);
         primaryLay->setHorizontalSpacing(32);
         primaryLay->setVerticalSpacing(10);
-        primaryLay->addWidget(m_lblGender, 0, 0, Qt::AlignRight | Qt::AlignVCenter);
-        primaryLay->addWidget(m_gender,    0, 1);
-        primaryLay->addWidget(m_lblHeight, 1, 0, Qt::AlignRight | Qt::AlignVCenter);
-        primaryLay->addWidget(m_height,    1, 1);
-        primaryLay->addWidget(m_lblFoot,   2, 0, Qt::AlignRight | Qt::AlignVCenter);
-        primaryLay->addWidget(m_foot,      2, 1);
-        primaryLay->addWidget(m_lblArm,    3, 0, Qt::AlignRight | Qt::AlignVCenter);
-        primaryLay->addWidget(m_arm,       3, 1);
-        primaryLay->addWidget(m_lblLeg,    4, 0, Qt::AlignRight | Qt::AlignVCenter);
-        primaryLay->addWidget(m_leg,       4, 1);
+        primaryLay->addWidget(m_lblGender,   0, 0, Qt::AlignRight | Qt::AlignVCenter);
+        primaryLay->addWidget(m_gender,      0, 1);
+        primaryLay->addWidget(m_lblHeight,   1, 0, Qt::AlignRight | Qt::AlignVCenter);
+        primaryLay->addWidget(m_height,      1, 1);
+        primaryLay->addWidget(m_lblFoot,     2, 0, Qt::AlignRight | Qt::AlignVCenter);
+        primaryLay->addWidget(m_foot,        2, 1);
+        primaryLay->addWidget(m_lblUpperArm, 3, 0, Qt::AlignRight | Qt::AlignVCenter);
+        primaryLay->addWidget(m_upperArm,    3, 1);
+        primaryLay->addWidget(m_lblForearm,  4, 0, Qt::AlignRight | Qt::AlignVCenter);
+        primaryLay->addWidget(m_forearm,     4, 1);
+        primaryLay->addWidget(m_lblHand,     5, 0, Qt::AlignRight | Qt::AlignVCenter);
+        primaryLay->addWidget(m_hand,        5, 1);
+        primaryLay->addWidget(m_lblThigh,    6, 0, Qt::AlignRight | Qt::AlignVCenter);
+        primaryLay->addWidget(m_thigh,       6, 1);
+        primaryLay->addWidget(m_lblShank,    7, 0, Qt::AlignRight | Qt::AlignVCenter);
+        primaryLay->addWidget(m_shank,       7, 1);
 
-        primaryLay->addWidget(m_lblHip,      5, 0, Qt::AlignRight | Qt::AlignVCenter);
-        primaryLay->addWidget(m_hip,         5, 1);
-        primaryLay->addWidget(m_lblShoulder, 6, 0, Qt::AlignRight | Qt::AlignVCenter);
-        primaryLay->addWidget(m_shoulder,    6, 1);
-        primaryLay->addWidget(m_lblTrunk,    7, 0, Qt::AlignRight | Qt::AlignVCenter);
-        primaryLay->addWidget(m_trunk,       7, 1);
+        primaryLay->addWidget(m_lblHip,      8, 0, Qt::AlignRight | Qt::AlignVCenter);
+        primaryLay->addWidget(m_hip,         8, 1);
+        primaryLay->addWidget(m_lblShoulder, 9, 0, Qt::AlignRight | Qt::AlignVCenter);
+        primaryLay->addWidget(m_shoulder,    9, 1);
+        primaryLay->addWidget(m_lblTrunk,    10, 0, Qt::AlignRight | Qt::AlignVCenter);
+        primaryLay->addWidget(m_trunk,       10, 1);
 
         auto* breakdownBox = new QGroupBox(p);
         breakdownBox->setProperty("isBreakdownBox", true);
@@ -7706,23 +7723,9 @@ void NewSessionWizard::buildPages()
                     ? fox::body::GenderFemale : fox::body::GenderMale;
             const auto& anthro = fox::body::anthroFor(g);
 
-            double armScale = 1.0;
-            const double armSpanCm = m_arm ? m_arm->value() : 0.0;
-            if (armSpanCm > 0.0) {
-                const double bodyWidthM = 0.30 * (h / 1.75);
-                const double armPerSideM = std::max(0.10,
-                    (armSpanCm / 100.0 - bodyWidthM) * 0.5);
-                const double defArmM = 0.44 * h;
-                armScale = (defArmM > 1e-6) ? (armPerSideM / defArmM) : 1.0;
-            }
-            double legScale = 1.0;
-            const double legCm = m_leg ? m_leg->value() : 0.0;
-            if (legCm > 0.0) {
-                const double legPerSideM = std::max(0.20, legCm / 100.0);
-                const double defLegM = 0.491 * h;
-                legScale = (defLegM > 1e-6) ? (legPerSideM / defLegM) : 1.0;
-            }
-
+            auto effM = [](QDoubleSpinBox* sb) {
+                return (sb && sb->value() > 0.0) ? sb->value() / 100.0 : 0.0;
+            };
             const double trunkScale = h / 1.75;
             const double hipCm = m_hip ? m_hip->value() : 0.0;
             const double hipM   = (hipCm > 0.0) ? std::max(0.05, hipCm / 200.0)
@@ -7735,11 +7738,11 @@ void NewSessionWizard::buildPages()
                                                    : fox::body::trunkLengthM(h);
             struct V { const char* k; double m; };
             V vals[9] = {
-                { "bk_trunk",     anthro.trunkRatio    * h            },
-                { "bk_upper_arm", anthro.upperArmRatio * h * armScale },
-                { "bk_forearm",   anthro.forearmRatio  * h * armScale },
-                { "bk_thigh",     anthro.thighRatio    * h * legScale },
-                { "bk_shin",      anthro.shankRatio    * h * legScale },
+                { "bk_trunk",     anthro.trunkRatio * h   },
+                { "bk_upper_arm", effM(m_upperArm)        },
+                { "bk_forearm",   effM(m_forearm)         },
+                { "bk_thigh",     effM(m_thigh)           },
+                { "bk_shin",      effM(m_shank)           },
                 { "bk_foot",      fl                      },
                 { "bk_hip",       hipM * 2.0              },
                 { "bk_shoulder",  shldM * 2.0             },
@@ -7752,23 +7755,36 @@ void NewSessionWizard::buildPages()
                     if (k == v.k) lab->setText(QString::number(v.m * 100.0, 'f', 1) + " cm");
             }
         };
+        // Pre-fills the per-bone fields with the selected gender's height-scaled
+        // defaults (same numbers buildLengths uses). Reset on gender or height
+        // change per the "reset to gender defaults" UX; signals blocked so this
+        // does not recurse through the per-bone valueChanged handlers.
+        auto fillLimbDefaults = [this, updateBreakdown]() {
+            const fox::body::Gender g =
+                (m_gender && m_gender->currentIndex() == 1)
+                    ? fox::body::GenderFemale : fox::body::GenderMale;
+            const double hcm = m_height ? m_height->value() : 175.0;
+            const auto d = SkeletonXsens::defaultLimbCm(g, hcm);
+            QDoubleSpinBox* fld[5] = { m_upperArm, m_forearm, m_hand, m_thigh, m_shank };
+            for (int i = 0; i < 5; ++i) {
+                if (!fld[i]) continue;
+                fld[i]->blockSignals(true);
+                fld[i]->setValue(d[static_cast<std::size_t>(i)]);
+                fld[i]->blockSignals(false);
+            }
+            updateBreakdown();
+        };
         connect(m_height, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
-                p, [updateBreakdown](double){ updateBreakdown(); });
+                p, [fillLimbDefaults](double){ fillLimbDefaults(); });
         connect(m_foot,   QOverload<double>::of(&QDoubleSpinBox::valueChanged),
                 p, [updateBreakdown](double){ updateBreakdown(); });
-        connect(m_arm,    QOverload<double>::of(&QDoubleSpinBox::valueChanged),
-                p, [updateBreakdown](double){ updateBreakdown(); });
-        connect(m_leg,    QOverload<double>::of(&QDoubleSpinBox::valueChanged),
-                p, [updateBreakdown](double){ updateBreakdown(); });
-        connect(m_hip,    QOverload<double>::of(&QDoubleSpinBox::valueChanged),
-                p, [updateBreakdown](double){ updateBreakdown(); });
-        connect(m_shoulder, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
-                p, [updateBreakdown](double){ updateBreakdown(); });
-        connect(m_trunk,  QOverload<double>::of(&QDoubleSpinBox::valueChanged),
-                p, [updateBreakdown](double){ updateBreakdown(); });
+        for (auto* sb : { m_upperArm, m_forearm, m_hand, m_thigh, m_shank,
+                          m_hip, m_shoulder, m_trunk })
+            connect(sb, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+                    p, [updateBreakdown](double){ updateBreakdown(); });
         connect(m_gender, QOverload<int>::of(&QComboBox::currentIndexChanged),
-                p, [updateBreakdown](int){ updateBreakdown(); });
-        updateBreakdown();
+                p, [fillLimbDefaults](int){ fillLimbDefaults(); });
+        fillLimbDefaults();
 
         m_dimsHint = new QLabel(p);
         m_dimsHint->setObjectName("subtle");
@@ -8041,8 +8057,11 @@ void NewSessionWizard::retranslate()
     if (m_lblHeight)      m_lblHeight->setText(Lang::t("body_height") + ":");
     if (m_lblFoot)        m_lblFoot->setText(Lang::t("foot_length") + ":");
 
-    if (m_lblArm)         m_lblArm->setText(Lang::t("body_arm_span") + ":");
-    if (m_lblLeg)         m_lblLeg->setText(Lang::t("body_leg_length") + ":");
+    if (m_lblUpperArm)    m_lblUpperArm->setText(Lang::t("body_upper_arm") + ":");
+    if (m_lblForearm)     m_lblForearm->setText(Lang::t("body_forearm") + ":");
+    if (m_lblHand)        m_lblHand->setText(Lang::t("body_hand") + ":");
+    if (m_lblThigh)       m_lblThigh->setText(Lang::t("body_thigh") + ":");
+    if (m_lblShank)       m_lblShank->setText(Lang::t("body_shank") + ":");
 
     if (m_lblHip)         m_lblHip->setText(Lang::t("body_hip_width") + ":");
     if (m_lblShoulder)    m_lblShoulder->setText(Lang::t("body_shoulder_width") + ":");
@@ -8193,8 +8212,15 @@ void NewSessionWizard::goNext()
         m_result.gender = (m_gender && m_gender->currentIndex() == 1)
                               ? fox::body::GenderFemale : fox::body::GenderMale;
 
-        m_result.armSpanCm        = m_arm      ? m_arm->value()      : 0.0;
-        m_result.legLengthCm      = m_leg      ? m_leg->value()      : 0.0;
+        // Per-bone lengths drive the skeleton directly; the aggregate arm/leg
+        // span inputs are superseded, so leave them at 0 (auto).
+        m_result.armSpanCm        = 0.0;
+        m_result.legLengthCm      = 0.0;
+        m_result.upperArmCm       = m_upperArm ? m_upperArm->value() : 0.0;
+        m_result.forearmCm        = m_forearm  ? m_forearm->value()  : 0.0;
+        m_result.handCm           = m_hand     ? m_hand->value()     : 0.0;
+        m_result.thighCm          = m_thigh    ? m_thigh->value()    : 0.0;
+        m_result.shankCm          = m_shank    ? m_shank->value()    : 0.0;
 
         m_result.hipWidthCm       = m_hip      ? m_hip->value()      : 0.0;
         m_result.shoulderWidthCm  = m_shoulder ? m_shoulder->value() : 0.0;

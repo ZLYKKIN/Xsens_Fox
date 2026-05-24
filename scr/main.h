@@ -704,16 +704,12 @@ private:
     class QLabel*          m_dimsTitle = nullptr;
     class QLabel*          m_lblHeight = nullptr;
     class QLabel*          m_lblFoot   = nullptr;
-    class QLabel*          m_lblArm    = nullptr;
-    class QLabel*          m_lblLeg    = nullptr;
 
     class QLabel*          m_lblHip    = nullptr;
     class QLabel*          m_lblShoulder = nullptr;
     class QLabel*          m_lblTrunk  = nullptr;
     class QDoubleSpinBox*  m_height = nullptr;
     class QDoubleSpinBox*  m_foot   = nullptr;
-    class QDoubleSpinBox*  m_arm    = nullptr;
-    class QDoubleSpinBox*  m_leg    = nullptr;
     class QDoubleSpinBox*  m_hip      = nullptr;
     class QDoubleSpinBox*  m_shoulder = nullptr;
     class QDoubleSpinBox*  m_trunk    = nullptr;
