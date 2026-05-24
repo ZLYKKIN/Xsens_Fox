@@ -7528,11 +7528,13 @@ void NewSessionWizard::onCalibrationBegin()
         m_gyrAccumT[i]    = QVector3D(0, 0, 0);
         m_magAccumT[i]    = QVector3D(0, 0, 0);
         m_accMagAccumT[i] = 0.0;
+        m_magMagAccumT[i] = 0.0;
         m_accumCountT[i]  = 0;
         m_accAccumN[i]    = QVector3D(0, 0, 0);
         m_gyrAccumN[i]    = QVector3D(0, 0, 0);
         m_magAccumN[i]    = QVector3D(0, 0, 0);
         m_accMagAccumN[i] = 0.0;
+        m_magMagAccumN[i] = 0.0;
         m_accumCountN[i]  = 0;
         m_gyrSqAccumT[i]  = QVector3D(0, 0, 0);
         m_gyrSqAccumN[i]  = QVector3D(0, 0, 0);
@@ -7563,6 +7565,7 @@ void NewSessionWizard::onCalibrationBegin()
     m_gyrAccum    = &m_gyrAccumT;
     m_magAccum    = &m_magAccumT;
     m_accMagAccum = &m_accMagAccumT;
+    m_magMagAccum = &m_magMagAccumT;
     m_accumCount  = &m_accumCountT;
     m_gyrSqAccum    = &m_gyrSqAccumT;
     m_magOuterAccum = &m_magOuterAccumT;
@@ -7673,6 +7676,9 @@ void NewSessionWizard::onCaptureTick()
             (*m_gyrAccum)[i]    += fr.gyrSensor[i];
             (*m_magAccum)[i]    += fr.magSensor[i];
             (*m_accMagAccum)[i] += fr.accSensor[i].length();
+            if (m_magMagAccum) {
+                (*m_magMagAccum)[i] += fr.magSensor[i].length();
+            }
             (*m_accumCount)[i]++;
             if (m_gyrSqAccum) {
                 (*m_gyrSqAccum)[i] += QVector3D(g.x()*g.x(), g.y()*g.y(), g.z()*g.z());
@@ -7775,6 +7781,7 @@ void NewSessionWizard::onCaptureTick()
         m_gyrAccum      = &m_gyrAccumN;
         m_magAccum      = &m_magAccumN;
         m_accMagAccum   = &m_accMagAccumN;
+        m_magMagAccum   = &m_magMagAccumN;
         m_accumCount    = &m_accumCountN;
         m_gyrSqAccum    = &m_gyrSqAccumN;
         m_magOuterAccum = &m_magOuterAccumN;
@@ -7907,9 +7914,7 @@ void NewSessionWizard::onCaptureTick()
             const int    cTot   = cT + cN;
             const double invTot = 1.0 / double(cTot);
             accMagn[i] = (m_accMagAccumT[i] + m_accMagAccumN[i]) * invTot;
-            const QVector3D meanM_all = (m_magAccumT[i] + m_magAccumN[i])
-                                        * float(invTot);
-            magMagn[i] = double(meanM_all.length());
+            magMagn[i] = (m_magMagAccumT[i] + m_magMagAccumN[i]) * invTot;
             const QVector3D meanG_all = (m_gyrAccumT[i] + m_gyrAccumN[i])
                                         * float(invTot);
             gyrBias[i] = QVector3D(clampBias(meanG_all.x()),

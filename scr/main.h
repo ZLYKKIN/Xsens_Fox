@@ -729,6 +729,7 @@ private:
     std::array<QVector3D, kXsensSegmentCount> m_gyrAccumT{};
     std::array<QVector3D, kXsensSegmentCount> m_magAccumT{};
     std::array<double,    kXsensSegmentCount> m_accMagAccumT{};
+    std::array<double,    kXsensSegmentCount> m_magMagAccumT{};
     std::array<int,       kXsensSegmentCount> m_accumCountT{};
 
     std::array<double, 20> m_fingerAccumR{};
@@ -739,6 +740,7 @@ private:
     std::array<QVector3D, kXsensSegmentCount> m_gyrAccumN{};
     std::array<QVector3D, kXsensSegmentCount> m_magAccumN{};
     std::array<double,    kXsensSegmentCount> m_accMagAccumN{};
+    std::array<double,    kXsensSegmentCount> m_magMagAccumN{};
     std::array<int,       kXsensSegmentCount> m_accumCountN{};
 
     std::array<QVector3D, kXsensSegmentCount> m_gyrSqAccumT{};
@@ -753,6 +755,7 @@ private:
     std::array<QVector3D, kXsensSegmentCount>* m_gyrAccum    = nullptr;
     std::array<QVector3D, kXsensSegmentCount>* m_magAccum    = nullptr;
     std::array<double,    kXsensSegmentCount>* m_accMagAccum = nullptr;
+    std::array<double,    kXsensSegmentCount>* m_magMagAccum = nullptr;
     std::array<int,       kXsensSegmentCount>* m_accumCount  = nullptr;
 
     class QLabel* m_calibQuality = nullptr;
