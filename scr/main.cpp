@@ -4161,18 +4161,7 @@ static void parseErgoHand(const float* degs20, bool isLeft,
     dg.baselineApplied = (effectivePtr == effective);
     for (int i = 0; i < 20; ++i) { dg.raw[i] = degs20[i]; dg.effective[i] = effectivePtr[i]; }
 
-    constexpr double kThumbCmcRadialDeg     = 40.0;
-    constexpr double kThumbCmcOppositionDeg = 15.0;
-
-    static constexpr bool kEnableLeftThumbVariant = true;
-    const double radSign = (isLeft && kEnableLeftThumbVariant) ? -1.0 : +1.0;
-    const double oppSign = (isLeft && kEnableLeftThumbVariant) ? -1.0 : +1.0;
-    const Quat thumbPreRot = quat_mult(
-        axisAngleQuat(QVector3D(0,0,1),
-                      radSign * kThumbCmcRadialDeg     * M_PI / 180.0),
-        axisAngleQuat(QVector3D(1,0,0),
-                      oppSign * -kThumbCmcOppositionDeg * M_PI / 180.0)
-    ).normalized();
+    const Quat thumbPreRot(1.0, 0.0, 0.0, 0.0);
 
     for (int f = 0; f < 5; ++f) {
         const float* d = effectivePtr + f * 4;
