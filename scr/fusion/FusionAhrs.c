@@ -604,7 +604,11 @@ static void ApplyMagUpdate(FusionAhrs *ahrs, FusionVector m, float dt) {
     ahrs->magWasClosed = false;
     ahrs->magGateOpen = true;
 
-    const FusionVector hMag = RotByQInv(ahrs->q, ahrs->m0);
+    const float magNormScale = 1.0f + ahrs->magNormBias;
+    FusionVector hMag = RotByQInv(ahrs->q, ahrs->m0);
+    hMag.axis.x *= magNormScale;
+    hMag.axis.y *= magNormScale;
+    hMag.axis.z *= magNormScale;
     const float r[3] = {
         m.axis.x - hMag.axis.x,
         m.axis.y - hMag.axis.y,
