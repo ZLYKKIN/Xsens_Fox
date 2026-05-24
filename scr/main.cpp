@@ -4769,8 +4769,14 @@ bool MocapReceiver::connectGloves()
 
         { int r = 0; sehCall([&]() { r = regErgo(&foxManusErgonomicsCb); });
           testLog("[manus] RegErgonomicsStream rc=" + std::to_string(r), I.test); }
-        if (regSys)  { int r = 0; sehCall([&]() { r = regSys(noop); });
-                       testLog("[manus] RegSystemStream rc=" + std::to_string(r), I.test); }
+        if (regSys)  {
+            auto sysCb = [](const void* msg) {
+                if (!msg) return;
+                std::cerr << "[manus-system] event received (low-level diagnostic)\n";
+            };
+            int r = 0; sehCall([&]() { r = regSys(sysCb); });
+            testLog("[manus] RegSystemStream rc=" + std::to_string(r), I.test);
+        }
 
         int sRc = -1;
         sehCall([&]() { sRc = setSess(kSessionTypeUnreal); });
