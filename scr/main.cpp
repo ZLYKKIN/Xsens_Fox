@@ -4126,6 +4126,8 @@ struct MocapReceiver::Impl {
     std::array<quint32, kXsensSegmentCount> lastStf{};
     std::array<bool,    kXsensSegmentCount> haveLastStf{};
 
+    std::array<fox::body::ImuChipType, kXsensSegmentCount> detectedChip{};
+
     std::array<Quat, kXsensSegmentCount> s2s{};
     std::array<Quat, kXsensSegmentCount> s2sInv{};
     bool                                 s2sActive = false;
@@ -5399,6 +5401,37 @@ void MocapReceiver::run()
                                             : std::string("(service device)")),
                     I.test);
             if (segIdx < 0) continue;
+
+            if (api.deviceProductCode && api.stringConstruct
+                && api.stringDestruct && api.stringCopyToWChar) {
+                std::array<unsigned char, 256> xsStr{};
+                api.stringConstruct(xsStr.data());
+                api.deviceProductCode(dev, xsStr.data());
+                std::array<wchar_t, 64> buf{};
+                api.stringCopyToWChar(xsStr.data(), buf.data(), buf.size());
+                api.stringDestruct(xsStr.data());
+                const std::wstring product(buf.data());
+                fox::body::ImuChipType chip = fox::body::ImuChipType::W2;
+                if (product.find(L"X3") != std::wstring::npos) {
+                    chip = fox::body::ImuChipType::X3;
+                } else if (product.find(L"X2") != std::wstring::npos) {
+                    chip = fox::body::ImuChipType::X2;
+                }
+                if (I.test) {
+                    char asc[64]{};
+                    for (size_t k = 0; k < buf.size() && k < 63; ++k)
+                        asc[k] = char(buf[k]);
+                    testLog(std::string("[xda]     productCode=") + asc
+                            + " → ImuChip="
+                            + (chip == fox::body::ImuChipType::X3 ? "X3"
+                                : chip == fox::body::ImuChipType::X2 ? "X2" : "W2"),
+                            I.test);
+                }
+                if (segIdx >= 0 && segIdx < fox::body::kSegmentCount) {
+                    I.detectedChip[segIdx] = chip;
+                }
+            }
+
             trackerHandles.push_back(dev);
             trackerSegments.push_back(segIdx);
         }
@@ -5739,10 +5772,18 @@ void MocapReceiver::run()
                     }
                     s.magNormReferenceLocal = refNorm;
 
+                    auto chipForSeg = [&](int seg) {
+                        const fox::body::ImuChipType det = I.detectedChip[seg];
+                        const fox::body::ImuChipType deflt = fox::body::kImuChipPerSeg[seg];
+                        return (det == fox::body::ImuChipType::W2 &&
+                                deflt != fox::body::ImuChipType::W2)
+                                ? deflt : det;
+                    };
+
                     if (targetSeg >= 0 && targetSeg < fox::body::kSegmentCount) {
                         const auto& relax = fox::body::kMagGateRelax[targetSeg];
                         const float chipMul = fox::body::magNoiseScaleForChip(
-                            fox::body::kImuChipPerSeg[targetSeg]);
+                            chipForSeg(targetSeg));
                         s.magDipGateRelax  = relax.dipMul   * chipMul;
                         s.magAngGateRelax  = relax.angleMul * chipMul;
                         s.magNormGateRelax = relax.normMul;
@@ -5751,7 +5792,7 @@ void MocapReceiver::run()
 
                     if (targetSeg >= 0 && targetSeg < fox::body::kSegmentCount) {
                         const fox::body::ImuChipNoise& nz =
-                            fox::body::chipNoiseFor(fox::body::kImuChipPerSeg[targetSeg]);
+                            fox::body::chipNoiseFor(chipForSeg(targetSeg));
                         FusionAhrsSetNoise(&ahrs, nz.sigmaAccMs2,
                                                    nz.sigmaGyrDegS,
                                                    -1.0f);
