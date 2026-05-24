@@ -2620,7 +2620,7 @@ SkeletonXsens::addDummySegments(const std::array<Quat, kXsensSegmentCount>& s) c
     auto femoropelvicOffset = [&](const Quat& qUpperLeg) -> Quat {
         const Quat qRel = canon(quat_mult(qUpperLeg, s[SEG_Pelvis].conj()).normalized());
         const QVector3D phi = quat_log(qRel);
-        const double cR = fb::kCSpine[4];
+        const double cR = fb::kCFemoropelvic;
         return quat_exp_rotvec(cR * double(phi.x()),
                                cR * double(phi.y()), 0.0);
     };
