@@ -8089,9 +8089,10 @@ void NewSessionWizard::onCaptureTick()
         tposeValid[i] = (dist2 > 1e-12);
     }
 
+    constexpr std::size_t kCalibMinSamplesPerSeg = 60;
     for (int i = 0; i < kXsensSegmentCount; ++i) {
         if (!fox::body::kSensorPresent[i]) continue;
-        if (sampN[i].size() < 10) continue;
+        if (sampN[i].size() < kCalibMinSamplesPerSeg) continue;
 
         const Quat qAvgN  = fox::quat_avg_markley(sampN[i]);
         m_result.calibReference[i] = qAvgN;
