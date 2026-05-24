@@ -165,7 +165,7 @@ endif()
 # can load it via QCoreApplication::applicationDirPath() at runtime.
 add_custom_command(TARGET fox_mocap POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${CMAKE_SOURCE_DIR}/scr/fox_sensor_placement_classifier.onnx"
+        "${CMAKE_SOURCE_DIR}/dll/fox_sensor_placement_classifier.onnx"
         "$<TARGET_FILE_DIR:fox_mocap>"
     COMMENT "Staging fox_sensor_placement_classifier.onnx into build/bin")
 
