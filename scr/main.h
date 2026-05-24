@@ -47,13 +47,19 @@ constexpr int     kXsensSegmentCount  = 23;
 constexpr int     kXsensKeypointCount = 28;
 constexpr int     kXsensSegmentCountWithDummies = 27;
 constexpr int     kFingerSegmentsHand = 20;
-constexpr double  kRenderFps          = 90.0;
+constexpr double  kRenderFps          = 90.0;   // GUI/processing rate, NOT a sensor rate
 constexpr double  kStaleSeconds       = 2.0;
 constexpr int     kCalibrationSamples = 720;
 constexpr int     kCountdownSeconds   = 3;
 
+// Suit hardware sample rates — single source of truth (formules [10105]/[19689]):
+//   Link   = 240 Hz  (Fox_Link, wired USB / 2.4 GHz dongle — full bandwidth)
+//   Awinda =  90 Hz  (Fox_AW / Fox_Wireless — radio bandwidth caps the IMU rate)
+// NB: 90 also happens to be the GUI/processing rate (kRenderFps), but that is a
+// separate concept — do NOT hardcode 60/90/240 for the sensor rate anywhere; always
+// go through nativeRateHz(suit).
 enum class SuitType { Awinda, Link };
-constexpr double nativeRateHz(SuitType s) { return s == SuitType::Link ? 240.0 : 60.0; }
+constexpr double nativeRateHz(SuitType s) { return s == SuitType::Link ? 240.0 : 90.0; }
 
 inline int ticksFor(double seconds, double rateHz) {
     const long n = std::lround(seconds * rateHz);
