@@ -2458,25 +2458,25 @@ void SkeletonXsens::buildLengths(const ActorConfig& actor)
     const double fl = actor.footLengthCm / 100.0;
     const double heightScale = (h > 1e-3) ? (h / fb::kRefHeightM) : 1.0;
 
-    double armScale = heightScale;
-    if (actor.armSpanCm > 0.0) {
-        const double refArmOneSide =
-            specLen(fb::kSEG_RShoulder) +
-            specLen(fb::kSEG_RShoulder + 1) +
-            specLen(fb::kSEG_RShoulder + 2) +
-            specLen(fb::kSEG_RShoulder + 3);
-        const double refScapHalfY = 0.08;
-        const double refSpanM = 2.0 * refArmOneSide + 2.0 * refScapHalfY;
-        armScale = std::max(0.30, actor.armSpanCm / 100.0) / refSpanM;
-    }
+    const double refArmOneSide =
+        specLen(fb::kSEG_RShoulder) +
+        specLen(fb::kSEG_RShoulder + 1) +
+        specLen(fb::kSEG_RShoulder + 2) +
+        specLen(fb::kSEG_RShoulder + 3);
+    const double refScapHalfY = 0.08;
+    const double refSpanM = 2.0 * refArmOneSide + 2.0 * refScapHalfY;
+    const double targetArmSpanM = (actor.armSpanCm > 0.0)
+        ? std::max(0.30, actor.armSpanCm / 100.0)
+        : 1.06 * h;
+    double armScale = (refSpanM > 1e-6) ? targetArmSpanM / refSpanM : heightScale;
 
-    double legScale = heightScale;
-    if (actor.legLengthCm > 0.0) {
-        const double refLegM = specLen(fb::kSEG_RUpperLeg)
-                             + specLen(fb::kSEG_RLowerLeg)
-                             + fb::ankleHeightM(fb::kRefHeightM);
-        legScale = std::max(0.30, actor.legLengthCm / 100.0) / refLegM;
-    }
+    const double refLegM = specLen(fb::kSEG_RUpperLeg)
+                         + specLen(fb::kSEG_RLowerLeg)
+                         + fb::ankleHeightM(fb::kRefHeightM);
+    const double targetLegM = (actor.legLengthCm > 0.0)
+        ? std::max(0.30, actor.legLengthCm / 100.0)
+        : 0.471 * h;
+    double legScale = (refLegM > 1e-6) ? targetLegM / refLegM : heightScale;
 
     double heelToBallM, ballToTipM;
     {
@@ -2502,12 +2502,12 @@ void SkeletonXsens::buildLengths(const ActorConfig& actor)
         ? std::max(0.05, actor.shoulderWidthCm / 200.0)
         : 0.08 * heightScale;
 
-    double trunkScale = heightScale;
-    if (actor.trunkLengthCm > 0.0) {
-        double refTrunkM = 0.0;
-        for (int s = 0; s <= 5; ++s) refTrunkM += specLen(s);
-        trunkScale = std::max(0.40, actor.trunkLengthCm / 100.0) / refTrunkM;
-    }
+    double refTrunkM = 0.0;
+    for (int s = 0; s <= 5; ++s) refTrunkM += specLen(s);
+    const double targetTrunkM = (actor.trunkLengthCm > 0.0)
+        ? std::max(0.40, actor.trunkLengthCm / 100.0)
+        : 0.288 * h;
+    double trunkScale = (refTrunkM > 1e-6) ? targetTrunkM / refTrunkM : heightScale;
 
     auto spineLen = [&](int s) { return float(specLen(s) * trunkScale); };
     auto armLen   = [&](int s) { return float(specLen(s) * armScale);   };
