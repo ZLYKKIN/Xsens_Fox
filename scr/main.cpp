@@ -9085,8 +9085,10 @@ void MocapViewport::drawSkeleton()
 
     float minZ = kp[0].z();
     for (const auto& p : kp) if (p.z() < minZ) minZ = p.z();
-    m_lastFloorClamp = (minZ < -0.02f) ? -minZ : 0.0f;
-    if (minZ < -0.02f) {
+    constexpr float kFloorClampShallowM = -0.10f;
+    const bool shallowPenetration = (minZ < -0.02f && minZ >= kFloorClampShallowM);
+    m_lastFloorClamp = shallowPenetration ? -minZ : 0.0f;
+    if (shallowPenetration) {
         const QVector3D shift(0, 0, -minZ);
         for (auto& p : kp) p += shift;
     }
@@ -11284,7 +11286,8 @@ QVector3D worldPelvisWithLoco(const SkeletonXsens& skel,
     for (auto& p : kp) p += locoOffset;
     float minZ = kp[0].z();
     for (const auto& p : kp) if (p.z() < minZ) minZ = p.z();
-    if (minZ < -0.02f) {
+    constexpr float kFloorClampShallowM = -0.10f;
+    if (minZ < -0.02f && minZ >= kFloorClampShallowM) {
         const QVector3D up(0.0f, 0.0f, -minZ);
         for (auto& p : kp) p += up;
     }
