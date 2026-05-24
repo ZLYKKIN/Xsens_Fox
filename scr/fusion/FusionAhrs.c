@@ -479,6 +479,14 @@ static void ApplyAccUpdate(FusionAhrs *ahrs, FusionVector aSensorMs2) {
         for (int j = 0; j < 3; ++j) H[i * N15 + (0 + j)] = Hth[i * 3 + j];
     for (int i = 0; i < 3; ++i)     H[i * N15 + (6 + i)] = +1.0f;
 
+    const float rNorm = sqrtf(r[0] * r[0] + r[1] * r[1] + r[2] * r[2]);
+    if (rNorm > 1e-6f) {
+        const float invN = 1.0f / rNorm;
+        H[0 * N15 + IDX_SKINPHI] = -r[0] * invN;
+        H[1 * N15 + IDX_SKINPHI] = -r[1] * invN;
+        H[2 * N15 + IDX_SKINPHI] = -r[2] * invN;
+    }
+
     const float Rs = (ahrs->sigmaAcc * ahrs->sigmaAcc) / ahrs->fAccBoost;
     const float Rdiag[3] = { Rs, Rs, Rs };
 
