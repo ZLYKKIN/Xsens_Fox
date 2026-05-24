@@ -1861,8 +1861,10 @@ public:
         m_lastT    = 0.0;
         m_lastCoM       = QVector3D(0, 0, 0);
         m_prevCoM       = QVector3D(0, 0, 0);
-        m_lastCoMVel    = QVector3D(0, 0, 0);
-        m_lastBodyMass  = 0.0;
+        m_lastCoMVel     = QVector3D(0, 0, 0);
+        m_lastCoMAccel   = QVector3D(0, 0, 0);
+        m_lastGRFNewtons = QVector3D(0, 0, 0);
+        m_lastBodyMass   = 0.0;
         m_haveCoMPrev   = false;
     }
 
@@ -2010,14 +2012,23 @@ public:
             double bodyMass = 0.0;
             const QVector3D com = fb::centerOfMass(*ctx.segCenter, &bodyMass);
             if (m_haveCoMPrev) {
-                m_lastCoMVel = (com - m_prevCoM) / float(std::max(1e-4, dt));
+                const QVector3D newVel =
+                    (com - m_prevCoM) / float(std::max(1e-4, dt));
+                m_lastCoMAccel = (newVel - m_lastCoMVel) / float(std::max(1e-4, dt));
+                m_lastCoMVel = newVel;
             } else {
-                m_lastCoMVel = QVector3D(0, 0, 0);
+                m_lastCoMVel   = QVector3D(0, 0, 0);
+                m_lastCoMAccel = QVector3D(0, 0, 0);
             }
             m_prevCoM      = com;
             m_lastCoM      = com;
             m_lastBodyMass = bodyMass;
             m_haveCoMPrev  = true;
+
+            const QVector3D gravityWorld(0.0f, 0.0f,
+                float(fb::constants::kGravityMs2));
+            m_lastGRFNewtons =
+                float(bodyMass) * (m_lastCoMAccel + gravityWorld);
 
             if (g_testFlag().load(std::memory_order_relaxed) &&
                 g_glovesFlag().load(std::memory_order_relaxed)) {
@@ -2028,7 +2039,8 @@ public:
                               << m_lastCoM.y() << "," << m_lastCoM.z()
                               << ") m  vel=(" << m_lastCoMVel.x() << ","
                               << m_lastCoMVel.y() << "," << m_lastCoMVel.z()
-                              << ") m/s  M_norm=" << m_lastBodyMass
+                              << ") m/s  M_kg=" << m_lastBodyMass
+                              << "  F_GRF_z=" << m_lastGRFNewtons.z() << " N"
                               << "  contactR=" << (rContact ? 1 : 0)
                               << "  contactL=" << (lContact ? 1 : 0)
                               << "\n";
@@ -2049,9 +2061,11 @@ public:
     const ContactDetector&      contacts() const { return m_contacts; }
     const LocomotionClassifier& locomotion() const { return m_locomotion; }
     int                         lastSkinPosUpdates() const { return m_lastSkinPosUpdates; }
-    QVector3D                   lastCoM()     const { return m_lastCoM; }
-    QVector3D                   lastCoMVel()  const { return m_lastCoMVel; }
-    double                      lastBodyMass() const { return m_lastBodyMass; }
+    QVector3D                   lastCoM()       const { return m_lastCoM; }
+    QVector3D                   lastCoMVel()    const { return m_lastCoMVel; }
+    QVector3D                   lastCoMAccel()  const { return m_lastCoMAccel; }
+    QVector3D                   lastGRFNewtons() const { return m_lastGRFNewtons; }
+    double                      lastBodyMass()  const { return m_lastBodyMass; }
 
 private:
     SkinArtifactState     m_skin;
@@ -2064,11 +2078,13 @@ private:
     double m_lastT    = 0.0;
 
     int       m_lastSkinPosUpdates = 0;
-    QVector3D m_lastCoM       {0, 0, 0};
-    QVector3D m_prevCoM       {0, 0, 0};
-    QVector3D m_lastCoMVel    {0, 0, 0};
-    double    m_lastBodyMass  = 0.0;
-    bool      m_haveCoMPrev   = false;
+    QVector3D m_lastCoM        {0, 0, 0};
+    QVector3D m_prevCoM        {0, 0, 0};
+    QVector3D m_lastCoMVel     {0, 0, 0};
+    QVector3D m_lastCoMAccel   {0, 0, 0};
+    QVector3D m_lastGRFNewtons {0, 0, 0};
+    double    m_lastBodyMass   = 0.0;
+    bool      m_haveCoMPrev    = false;
 };
 
 inline PoseRefiner&  g_refiner() {
