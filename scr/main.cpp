@@ -3813,6 +3813,8 @@ using FnArraySize                     = std::size_t (*)(const void*);
 using FnPortInfoArrayConstruct        = void(*)(void*, std::size_t, void*);
 using FnDeviceIdArrayConstruct        = void(*)(void*, std::size_t, void*);
 using FnStringConstruct               = void(*)(void*);
+using FnStringDestruct                = void(*)(void*);
+using FnStringCopyToWChar             = std::size_t(*)(const void*, wchar_t*, std::size_t);
 
 using FnDataPacketConstruct               = void(*)(XsDataPacketBlob*);
 using FnDataPacketDestruct                = void(*)(XsDataPacketBlob*);
@@ -3870,6 +3872,9 @@ struct Api {
     FnDeviceLocationId               deviceLocationId       = nullptr;
     FnDeviceProductCode              deviceProductCode      = nullptr;
     FnDeviceHardwareVersion          deviceHardwareVersion  = nullptr;
+    FnStringConstruct                stringConstruct        = nullptr;
+    FnStringDestruct                 stringDestruct         = nullptr;
+    FnStringCopyToWChar              stringCopyToWChar      = nullptr;
     FnDeviceUpdateRate               deviceUpdateRate       = nullptr;
     FnDeviceGetDataPacketCount       deviceGetDataPacketCount = nullptr;
     FnDeviceTakeFirstDataPacketInQueue deviceTakeFirstDataPacketInQueue = nullptr;
@@ -4009,6 +4014,9 @@ static bool loadApi(Api& api, QString& errDetail)
     ok &= resolveProc(api.xda, "XsDevice_locationId",               api.deviceLocationId);
     resolveProc (api.xda, "XsDevice_productCode",                   api.deviceProductCode);
     resolveProc (api.xda, "XsDevice_hardwareVersion",               api.deviceHardwareVersion);
+    resolveProc (api.xst, "XsString_construct",                     api.stringConstruct);
+    resolveProc (api.xst, "XsString_destruct",                      api.stringDestruct);
+    resolveProc (api.xst, "XsString_copyToWCharArray",              api.stringCopyToWChar);
     resolveProc (api.xda, "XsDevice_updateRate",                    api.deviceUpdateRate);
     ok &= resolveProc(api.xda, "XsDevice_getDataPacketCount",       api.deviceGetDataPacketCount);
     ok &= resolveProc(api.xda, "XsDevice_takeFirstDataPacketInQueue",
