@@ -2292,6 +2292,13 @@ void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
                       << " s slow=" << fb::kSkin.tauSlowSec
                       << " s  σ_ori=" << fb::kSkin.sigmaOriDeg
                       << "° σ_pos=" << fb::kSkin.sigmaPosM << " m\n";
+            // Spec §13.2(д) — minimax rational form for stable direction
+            // normalisation in the Gauss-Newton inner loop (helper available
+            // via fox::solverRationalRatio / solverDirection).
+            std::cout << "[solver §13.2д] C₁=" << fox::kSolverC1
+                      << "  C₂=" << fox::kSolverC2
+                      << "  (C₂−C₁)=" << (fox::kSolverC2 - fox::kSolverC1)
+                      << "  (rational direction helper)\n";
             std::cout << std::setprecision(4);
             std::cout.flush();
         }

@@ -166,6 +166,36 @@ inline Quat mirror_y_quat(const Quat& q) {
     return Quat(q.w, -q.x, q.y, -q.z);
 }
 
+// Spec §13.2(д) — minimax-fit rational form used by the inner WLS solver
+// for stable direction-from-vector normalisation:
+//
+//     s     = √(C₂ - C₁·b²)
+//     ratio = (x·s + C₂) / (x·s + C₂ - C₁) = 1 + C₁/(x·s + C₂ - C₁)
+//     dir   = b / √(b² + d²·ratio²)
+//
+// where C₁ = 272332.63, C₂ = 40680634.23 (verbatim from the spec
+// constants block).  Returns the `ratio` scalar; downstream solver code
+// can plug it into the dir formula or use it as a smoother replacement
+// for the conditional atan2 / sqrt branches in Gauss-Newton inner loops.
+// Inline because it lands in the per-iteration WLS tight loop.
+constexpr double kSolverC1 = 272332.63;
+constexpr double kSolverC2 = 40680634.23;
+inline double solverRationalRatio(double x, double b) {
+    const double radicand = kSolverC2 - kSolverC1 * b * b;
+    if (radicand <= 0.0) return 1.0;            // outside fit domain
+    const double s   = std::sqrt(radicand);
+    const double den = x * s + (kSolverC2 - kSolverC1);
+    if (std::abs(den) < 1e-12) return 1.0;
+    return 1.0 + kSolverC1 / den;
+}
+// Companion helper: stable direction = b / √(b² + d²·ratio²).  Combined
+// form so the inner loop only needs one call.
+inline double solverDirection(double x, double b, double d) {
+    const double ratio = solverRationalRatio(x, b);
+    const double denom = std::sqrt(b * b + d * d * ratio * ratio);
+    return (denom < 1e-18) ? 0.0 : b / denom;
+}
+
 // Return `q` expressed in the same hemisphere as `prev`.  A quaternion and its
 // negation encode the *same* rotation, so this never changes what a frame
 // represents — but it stops the sign from flipping between consecutive frames,
