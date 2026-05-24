@@ -481,7 +481,8 @@ public:
             const QVector3D p_xy  (p_world.x(),    p_world.y(),    0.0f);
             const double dCom = (cop_xy - p_xy).length();
             const double f_com = fb::kCom[1] + (fb::kCom[4] - fb::kCom[1]) *
-                                 sigmoid(-(dCom - 0.0) / std::max(1e-6, fb::kCom[2]));
+                                 sigmoid((dCom - fb::kCom[1]) /
+                                         std::max(1e-6, fb::kCom[2]));
 
             const double lowZ        = std::max(0.0,
                 fb::kDLevelDefault - (double(p_world.z()) - in.floorLevelZ));
