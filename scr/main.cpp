@@ -1432,12 +1432,24 @@ public:
                 const Quat targetScap = quat_mult(dqScap, orient[4]).normalized();
                 const QVector3D r = quat_log(quat_mult(targetScap,
                                                        orient[shoulderSeg].conj()).normalized());
-                const int rowS = shoulderSeg * 3;
+                const int rowS  = shoulderSeg * 3;
+                const int rowT8 = 4 * 3;
+                const int rowH  = upperArmSeg * 3;
                 for (int k = 0; k < 3; ++k) {
                     JtWJ(rowS + k, rowS + k) += w_coup;
                     JtWr(rowS + k)           -= w_coup *
                         (k == 0 ? r.x() : k == 1 ? r.y() : r.z());
                 }
+                const double couplerX = w_coup * cEffX;
+                const double couplerY = w_coup * cEffY;
+                JtWJ(rowS + 0, rowT8 + 0) -= couplerX;
+                JtWJ(rowT8 + 0, rowS + 0) -= couplerX;
+                JtWJ(rowS + 1, rowT8 + 1) -= couplerY;
+                JtWJ(rowT8 + 1, rowS + 1) -= couplerY;
+                JtWJ(rowS + 0, rowH  + 0) -= couplerX;
+                JtWJ(rowH  + 0, rowS + 0) -= couplerX;
+                JtWJ(rowS + 1, rowH  + 1) -= couplerY;
+                JtWJ(rowH  + 1, rowS + 1) -= couplerY;
                 residSum += r.length();
                 ++residN;
 
