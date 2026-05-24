@@ -1639,10 +1639,10 @@ public:
 
                 if (maxCov > 0.0 && maxCov < 1.0) {
                     const int sigmaBand =
-                        (maxCov < 0.005) ? fb::PoseQualityExcellent :
-                        (maxCov < 0.02 ) ? fb::PoseQualityGood      :
-                        (maxCov < 0.05 ) ? fb::PoseQualityAdequate  :
-                        (maxCov < 0.1  ) ? fb::PoseQualityPoor      :
+                        (maxCov < fb::kPoseQualityResidBands[0]) ? fb::PoseQualityExcellent :
+                        (maxCov < fb::kPoseQualityResidBands[1]) ? fb::PoseQualityGood      :
+                        (maxCov < fb::kPoseQualityResidBands[2]) ? fb::PoseQualityAdequate  :
+                        (maxCov < fb::kPoseQualityResidBands[3]) ? fb::PoseQualityPoor :
                                             fb::PoseQualityInvalid;
                     d.poseQualityBand = std::min(d.poseQualityBand, sigmaBand);
                 }
