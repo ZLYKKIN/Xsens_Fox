@@ -18,6 +18,24 @@ constexpr int kContactRows  = 26;
 enum Pose : std::uint8_t   { PoseT = 0, PoseN = 1 };
 enum Gender : std::uint8_t { GenderLegacy = 0, GenderMale = 1, GenderFemale = 2 };
 
+enum class ConfigurationLabel : std::uint8_t {
+    FullBody = 0,
+    FullBodyNoSternum,
+    UpperBody,
+    UpperBodyNoSternum,
+    LowerBody,
+    PelvisSternum,
+    PelvisOnly,
+    Sternum,
+    SingleDevice,
+    Hands,
+    UpperBodyWithHands,
+    FullBodyWithHands,
+    Generic,
+};
+
+inline constexpr int kConfigurationLabelCount = 13;
+
 inline constexpr std::array<double, kSegmentCount> kMassRatio = {
     11.7188,
      7.8125,
