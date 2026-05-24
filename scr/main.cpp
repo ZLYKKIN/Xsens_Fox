@@ -1,9 +1,6 @@
 
 #include "main.h"
 #include "foxwire.h"
-#include "foxbody.h"
-#include "foxcoupling.h"
-#include "foxergo.h"
 
 #include <onnxruntime_cxx_api.h>
 
