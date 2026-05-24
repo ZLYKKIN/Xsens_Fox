@@ -624,9 +624,10 @@ public:
             m_zRingHead = (m_zRingHead + 1) % kZRingCap;
             if (m_zRingCount < kZRingCap) ++m_zRingCount;
 
-            const double bin = std::max(1e-4, fb::kEstimator.multiLevelZhcClipVert);
-            std::array<int, 16>     binCnt{};
-            std::array<double, 16>  binSum{};
+            const double bin = std::max(1e-4, fb::kMultiLevel.sameLevelMargin);
+            constexpr int kMaxLevels = 10;
+            std::array<int, kMaxLevels>     binCnt{};
+            std::array<double, kMaxLevels>  binSum{};
             int nBins = 0;
             for (int i = 0; i < m_zRingCount; ++i) {
                 const double z = m_zRing[i];
@@ -634,7 +635,9 @@ public:
                 for (int b = 0; b < nBins; ++b) {
                     if (std::abs(binSum[b] / std::max(1, binCnt[b]) - z) < bin) { idx = b; break; }
                 }
-                if (idx < 0 && nBins < 16) { idx = nBins++; binCnt[idx] = 0; binSum[idx] = 0.0; }
+                if (idx < 0 && nBins < kMaxLevels) {
+                    idx = nBins++; binCnt[idx] = 0; binSum[idx] = 0.0;
+                }
                 if (idx >= 0) { binCnt[idx]++; binSum[idx] += z; }
             }
             std::array<double, 4> top4{};
@@ -665,7 +668,8 @@ public:
                 return best;
             };
 
-            const double aMix = std::exp(-in.dt / 1.0);
+            const double aMix = std::exp(-in.dt /
+                                         std::max(1e-3, fb::kMultiLevel.tauSmoothSec));
             if (haveR) {
                 const double zRl = pickLevel(zR);
                 if (m_floorRInited) m_floorR = aMix * m_floorR + (1.0 - aMix) * zRl;

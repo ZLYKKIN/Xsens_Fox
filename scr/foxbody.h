@@ -893,6 +893,11 @@ struct MultiLevelParams {
     double zhcMaximumLikelihood;
     double zhcMaxLikelihoodBoost;
     double zhcMinimumLikelihood;
+    double tauSmoothSec;
+    double cdSameSegmentBonus;
+    double cdSameSegmentPenalty;
+    double zhSameSegmentBonus;
+    double zhSameSegmentPenalty;
 };
 inline constexpr MultiLevelParams kMultiLevel = {
     .averagingStairHeight          = 5,
@@ -906,6 +911,11 @@ inline constexpr MultiLevelParams kMultiLevel = {
     .zhcMaximumLikelihood          = 0.9,
     .zhcMaxLikelihoodBoost         = 1000.0,
     .zhcMinimumLikelihood          = 0.4,
+    .tauSmoothSec                  = 0.2,
+    .cdSameSegmentBonus            = 0.03,
+    .cdSameSegmentPenalty          = -0.02,
+    .zhSameSegmentBonus            = 0.05,
+    .zhSameSegmentPenalty          = -1.0,
 };
 
 struct CalibMagE {
