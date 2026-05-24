@@ -6257,7 +6257,12 @@ static float computeFeature(
     std::vector<float> work = target;
     if (f.band != SpcBand::None) {
         const int N = int(target.size());
-        std::vector<float> mag = realDftMag(target);
+        std::vector<float> centered = target;
+        double mean = 0.0;
+        for (float v : centered) mean += double(v);
+        if (N > 0) mean /= double(N);
+        for (float& v : centered) v = float(double(v) - mean);
+        std::vector<float> mag = realDftMag(centered);
         double fLo = 0.0, fHi = 0.0;
         switch (f.band) {
             case SpcBand::Band0p5To4:   fLo = 0.5;  fHi = 4.0;  break;
