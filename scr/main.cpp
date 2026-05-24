@@ -1830,9 +1830,12 @@ public:
                  pelvisSpeed < fox::body::kGait.standingPelvisSpeedMax &&
                  pelvisVertical)
                                                    m_phase = LocomotionPhase::Standing;
-        else if (anyContact && pelvisVertical &&
-                 m_altSec < fox::body::kContact.firstWinWidth)
-                                                   m_phase = LocomotionPhase::Walking;
+        else if (anyContact && pelvisVertical) {
+            const double winW = (pelvisSpeed > fox::body::kContact.highVelTh)
+                ? fox::body::kContact.firstWinWidthHighVel
+                : fox::body::kContact.firstWinWidth;
+            if (m_altSec < winW) m_phase = LocomotionPhase::Walking;
+        }
         else if (!anyContact &&
                  (pelvisTiltDeg > fox::body::kGait.acrobaticTiltDeg ||
                   t8TiltDeg     > fox::body::kGait.acrobaticTiltDeg))
