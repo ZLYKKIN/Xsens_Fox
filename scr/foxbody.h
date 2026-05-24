@@ -872,6 +872,7 @@ inline float magNoiseScaleForChip(ImuChipType c) {
 struct ImuChipNoise {
     float sigmaAccMs2;
     float sigmaGyrDegS;
+    float sigmaMagNorm;
     float dynRangeAccMs2;
     float dynRangeGyrDegS;
     float gainErrorAcc;
@@ -880,6 +881,7 @@ struct ImuChipNoise {
 inline constexpr ImuChipNoise kImuChipNoiseW2 = {
     .sigmaAccMs2     = 0.0232f,
     .sigmaGyrDegS    = 0.20f,
+    .sigmaMagNorm    = 0.028f,
     .dynRangeAccMs2  = 157.0f,
     .dynRangeGyrDegS = 2000.0f,
     .gainErrorAcc    = 0.004f,
@@ -888,6 +890,7 @@ inline constexpr ImuChipNoise kImuChipNoiseW2 = {
 inline constexpr ImuChipNoise kImuChipNoiseX2 = {
     .sigmaAccMs2     = 0.0232f,
     .sigmaGyrDegS    = 0.20f,
+    .sigmaMagNorm    = 0.028f,
     .dynRangeAccMs2  = 157.0f,
     .dynRangeGyrDegS = 2000.0f,
     .gainErrorAcc    = 0.004f,
@@ -896,6 +899,7 @@ inline constexpr ImuChipNoise kImuChipNoiseX2 = {
 inline constexpr ImuChipNoise kImuChipNoiseX3 = {
     .sigmaAccMs2     = 0.00899f,
     .sigmaGyrDegS    = 0.075f,
+    .sigmaMagNorm    = 0.2215f,
     .dynRangeAccMs2  = 157.0f,
     .dynRangeGyrDegS = 2000.0f,
     .gainErrorAcc    = 0.004f,

@@ -5934,7 +5934,7 @@ void MocapReceiver::run()
                             fox::body::chipNoiseFor(chipForSeg(targetSeg));
                         FusionAhrsSetNoise(&ahrs, nz.sigmaAccMs2,
                                                    nz.sigmaGyrDegS,
-                                                   -1.0f);
+                                                   nz.sigmaMagNorm);
                     }
                     I.fusionReady[targetSeg] = true;
                 }
