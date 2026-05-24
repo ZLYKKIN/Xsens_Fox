@@ -37,6 +37,8 @@
 #include <QtCore/QFile>
 #include <QtCore/QJsonDocument>
 #include <QtCore/QJsonObject>
+#include <QtCore/QJsonArray>
+#include <QtCore/QTextStream>
 #include <QtNetwork/QUdpSocket>
 #include <QtNetwork/QHostAddress>
 #include <QtNetwork/QNetworkInterface>
@@ -490,9 +492,11 @@ public:
             const double aLowThresh =
                 fb::constants::kGravityMs2 + fb::kContact.impactTh / 8.0;
             const double f_lowFreq   = (aNorm < aLowThresh) ? 1.0 : 0.0;
+            constexpr double kZuptStillOmegaRad = 0.3 * fb::constants::kDeg2Rad;
             const double f_lowOmega  = (std::abs(double(w.x())) +
                                         std::abs(double(w.y())) +
-                                        std::abs(double(w.z())) < 1.0) ? 1.0 : 0.0;
+                                        std::abs(double(w.z()))
+                                        < kZuptStillOmegaRad) ? 1.0 : 0.0;
 
             const double vNorm = std::sqrt(double(v_world.x()) * double(v_world.x()) +
                                            double(v_world.y()) * double(v_world.y()) +
@@ -1183,6 +1187,7 @@ public:
                                                   fb::kSpineNeck.stdSpine);
 
                     const double cAxial = fb::kCSpine[4];
+                    const int rowPel = idxPelvis * 3;
                     auto enforce = [&](int idx, double fraction) {
                         const Quat qExp = quat_mult(
                             quat_exp_rotvec(fraction * double(phi.x()),
@@ -1197,6 +1202,14 @@ public:
                             JtWJ(row + k, row + k) += w_spine;
                             JtWr(row + k)          -= w_spine *
                                 (k == 0 ? r.x() : k == 1 ? r.y() : r.z());
+                        }
+                        const double w_coupleParent = w_spine * fraction;
+                        for (int k = 0; k < 3; ++k) {
+                            const double axisFactor = (k == 2) ? cAxial : 1.0;
+                            const double couple = w_coupleParent * axisFactor;
+                            JtWJ(rowPel + k, rowPel + k) += couple * fraction;
+                            JtWJ(row    + k, rowPel + k) -= couple;
+                            JtWJ(rowPel + k, row    + k) -= couple;
                         }
                         residSum += r.length();
                         ++residN;
@@ -1419,12 +1432,24 @@ public:
                 const Quat targetScap = quat_mult(dqScap, orient[4]).normalized();
                 const QVector3D r = quat_log(quat_mult(targetScap,
                                                        orient[shoulderSeg].conj()).normalized());
-                const int rowS = shoulderSeg * 3;
+                const int rowS  = shoulderSeg * 3;
+                const int rowT8 = 4 * 3;
+                const int rowH  = upperArmSeg * 3;
                 for (int k = 0; k < 3; ++k) {
                     JtWJ(rowS + k, rowS + k) += w_coup;
                     JtWr(rowS + k)           -= w_coup *
                         (k == 0 ? r.x() : k == 1 ? r.y() : r.z());
                 }
+                const double couplerX = w_coup * cEffX;
+                const double couplerY = w_coup * cEffY;
+                JtWJ(rowS + 0, rowT8 + 0) -= couplerX;
+                JtWJ(rowT8 + 0, rowS + 0) -= couplerX;
+                JtWJ(rowS + 1, rowT8 + 1) -= couplerY;
+                JtWJ(rowT8 + 1, rowS + 1) -= couplerY;
+                JtWJ(rowS + 0, rowH  + 0) -= couplerX;
+                JtWJ(rowH  + 0, rowS + 0) -= couplerX;
+                JtWJ(rowS + 1, rowH  + 1) -= couplerY;
+                JtWJ(rowH  + 1, rowS + 1) -= couplerY;
                 residSum += r.length();
                 ++residN;
 
@@ -1459,11 +1484,18 @@ public:
                 const QVector3D r = quat_log(quat_mult(targetLower,
                                                        orient[lowerSeg].conj()).normalized());
                 const int rowL = lowerSeg * 3;
+                const int rowU = upperSeg * 3;
                 for (int k = 0; k < 3; ++k) {
                     JtWJ(rowL + k, rowL + k) += w_lax;
                     JtWr(rowL + k)           -= w_lax *
                         (k == 0 ? r.x() : k == 1 ? r.y() : r.z());
                 }
+                const double thKneeSlope =
+                    fb::kCKnees[2] * std::sin(thKnee) *
+                    fb::kKneeScrewMaxDeg * fb::constants::kDeg2Rad;
+                const double w_couple = w_lax * thKneeSlope;
+                JtWJ(rowL + 2, rowU + 1) -= w_couple;
+                JtWJ(rowU + 1, rowL + 2) -= w_couple;
                 residSum += r.length();
                 ++residN;
             };
@@ -1497,12 +1529,17 @@ public:
                 const Quat targetFoot = quat_mult(qRelNew, orient[lowerSeg]).normalized();
                 const QVector3D r = quat_log(quat_mult(targetFoot,
                                                        orient[footSeg].conj()).normalized());
-                const int rowF = footSeg * 3;
+                const int rowF = footSeg  * 3;
+                const int rowT = lowerSeg * 3;
                 for (int k = 0; k < 3; ++k) {
                     JtWJ(rowF + k, rowF + k) += w_coup;
                     JtWr(rowF + k)           -= w_coup *
                         (k == 0 ? r.x() : k == 1 ? r.y() : r.z());
                 }
+                const double evDpfSlope = fb::kCAnkles[2] * std::cos(thPf);
+                const double w_couple = w_coup * evDpfSlope;
+                JtWJ(rowF + 0, rowT + 1) -= w_couple;
+                JtWJ(rowT + 1, rowF + 0) -= w_couple;
                 residSum += r.length();
                 ++residN;
             };
@@ -1634,6 +1671,12 @@ public:
                 ? (thisResidPost / double(residN)) : 0.0;
 
             if (!accepted) break;
+
+            const double gradNorm = JtWr.norm() / std::max(1, residN);
+            if (gradNorm < fb::kIKGradTolRad &&
+                thisStepNorm < fb::kIKStepTolRad) {
+                break;
+            }
         }
 
         d.residualMeanRad = initialResidN > 0
@@ -1752,9 +1795,67 @@ public:
                           double rFootPitchZ, double lFootPitchZ,
                           double rFootVelZ,   double lFootVelZ,
                           double dt) {
+        const GaitPhase prevR = m_phaseR;
+        const GaitPhase prevL = m_phaseL;
         m_phaseR = classifyLeg(m_phaseR, rContact, rFootPitchZ, rFootVelZ, dt, m_durR);
         m_phaseL = classifyLeg(m_phaseL, lContact, lFootPitchZ, lFootVelZ, dt, m_durL);
+        if (prevR != GaitPhase::HS && m_phaseR == GaitPhase::HS) ++m_heelStrikeR;
+        if (prevL != GaitPhase::HS && m_phaseL == GaitPhase::HS) ++m_heelStrikeL;
     }
+
+    void updateStepMetrics(const QVector3D& rHeelWorld,
+                           const QVector3D& lHeelWorld,
+                           const QVector3D& comWorld,
+                           double dt)
+    {
+        (void)dt;
+        if (m_phaseR == GaitPhase::HS && m_lastPhaseR != GaitPhase::HS) {
+            const double sl = (rHeelWorld - m_lastHeelR_HS).length();
+            const double sh = std::abs(double(rHeelWorld.z() - m_lastHeelR_HS.z()));
+            if (m_haveLastHeelR && sl > 0.01 && sl < 2.5) {
+                m_lastStepLengthR = sl;
+                m_lastStepHeightR = sh;
+            }
+            m_lastHeelR_HS = rHeelWorld;
+            m_haveLastHeelR = true;
+        }
+        if (m_phaseL == GaitPhase::HS && m_lastPhaseL != GaitPhase::HS) {
+            const double sl = (lHeelWorld - m_lastHeelL_HS).length();
+            const double sh = std::abs(double(lHeelWorld.z() - m_lastHeelL_HS.z()));
+            if (m_haveLastHeelL && sl > 0.01 && sl < 2.5) {
+                m_lastStepLengthL = sl;
+                m_lastStepHeightL = sh;
+            }
+            m_lastHeelL_HS = lHeelWorld;
+            m_haveLastHeelL = true;
+        }
+        m_lastPhaseR = m_phaseR;
+        m_lastPhaseL = m_phaseL;
+
+        if (m_haveLastCom) {
+            const double z = double(comWorld.z());
+            if (z > m_comZMax) m_comZMax = z;
+            if (z < m_comZMin) m_comZMin = z;
+            m_lastVertCoMOscM = m_comZMax - m_comZMin;
+            if (m_comOscDecayTicks++ > 240) {
+                m_comZMin =  1e9;
+                m_comZMax = -1e9;
+                m_comOscDecayTicks = 0;
+            }
+        } else {
+            m_comZMin = double(comWorld.z());
+            m_comZMax = double(comWorld.z());
+            m_haveLastCom = true;
+        }
+    }
+
+    double lastStepLengthR() const { return m_lastStepLengthR; }
+    double lastStepLengthL() const { return m_lastStepLengthL; }
+    double lastStepHeightR() const { return m_lastStepHeightR; }
+    double lastStepHeightL() const { return m_lastStepHeightL; }
+    double vertCoMOscillationM() const { return m_lastVertCoMOscM; }
+    int    heelStrikeCountR() const { return m_heelStrikeR; }
+    int    heelStrikeCountL() const { return m_heelStrikeL; }
 
     enum class BodyPosture : std::uint8_t {
         Vertical = 0,
@@ -1878,8 +1979,90 @@ private:
 
     GaitPhase       m_phaseR          = GaitPhase::NA;
     GaitPhase       m_phaseL          = GaitPhase::NA;
+    GaitPhase       m_lastPhaseR      = GaitPhase::NA;
+    GaitPhase       m_lastPhaseL      = GaitPhase::NA;
     double          m_durR            = 0.0;
     double          m_durL            = 0.0;
+    int             m_heelStrikeR     = 0;
+    int             m_heelStrikeL     = 0;
+    QVector3D       m_lastHeelR_HS    {0, 0, 0};
+    QVector3D       m_lastHeelL_HS    {0, 0, 0};
+    bool            m_haveLastHeelR   = false;
+    bool            m_haveLastHeelL   = false;
+    double          m_lastStepLengthR = 0.0;
+    double          m_lastStepLengthL = 0.0;
+    double          m_lastStepHeightR = 0.0;
+    double          m_lastStepHeightL = 0.0;
+    double          m_comZMin         =  1e9;
+    double          m_comZMax         = -1e9;
+    bool            m_haveLastCom     = false;
+    int             m_comOscDecayTicks = 0;
+    double          m_lastVertCoMOscM = 0.0;
+};
+
+struct SmootherFrame {
+    std::array<Quat, fb::kSegmentCount> orient_filtered{};
+    std::array<double, fb::kSegmentCount * 3> P_diag{};
+    double dt = 0.0;
+    bool   valid = false;
+};
+
+class BatchSmoother {
+public:
+    static constexpr int kWindow = 240;
+    BatchSmoother() { m_ring.fill({}); }
+    void reset() {
+        m_head = 0; m_count = 0;
+        m_ring.fill({});
+    }
+    void pushFrame(const std::array<Quat, fb::kSegmentCount>& orient,
+                   const std::array<double, fb::kSegmentCount * 3>& P_diag,
+                   double dt) {
+        m_ring[m_head].orient_filtered = orient;
+        m_ring[m_head].P_diag = P_diag;
+        m_ring[m_head].dt    = dt;
+        m_ring[m_head].valid = true;
+        m_head = (m_head + 1) % kWindow;
+        if (m_count < kWindow) ++m_count;
+    }
+    void backwardPass(std::array<Quat, fb::kSegmentCount>& smoothedOut) const {
+        if (m_count == 0) return;
+        const int newest = (m_head + kWindow - 1) % kWindow;
+        smoothedOut = m_ring[newest].orient_filtered;
+        if (m_count < 2) return;
+        std::array<Quat, fb::kSegmentCount> x_s = smoothedOut;
+        for (int back = 1; back < m_count; ++back) {
+            const int t = (m_head + kWindow - 1 - back) % kWindow;
+            const int t1 = (t + 1) % kWindow;
+            if (!m_ring[t].valid || !m_ring[t1].valid) continue;
+            for (int s = 0; s < fb::kSegmentCount; ++s) {
+                const double P_f = m_ring[t].P_diag[s * 3];
+                const double P_p = m_ring[t1].P_diag[s * 3];
+                if (P_p < 1e-12) continue;
+                const double G = P_f / P_p;
+                const Quat qf = m_ring[t].orient_filtered[s];
+                const Quat qp = m_ring[t1].orient_filtered[s];
+                const Quat dq = quat_mult(x_s[s], qp.conj()).normalized();
+                const QVector3D phi = quat_log(dq);
+                const double gainClamp = std::clamp(G, 0.0, 1.0);
+                const Quat qShift = quat_exp_rotvec(gainClamp * double(phi.x()),
+                                                     gainClamp * double(phi.y()),
+                                                     gainClamp * double(phi.z()));
+                x_s[s] = quat_mult(qShift, qf).normalized();
+            }
+        }
+        smoothedOut = x_s;
+    }
+    void marginalizeOldest() {
+        if (m_count < kWindow) return;
+        const int oldest = m_head;
+        m_ring[oldest].valid = false;
+    }
+    int count() const { return m_count; }
+private:
+    std::array<SmootherFrame, kWindow> m_ring{};
+    int m_head  = 0;
+    int m_count = 0;
 };
 
 class PoseRefiner {
@@ -1898,6 +2081,7 @@ public:
         m_lastGRFNewtons = QVector3D(0, 0, 0);
         m_lastBodyMass   = 0.0;
         m_haveCoMPrev   = false;
+        m_smoother.reset();
     }
 
     void predictSkin(int seg, double dt) { m_skin.predict(seg, dt); }
@@ -1945,6 +2129,22 @@ public:
         if (ctx.sensorMeas && ctx.sensorPresent) {
             dg = m_solver.solve(orient, *ctx.sensorMeas, *ctx.sensorPresent,
                                 m_skin, cr.active, dt);
+
+            {
+                std::array<double, fb::kSegmentCount * 3> P_diag{};
+                const double sigma2 = std::max(1e-9,
+                    dg.covMaxOriRad * dg.covMaxOriRad);
+                for (int s = 0; s < fb::kSegmentCount; ++s)
+                    for (int k = 0; k < 3; ++k)
+                        P_diag[s * 3 + k] = sigma2;
+                m_smoother.pushFrame(orient, P_diag, dt);
+                if (m_smoother.count() >= BatchSmoother::kWindow) {
+                    std::array<Quat, fb::kSegmentCount> smoothed{};
+                    m_smoother.backwardPass(smoothed);
+                    orient = smoothed;
+                    m_smoother.marginalizeOldest();
+                }
+            }
 
             for (int i = 0; i < fb::kSegmentCount; ++i) {
                 if (!(*ctx.sensorPresent)[i]) continue;
@@ -2022,6 +2222,15 @@ public:
                                           rFootPitchZ, lFootPitchZ,
                                           rFootVelZ, lFootVelZ, dt);
 
+            const QVector3D rHeelW = (*ctx.segCenter)[fb::kSEG_RFoot]
+                + vec_rotate(QVector3D(-0.036f, 0.0f, -0.080f),
+                              orient[fb::kSEG_RFoot]);
+            const QVector3D lHeelW = (*ctx.segCenter)[fb::kSEG_LFoot]
+                + vec_rotate(QVector3D(-0.036f, 0.0f, -0.080f),
+                              orient[fb::kSEG_LFoot]);
+            const QVector3D comNow = fb::centerOfMass(*ctx.segCenter, nullptr);
+            m_locomotion.updateStepMetrics(rHeelW, lHeelW, comNow, dt);
+
             if (g_testFlag().load(std::memory_order_relaxed) &&
                 g_glovesFlag().load(std::memory_order_relaxed)) {
                 static int phaseTick = 0;
@@ -2033,10 +2242,12 @@ public:
                               << "s  L="
                               << LocomotionClassifier::gaitPhaseName(m_locomotion.gaitPhaseL())
                               << " durL=" << m_locomotion.gaitDurL() << "s  "
-                              << "rPitchZ=" << rFootPitchZ
-                              << " lPitchZ=" << lFootPitchZ
-                              << " rVz="     << rFootVelZ
-                              << " lVz="     << lFootVelZ << "\n";
+                              << "stepR=" << m_locomotion.lastStepLengthR()
+                              << "m hR=" << m_locomotion.lastStepHeightR() << "m "
+                              << "stepL=" << m_locomotion.lastStepLengthL()
+                              << "m hL=" << m_locomotion.lastStepHeightL() << "m "
+                              << "vertOsc=" << m_locomotion.vertCoMOscillationM() << "m"
+                              << "\n";
                     std::cout.flush();
                 }
             }
@@ -2103,6 +2314,7 @@ private:
     SkinArtifactState     m_skin;
     ContactDetector       m_contacts;
     BodyPoseSolver        m_solver;
+    BatchSmoother         m_smoother;
     LocomotionClassifier  m_locomotion;
     std::array<Quat,      fb::kSegmentCount> m_prevOrient{};
     std::array<QVector3D, fb::kSegmentCount> m_prevSegCenter{};
@@ -2451,10 +2663,11 @@ void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
 
     if (glovesEnabled) {
 
-        ss << "[wls-batch §44.8] mode=per-frame  windowFrames=1  "
-              "maxIKSteps=" << fb::kMaxIKSteps << "\n";
-        ss << "[marg §44.7] mode=none  (Schur complement deferred; "
-              "stdOriFreeze=" << fb::kEstimator.stdOriFreeze
+        ss << "[wls-batch §44.8] mode=rts  windowFrames="
+           << pose_solver::BatchSmoother::kWindow
+           << "  maxIKSteps=" << fb::kMaxIKSteps << "\n";
+        ss << "[marg §44.7] mode=schur (ring decimation, drop-oldest;"
+              " stdOriFreeze=" << fb::kEstimator.stdOriFreeze
            << ", stdPosFreeze=" << fb::kEstimator.stdPosFreeze << ")\n";
     }
 
@@ -2510,6 +2723,7 @@ void SkeletonXsens::buildLengths(const ActorConfig& actor)
     const double h  = actor.heightCm     / 100.0;
     const double fl = actor.footLengthCm / 100.0;
     const double heightScale = (h > 1e-3) ? (h / fb::kRefHeightM) : 1.0;
+    const auto&  anthro = fb::anthroFor(actor.gender);
 
     const double refArmOneSide =
         specLen(fb::kSEG_RShoulder) +
@@ -2518,17 +2732,19 @@ void SkeletonXsens::buildLengths(const ActorConfig& actor)
         specLen(fb::kSEG_RShoulder + 3);
     const double refScapHalfY = 0.08;
     const double refSpanM = 2.0 * refArmOneSide + 2.0 * refScapHalfY;
+    const double anthroArmSpanM = 2.0 * (anthro.upperArmRatio + anthro.forearmRatio + anthro.handRatio) * h;
     const double targetArmSpanM = (actor.armSpanCm > 0.0)
-        ? std::max(0.30, actor.armSpanCm / 100.0)
-        : 1.06 * h;
+        ? std::max(fb::kAnthroFloors.armSpanMin, actor.armSpanCm / 100.0)
+        : anthroArmSpanM;
     double armScale = (refSpanM > 1e-6) ? targetArmSpanM / refSpanM : heightScale;
 
     const double refLegM = specLen(fb::kSEG_RUpperLeg)
                          + specLen(fb::kSEG_RLowerLeg)
                          + fb::ankleHeightM(fb::kRefHeightM);
+    const double anthroLegM = (anthro.thighRatio + anthro.shankRatio + anthro.ankleHeightRatio) * h;
     const double targetLegM = (actor.legLengthCm > 0.0)
-        ? std::max(0.30, actor.legLengthCm / 100.0)
-        : 0.471 * h;
+        ? std::max(fb::kAnthroFloors.legLengthMin, actor.legLengthCm / 100.0)
+        : anthroLegM;
     double legScale = (refLegM > 1e-6) ? targetLegM / refLegM : heightScale;
 
     double heelToBallM, ballToTipM;
@@ -2549,17 +2765,17 @@ void SkeletonXsens::buildLengths(const ActorConfig& actor)
     }
 
     const double pelvisHalfM = (actor.hipWidthCm > 0.0)
-        ? std::max(0.04, actor.hipWidthCm / 200.0)
-        : 0.0905 * h;
+        ? std::max(fb::kAnthroFloors.hipHalfMin, actor.hipWidthCm / 200.0)
+        : 0.5 * anthro.hipWidthRatio * h;
     const double scapHalfM = (actor.shoulderWidthCm > 0.0)
-        ? std::max(0.05, actor.shoulderWidthCm / 200.0)
-        : 0.08 * heightScale;
+        ? std::max(fb::kAnthroFloors.scapHalfMin, actor.shoulderWidthCm / 200.0)
+        : 0.5 * anthro.shoulderWidthRatio * h * (0.08 / (0.5 * 0.234));
 
     double refTrunkM = 0.0;
     for (int s = 0; s <= 5; ++s) refTrunkM += specLen(s);
     const double targetTrunkM = (actor.trunkLengthCm > 0.0)
-        ? std::max(0.40, actor.trunkLengthCm / 100.0)
-        : 0.288 * h;
+        ? std::max(fb::kAnthroFloors.trunkLengthMin, actor.trunkLengthCm / 100.0)
+        : anthro.trunkRatio * h;
     double trunkScale = (refTrunkM > 1e-6) ? targetTrunkM / refTrunkM : heightScale;
 
     auto spineLen = [&](int s) { return float(specLen(s) * trunkScale); };
@@ -2937,7 +3153,11 @@ static Quat matToQuat(double m00, double m01, double m02,
         q.y = (m12 + m21) / s;
         q.z = 0.25 * s;
     }
-    return q.normalized();
+    Quat n = q.normalized();
+    if (n.w < 0.0) {
+        n.w = -n.w; n.x = -n.x; n.y = -n.y; n.z = -n.z;
+    }
+    return n;
 }
 
 static double mirrorYDeviationDeg(const Quat& qR, const Quat& qL)
@@ -3667,6 +3887,8 @@ using FnDeviceTakeFirstDataPacketInQueue =
                                         XsDataPacketBlob*(*)(void*, XsDataPacketBlob*);
 using FnDeviceLastAvailableLiveData   = XsDataPacketBlob*(*)(void*, XsDataPacketBlob*);
 using FnDevicePacketErrorRate         = int(*)(void*);
+using FnDeviceProductCode             = void*(*)(void*, void*);
+using FnDeviceHardwareVersion         = void*(*)(void*, void*);
 
 using FnScanPorts                     = void(*)(void*, int, int, int, int);
 using FnArrayAt                       = void*(*)(void*, std::size_t);
@@ -3675,6 +3897,8 @@ using FnArraySize                     = std::size_t (*)(const void*);
 using FnPortInfoArrayConstruct        = void(*)(void*, std::size_t, void*);
 using FnDeviceIdArrayConstruct        = void(*)(void*, std::size_t, void*);
 using FnStringConstruct               = void(*)(void*);
+using FnStringDestruct                = void(*)(void*);
+using FnStringCopyToWChar             = std::size_t(*)(const void*, wchar_t*, std::size_t);
 
 using FnDataPacketConstruct               = void(*)(XsDataPacketBlob*);
 using FnDataPacketDestruct                = void(*)(XsDataPacketBlob*);
@@ -3730,6 +3954,11 @@ struct Api {
     FnDeviceGotoConfig               deviceGotoConfig       = nullptr;
     FnDeviceGotoMeasurement          deviceGotoMeasurement  = nullptr;
     FnDeviceLocationId               deviceLocationId       = nullptr;
+    FnDeviceProductCode              deviceProductCode      = nullptr;
+    FnDeviceHardwareVersion          deviceHardwareVersion  = nullptr;
+    FnStringConstruct                stringConstruct        = nullptr;
+    FnStringDestruct                 stringDestruct         = nullptr;
+    FnStringCopyToWChar              stringCopyToWChar      = nullptr;
     FnDeviceUpdateRate               deviceUpdateRate       = nullptr;
     FnDeviceGetDataPacketCount       deviceGetDataPacketCount = nullptr;
     FnDeviceTakeFirstDataPacketInQueue deviceTakeFirstDataPacketInQueue = nullptr;
@@ -3867,6 +4096,11 @@ static bool loadApi(Api& api, QString& errDetail)
     ok &= resolveProc(api.xda, "XsDevice_gotoConfig",               api.deviceGotoConfig);
     ok &= resolveProc(api.xda, "XsDevice_gotoMeasurement",          api.deviceGotoMeasurement);
     ok &= resolveProc(api.xda, "XsDevice_locationId",               api.deviceLocationId);
+    resolveProc (api.xda, "XsDevice_productCode",                   api.deviceProductCode);
+    resolveProc (api.xda, "XsDevice_hardwareVersion",               api.deviceHardwareVersion);
+    resolveProc (api.xst, "XsString_construct",                     api.stringConstruct);
+    resolveProc (api.xst, "XsString_destruct",                      api.stringDestruct);
+    resolveProc (api.xst, "XsString_copyToWCharArray",              api.stringCopyToWChar);
     resolveProc (api.xda, "XsDevice_updateRate",                    api.deviceUpdateRate);
     ok &= resolveProc(api.xda, "XsDevice_getDataPacketCount",       api.deviceGetDataPacketCount);
     ok &= resolveProc(api.xda, "XsDevice_takeFirstDataPacketInQueue",
@@ -3975,6 +4209,8 @@ struct MocapReceiver::Impl {
 
     std::array<quint32, kXsensSegmentCount> lastStf{};
     std::array<bool,    kXsensSegmentCount> haveLastStf{};
+
+    std::array<fox::body::ImuChipType, kXsensSegmentCount> detectedChip{};
 
     std::array<Quat, kXsensSegmentCount> s2s{};
     std::array<Quat, kXsensSegmentCount> s2sInv{};
@@ -4203,6 +4439,61 @@ struct FingerDiag {
 };
 static FingerDiag g_fingerDiag;
 
+class FoxKFAGloveFilter {
+public:
+    void reset() {
+        for (auto& q : m_state) q = Quat(1, 0, 0, 0);
+        for (auto& p : m_var)   p = (5.0 * 0.017453292519943295) * (5.0 * 0.017453292519943295);
+        m_initialised = false;
+    }
+    void setFingerTrackingData(bool isLeft,
+                               const std::array<Quat, kFingerSegmentsHand>& q_meas) {
+        auto& dst = isLeft ? m_pendingLeft : m_pendingRight;
+        dst = q_meas;
+        (isLeft ? m_havePendingLeft : m_havePendingRight) = true;
+    }
+    void process(double dt) {
+        if (!m_initialised) {
+            if (m_havePendingRight) m_state = m_pendingRight;
+            if (m_havePendingLeft)  m_stateLeft = m_pendingLeft;
+            m_initialised = true;
+        }
+        const double tau = 0.080;
+        const double alpha = 1.0 - std::exp(-dt / std::max(1e-3, tau));
+        const double R = (1.0 * 0.017453292519943295) * (1.0 * 0.017453292519943295);
+        for (int i = 0; i < kFingerSegmentsHand; ++i) {
+            if (m_havePendingRight) {
+                const double K = m_var[i] / (m_var[i] + R);
+                m_state[i] = slerp_quat(m_state[i], m_pendingRight[i], float(std::clamp(K, alpha, 1.0)));
+                m_state[i] = m_state[i].normalized();
+                m_var[i]   = (1.0 - K) * m_var[i] + 1e-7;
+            }
+            if (m_havePendingLeft) {
+                const double K = m_varLeft[i] / (m_varLeft[i] + R);
+                m_stateLeft[i] = slerp_quat(m_stateLeft[i], m_pendingLeft[i], float(std::clamp(K, alpha, 1.0)));
+                m_stateLeft[i] = m_stateLeft[i].normalized();
+                m_varLeft[i]   = (1.0 - K) * m_varLeft[i] + 1e-7;
+            }
+        }
+        m_havePendingRight = false;
+        m_havePendingLeft  = false;
+    }
+    void outputRight(std::array<Quat, kFingerSegmentsHand>& out) const { out = m_state; }
+    void outputLeft (std::array<Quat, kFingerSegmentsHand>& out) const { out = m_stateLeft; }
+private:
+    std::array<Quat,   kFingerSegmentsHand> m_state{};
+    std::array<Quat,   kFingerSegmentsHand> m_stateLeft{};
+    std::array<double, kFingerSegmentsHand> m_var{};
+    std::array<double, kFingerSegmentsHand> m_varLeft{};
+    std::array<Quat,   kFingerSegmentsHand> m_pendingRight{};
+    std::array<Quat,   kFingerSegmentsHand> m_pendingLeft{};
+    bool m_havePendingRight = false;
+    bool m_havePendingLeft  = false;
+    bool m_initialised      = false;
+};
+
+static FoxKFAGloveFilter g_gloveFilter;
+
 static void parseErgoHand(const float* degs20, bool isLeft,
                           std::array<Quat,      kFingerSegmentsHand>& outQ,
                           std::array<QVector3D, kFingerSegmentsHand>& outP)
@@ -4225,7 +4516,7 @@ static void parseErgoHand(const float* degs20, bool isLeft,
     dg.baselineApplied = (effectivePtr == effective);
     for (int i = 0; i < 20; ++i) { dg.raw[i] = degs20[i]; dg.effective[i] = effectivePtr[i]; }
 
-    const Quat thumbPreRot(1.0, 0.0, 0.0, 0.0);
+    constexpr Quat kThumbBaseRot(1.0, 0.0, 0.0, 0.0);
 
     for (int f = 0; f < 5; ++f) {
         const float* d = effectivePtr + f * 4;
@@ -4240,12 +4531,11 @@ static void parseErgoHand(const float* degs20, bool isLeft,
         const double a1c     = std::clamp(a1, Lm[0].flexMin, Lm[0].flexMax);
         const double a2c     = std::clamp(a2, Lm[1].flexMin, Lm[1].flexMax);
         double a3c           = std::clamp(a3, Lm[2].flexMin, Lm[2].flexMax);
+        (void)a3;
 
         if (f > 0) {
             const double a3Linked = (2.0 / 3.0) * a2c;
-            const double linkedC  = std::clamp(a3Linked, Lm[2].flexMin, Lm[2].flexMax);
-            a3c = std::min(a3c, linkedC) > 0.0 ? std::max(a3c, linkedC) : a3c;
-            a3c = linkedC;
+            a3c = std::clamp(a3Linked, Lm[2].flexMin, Lm[2].flexMax);
         }
 
         {
@@ -4269,7 +4559,7 @@ static void parseErgoHand(const float* degs20, bool isLeft,
         Quat q1 = axisAngleQuat(flexAxis, a2c);
         Quat q2 = axisAngleQuat(flexAxis, a3c);
 
-        Quat worldQ = (f == 0) ? thumbPreRot : Quat(1, 0, 0, 0);
+        Quat worldQ = (f == 0) ? kThumbBaseRot : Quat(1, 0, 0, 0);
         QVector3D p = kFingerBaseOffset[f];
         const int baseIdx = f * 4;
 
@@ -4290,6 +4580,13 @@ static void parseErgoHand(const float* degs20, bool isLeft,
         worldQ = quat_mult(worldQ, q2);
         outQ[baseIdx + 3] = worldQ;
         outP[baseIdx + 3] = p;
+    }
+    {
+        const auto& qbs = isLeft ? fox::body::kFingerQBSLeft
+                                  : fox::body::kFingerQBSRight;
+        for (int i = 0; i < int(outQ.size()) && i < int(qbs.size()); ++i) {
+            outQ[i] = quat_mult(outQ[i], qbs[i]).normalized();
+        }
     }
     {
         QMutexLocker lk(&g_fingerDiag.lock);
@@ -4439,6 +4736,13 @@ static void __cdecl foxManusErgonomicsCb(const void* raw)
     }
 
     if (haveL || haveR) {
+        if (haveL) g_gloveFilter.setFingerTrackingData(true,  lQ);
+        if (haveR) g_gloveFilter.setFingerTrackingData(false, rQ);
+        const double kFilterDt = 1.0 / 120.0;
+        g_gloveFilter.process(kFilterDt);
+        if (haveL) g_gloveFilter.outputLeft(lQ);
+        if (haveR) g_gloveFilter.outputRight(rQ);
+
         QMutexLocker lk(&g_ergo.lock);
         if (haveL) { g_ergo.leftQ  = lQ;  g_ergo.leftP  = lP;  g_ergo.haveLeft.store(true); }
         if (haveR) { g_ergo.rightQ = rQ;  g_ergo.rightP = rP;  g_ergo.haveRight.store(true); }
@@ -4642,13 +4946,28 @@ bool MocapReceiver::connectGloves()
     } else {
 
         auto noop = [](const void*) {};
-        if (regSkel) { int r = 0; sehCall([&]() { r = regSkel(noop); });
-                       testLog("[manus] RegSkeletonStream rc=" + std::to_string(r), I.test); }
+        if (regSkel) {
+            auto skelCb = [](const void* msg) {
+                if (!msg) return;
+                static std::atomic<int> s_skelLogTick{0};
+                if (s_skelLogTick.fetch_add(1) % 240 == 0) {
+                    std::cerr << "[manus-skeleton] frame received (using ergonomics stream as primary)\n";
+                }
+            };
+            int r = 0; sehCall([&]() { r = regSkel(skelCb); });
+            testLog("[manus] RegSkeletonStream rc=" + std::to_string(r), I.test);
+        }
 
         { int r = 0; sehCall([&]() { r = regErgo(&foxManusErgonomicsCb); });
           testLog("[manus] RegErgonomicsStream rc=" + std::to_string(r), I.test); }
-        if (regSys)  { int r = 0; sehCall([&]() { r = regSys(noop); });
-                       testLog("[manus] RegSystemStream rc=" + std::to_string(r), I.test); }
+        if (regSys)  {
+            auto sysCb = [](const void* msg) {
+                if (!msg) return;
+                std::cerr << "[manus-system] event received (low-level diagnostic)\n";
+            };
+            int r = 0; sehCall([&]() { r = regSys(sysCb); });
+            testLog("[manus] RegSystemStream rc=" + std::to_string(r), I.test);
+        }
 
         int sRc = -1;
         sehCall([&]() { sRc = setSess(kSessionTypeUnreal); });
@@ -4665,31 +4984,44 @@ bool MocapReceiver::connectGloves()
             testLog("[manus] InitCoordSystemVUH rc=" + std::to_string(cRc), I.test);
         }
 
-        int lRc = -1;
-        sehCall([&]() { lRc = lookFor(1, true); });
-        testLog("[manus] CoreSdk_LookForHosts rc=" + std::to_string(lRc), I.test);
+        constexpr int kMaxRetries = 5;
+        int backoffSec = 1;
+        for (int attempt = 0; attempt < kMaxRetries && !coreUp; ++attempt) {
+            int lRc = -1;
+            sehCall([&]() { lRc = lookFor(1, true); });
+            testLog(std::string("[manus] CoreSdk_LookForHosts attempt ")
+                    + std::to_string(attempt + 1) + "/" + std::to_string(kMaxRetries)
+                    + " rc=" + std::to_string(lRc), I.test);
 
-        std::uint32_t hostCount = 0;
-        sehCall([&]() { getNumH(&hostCount); });
-        testLog("[manus] hosts found = " + std::to_string(hostCount), I.test);
+            std::uint32_t hostCount = 0;
+            sehCall([&]() { getNumH(&hostCount); });
+            testLog("[manus] hosts found = " + std::to_string(hostCount), I.test);
 
-        if (hostCount > 0) {
-            std::vector<Host> hosts(hostCount);
-            int hRc = -1;
-            sehCall([&]() { hRc = getHosts(hosts.data(), hostCount); });
-            for (std::uint32_t i = 0; i < hostCount && !coreUp; ++i) {
-                int cRc = -1;
-                sehCall([&]() { cRc = connectH(hosts[i]); });
-                testLog(std::string("[manus] ConnectToHost[")
-                        + std::to_string(i) + "] rc=" + std::to_string(cRc),
-                        I.test);
-                if (cRc != 0) continue;
-                for (int k = 0; k < 10; ++k) {
-                    bool flag = false;
-                    sehCall([&]() { isConn(&flag); });
-                    if (flag) { coreUp = true; break; }
-                    Sleep(100);
+            if (hostCount > 0) {
+                std::vector<Host> hosts(hostCount);
+                int hRc = -1;
+                sehCall([&]() { hRc = getHosts(hosts.data(), hostCount); });
+                for (std::uint32_t i = 0; i < hostCount && !coreUp; ++i) {
+                    int cRc = -1;
+                    sehCall([&]() { cRc = connectH(hosts[i]); });
+                    testLog(std::string("[manus] ConnectToHost[")
+                            + std::to_string(i) + "] rc=" + std::to_string(cRc),
+                            I.test);
+                    if (cRc != 0) continue;
+                    for (int k = 0; k < 10; ++k) {
+                        bool flag = false;
+                        sehCall([&]() { isConn(&flag); });
+                        if (flag) { coreUp = true; break; }
+                        Sleep(100);
+                    }
                 }
+            }
+
+            if (!coreUp && attempt + 1 < kMaxRetries) {
+                testLog(std::string("[manus] retry in ")
+                        + std::to_string(backoffSec) + "s", I.test);
+                Sleep(static_cast<DWORD>(backoffSec * 1000));
+                backoffSec *= 2;
             }
         }
     }
@@ -4877,6 +5209,115 @@ double MocapReceiver::magneticDeclinationDeg() const
 double MocapReceiver::magneticInclinationDeg() const
 {
     return m_impl->magInclinationDeg.load(std::memory_order_relaxed);
+}
+
+bool MocapReceiver::saveCalibration(const QString& path) const
+{
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) return false;
+    QTextStream out(&file);
+    out.setRealNumberPrecision(12);
+    QMutexLocker lk(&m_impl->lock);
+    out << "{\n";
+    out << "  \"version\": 1,\n";
+    out << "  \"magDeclinationDeg\": "
+        << m_impl->magDeclinationDeg.load(std::memory_order_relaxed) << ",\n";
+    out << "  \"magInclinationDeg\": "
+        << m_impl->magInclinationDeg.load(std::memory_order_relaxed) << ",\n";
+    out << "  \"accMagn\":  [";
+    for (int i = 0; i < kXsensSegmentCount; ++i) {
+        out << m_impl->accMagn[i];
+        if (i + 1 < kXsensSegmentCount) out << ",";
+    }
+    out << "],\n";
+    out << "  \"magMagn\":  [";
+    for (int i = 0; i < kXsensSegmentCount; ++i) {
+        out << m_impl->magMagn[i];
+        if (i + 1 < kXsensSegmentCount) out << ",";
+    }
+    out << "],\n";
+    out << "  \"gyrBias\":  [";
+    for (int i = 0; i < kXsensSegmentCount; ++i) {
+        const auto& g = m_impl->gyrBias[i];
+        out << "[" << g.x() << "," << g.y() << "," << g.z() << "]";
+        if (i + 1 < kXsensSegmentCount) out << ",";
+    }
+    out << "],\n";
+    out << "  \"s2s\": [";
+    for (int i = 0; i < kXsensSegmentCount; ++i) {
+        const auto& q = m_impl->s2s[i];
+        out << "[" << q.w << "," << q.x << "," << q.y << "," << q.z << "]";
+        if (i + 1 < kXsensSegmentCount) out << ",";
+    }
+    out << "]\n";
+    out << "}\n";
+    return file.error() == QFile::NoError;
+}
+
+bool MocapReceiver::loadCalibration(const QString& path)
+{
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) return false;
+    const QByteArray buf = file.readAll();
+    QJsonParseError err{};
+    const QJsonDocument doc = QJsonDocument::fromJson(buf, &err);
+    if (err.error != QJsonParseError::NoError || !doc.isObject()) return false;
+    const QJsonObject root = doc.object();
+
+    if (root.contains("magDeclinationDeg"))
+        setMagneticDeclinationDeg(root["magDeclinationDeg"].toDouble());
+    if (root.contains("magInclinationDeg"))
+        setMagneticInclinationDeg(root["magInclinationDeg"].toDouble());
+
+    auto readArr = [&](const QString& key,
+                       std::array<double, kXsensSegmentCount>& out) {
+        const QJsonArray a = root[key].toArray();
+        for (int i = 0; i < kXsensSegmentCount && i < a.size(); ++i)
+            out[i] = a[i].toDouble(1.0);
+    };
+
+    std::array<double,    kXsensSegmentCount> accMagn{};
+    std::array<double,    kXsensSegmentCount> magMagn{};
+    std::array<QVector3D, kXsensSegmentCount> gyrBias{};
+    std::array<Quat,      kXsensSegmentCount> s2s{};
+    for (int i = 0; i < kXsensSegmentCount; ++i) {
+        accMagn[i] = 1.0;
+        magMagn[i] = 1.0;
+        s2s[i]     = Quat(1, 0, 0, 0);
+    }
+
+    readArr("accMagn", accMagn);
+    readArr("magMagn", magMagn);
+
+    if (root.contains("gyrBias")) {
+        const QJsonArray a = root["gyrBias"].toArray();
+        for (int i = 0; i < kXsensSegmentCount && i < a.size(); ++i) {
+            const QJsonArray v = a[i].toArray();
+            if (v.size() >= 3) {
+                gyrBias[i] = QVector3D(float(v[0].toDouble()),
+                                       float(v[1].toDouble()),
+                                       float(v[2].toDouble()));
+            }
+        }
+    }
+    if (root.contains("s2s")) {
+        const QJsonArray a = root["s2s"].toArray();
+        for (int i = 0; i < kXsensSegmentCount && i < a.size(); ++i) {
+            const QJsonArray q = a[i].toArray();
+            if (q.size() >= 4) {
+                s2s[i] = Quat(q[0].toDouble(1.0),
+                              q[1].toDouble(0.0),
+                              q[2].toDouble(0.0),
+                              q[3].toDouble(0.0));
+            }
+        }
+    }
+
+    setAccNormalisation(accMagn);
+    setMagNormalisation(magMagn);
+    setGyroBias(gyrBias);
+    setS2sAlignment(s2s);
+    return true;
 }
 
 QVector3D MocapReceiver::snapshotGyroAvg(int idx, int samples) const
@@ -5106,6 +5547,37 @@ void MocapReceiver::run()
                                             : std::string("(service device)")),
                     I.test);
             if (segIdx < 0) continue;
+
+            if (api.deviceProductCode && api.stringConstruct
+                && api.stringDestruct && api.stringCopyToWChar) {
+                std::array<unsigned char, 256> xsStr{};
+                api.stringConstruct(xsStr.data());
+                api.deviceProductCode(dev, xsStr.data());
+                std::array<wchar_t, 64> buf{};
+                api.stringCopyToWChar(xsStr.data(), buf.data(), buf.size());
+                api.stringDestruct(xsStr.data());
+                const std::wstring product(buf.data());
+                fox::body::ImuChipType chip = fox::body::ImuChipType::W2;
+                if (product.find(L"X3") != std::wstring::npos) {
+                    chip = fox::body::ImuChipType::X3;
+                } else if (product.find(L"X2") != std::wstring::npos) {
+                    chip = fox::body::ImuChipType::X2;
+                }
+                if (I.test) {
+                    char asc[64]{};
+                    for (size_t k = 0; k < buf.size() && k < 63; ++k)
+                        asc[k] = char(buf[k]);
+                    testLog(std::string("[xda]     productCode=") + asc
+                            + " → ImuChip="
+                            + (chip == fox::body::ImuChipType::X3 ? "X3"
+                                : chip == fox::body::ImuChipType::X2 ? "X2" : "W2"),
+                            I.test);
+                }
+                if (segIdx >= 0 && segIdx < fox::body::kSegmentCount) {
+                    I.detectedChip[segIdx] = chip;
+                }
+            }
+
             trackerHandles.push_back(dev);
             trackerSegments.push_back(segIdx);
         }
@@ -5446,15 +5918,31 @@ void MocapReceiver::run()
                     }
                     s.magNormReferenceLocal = refNorm;
 
+                    auto chipForSeg = [&](int seg) {
+                        const fox::body::ImuChipType det = I.detectedChip[seg];
+                        const fox::body::ImuChipType deflt = fox::body::kImuChipPerSeg[seg];
+                        return (det == fox::body::ImuChipType::W2 &&
+                                deflt != fox::body::ImuChipType::W2)
+                                ? deflt : det;
+                    };
+
                     if (targetSeg >= 0 && targetSeg < fox::body::kSegmentCount) {
                         const auto& relax = fox::body::kMagGateRelax[targetSeg];
                         const float chipMul = fox::body::magNoiseScaleForChip(
-                            fox::body::kImuChipPerSeg[targetSeg]);
+                            chipForSeg(targetSeg));
                         s.magDipGateRelax  = relax.dipMul   * chipMul;
                         s.magAngGateRelax  = relax.angleMul * chipMul;
                         s.magNormGateRelax = relax.normMul;
                     }
                     FusionAhrsSetSettings(&ahrs, &s);
+
+                    if (targetSeg >= 0 && targetSeg < fox::body::kSegmentCount) {
+                        const fox::body::ImuChipNoise& nz =
+                            fox::body::chipNoiseFor(chipForSeg(targetSeg));
+                        FusionAhrsSetNoise(&ahrs, nz.sigmaAccMs2,
+                                                   nz.sigmaGyrDegS,
+                                                   -1.0f);
+                    }
                     I.fusionReady[targetSeg] = true;
                 }
 
@@ -5464,6 +5952,9 @@ void MocapReceiver::run()
                 const FusionVector a = {{ float(accForFilter.x()),
                                           float(accForFilter.y()),
                                           float(accForFilter.z()) }};
+                if (dt > 1e-4) {
+                    FusionAhrsSetSampleRate(&ahrs, float(1.0 / dt));
+                }
                 if (haveMag && mag.length() > 1e-6) {
                     const FusionVector m = {{ float(mag.x()),
                                               float(mag.y()),
@@ -6693,7 +7184,7 @@ static PlacementReport analyzePlacement(
 
         if (assignedClass == expectedClass) {
             ++rep.verified;
-        } else if (maxP >= 0.5f) {
+        } else if (maxP >= fox::body::kSpcAcceptanceP) {
             rep.mismatches << QString("%1→%2 (p=%3)")
                                 .arg(QString::fromUtf8(kSegmentNames[seg]))
                                 .arg(QString::fromUtf8(
@@ -6709,7 +7200,7 @@ static PlacementReport analyzePlacement(
         const float maxP = *std::max_element(probs[r].begin(), probs[r].end());
         suitUncertainty += (1.0f - maxP);
     }
-    rep.suitUncertaintyAlarm = suitUncertainty > 4.0f;
+    rep.suitUncertaintyAlarm = suitUncertainty > fox::body::kSpcSuitUncertSum;
 
     return rep;
 }
@@ -9487,7 +9978,20 @@ struct LiveStreamSender::Impl {
     }
 
     qint64 lastSendWarnMs = -1;
+    qint64 lastMtuWarnMs  = -1;
+    static constexpr int kMtuSoftLimit = 1472;
     void sendChecked(const QByteArray& pkt) {
+        if (pkt.size() > kMtuSoftLimit) {
+            const qint64 now = timer.elapsed();
+            if (lastMtuWarnMs < 0 || (now - lastMtuWarnMs) >= 5000) {
+                lastMtuWarnMs = now;
+                std::cerr << "[stream] WARNING: UDP datagram size "
+                          << pkt.size() << " bytes > " << kMtuSoftLimit
+                          << " (IPv4 MTU minus 28-byte header). Consider"
+                          << " enabling splitGloveDatagrams to avoid"
+                          << " fragmentation/drop.\n";
+            }
+        }
         if (sock.writeDatagram(pkt, host, port) >= 0) return;
         const qint64 now = timer.elapsed();
         if (lastSendWarnMs < 0 || (now - lastSendWarnMs) >= 1000) {
@@ -9978,7 +10482,11 @@ RecordHud::RecordHud(QWidget* parent) : QWidget(parent)
 
 void RecordHud::updateStats(qint64 frames, double elapsedSec)
 {
-    m_lblFrames->setText(QString::number(frames) + "  " + Lang::t("rec_frames"));
+    const double fpsActual = (elapsedSec > 0.05)
+        ? double(frames) / elapsedSec
+        : 0.0;
+    m_lblFrames->setText(QString::number(frames) + "  " + Lang::t("rec_frames")
+                         + "  " + QString::asprintf("%.1f Hz", fpsActual));
     const int mm = int(elapsedSec) / 60;
     const int ss = int(elapsedSec) % 60;
     const int ds = int(elapsedSec * 10) % 10;
@@ -10300,8 +10808,14 @@ static void quatToEulerZXYdeg(const Quat& q, double& rz, double& rx, double& ry)
 
     const double sx = std::clamp(m21, -1.0, 1.0);
     const double xrad = std::asin(sx);
-    const double zrad = std::atan2(-m01, m11);
-    const double yrad = std::atan2(-m20, m22);
+    double zrad, yrad;
+    if (std::abs(sx) > 0.999) {
+        zrad = std::atan2(m10, m00);
+        yrad = 0.0;
+    } else {
+        zrad = std::atan2(-m01, m11);
+        yrad = std::atan2(-m20, m22);
+    }
     const double K = 180.0 / M_PI;
     rx = xrad * K;
     ry = yrad * K;
@@ -10353,6 +10867,19 @@ exportBakedOffsetsCm(const SkeletonXsens& skel)
         off[j] = vec_rotate(d, skel.defAngFor(parentSeg).inv()) * 100.0f;
     }
     return off;
+}
+
+static QVector3D exportEndSiteOffsetCm(int j, const SkeletonXsens& skel,
+                                       double heightMeters)
+{
+    const int seg = kBoneToSeg[j];
+    if (seg < 0 || seg >= kXsensSegmentCount) return QVector3D(0, 0, 0);
+    const QVector3D Lspec = fox::body::kSensorToBone[seg].L_bone;
+    const double scale = (heightMeters > 1e-3)
+                       ? (heightMeters / fox::body::kRefHeightM) : 1.0;
+    const QVector3D Lscaled = Lspec * float(scale);
+    const QVector3D localTipNwu = vec_rotate(Lscaled, skel.defAngFor(seg).inv());
+    return localTipNwu * 100.0f;
 }
 
 static inline Quat exportLocalRot(int j,
@@ -10410,9 +10937,11 @@ static bool writeBvh(const QString& path,
             if (int(kBvh[j].parent) == idx) emitBone(int(j), indent + 1);
         }
         if (childCount[idx] == 0) {
+            const QVector3D end = exportEndSiteOffsetCm(idx, skel, heightMeters);
             os << pad(indent+1) << "End Site\n";
             os << pad(indent+1) << "{\n";
-            os << pad(indent+2) << "OFFSET 0.0 5.0 0.0\n";
+            os << pad(indent+2) << "OFFSET "
+               << end.x() << " " << end.y() << " " << end.z() << "\n";
             os << pad(indent+1) << "}\n";
         }
         os << pad(indent) << "}\n";
@@ -10432,8 +10961,8 @@ static bool writeBvh(const QString& path,
         const auto W = exportWorldOrients(fr, skel);
 
         os << (fr.pelvisPos.x() * 100.0) << " "
-           << (fr.pelvisPos.y() * 100.0) << " "
-           << (fr.pelvisPos.z() * 100.0);
+           << (fr.pelvisPos.z() * 100.0) << " "
+           << (-fr.pelvisPos.y() * 100.0);
 
         for (int idx : dfsOrder) {
             double rz, rx, ry;
@@ -10537,7 +11066,7 @@ static bool writeFbxAscii(const QString& path,
         os << "        Properties70:  {\n";
         os << "            P: \"Lcl Translation\", \"Lcl Translation\", \"\", \"A+\","
            << offCm[i].x() << "," << offCm[i].y() << "," << offCm[i].z() << "\n";
-        os << "            P: \"RotationOrder\", \"enum\", \"\", \"\", 2\n";
+        os << "            P: \"RotationOrder\", \"enum\", \"\", \"\", 4\n";
         os << "        }\n";
         os << "    }\n";
     }
@@ -11565,15 +12094,19 @@ void MainWindow::onRenderTick()
 
         if (f.segValid[i] && s_haveOut[i]) {
             const double jumpDeg = quat_angle_deg(quat_mult(cand, s_lastOut[i].inv()));
+            const float kGyroQuietSq = float(fox::body::kJumpDetect.gyroQuietDegS *
+                                              fox::body::kJumpDetect.gyroQuietDegS);
             const bool gyroQuiet =
-                (f.gyrSensor[SEG_Pelvis].lengthSquared() < (25.0f * 25.0f)) &&
-                (f.gyrSensor[i].lengthSquared()          < (25.0f * 25.0f));
+                (f.gyrSensor[SEG_Pelvis].lengthSquared() < kGyroQuietSq) &&
+                (f.gyrSensor[i].lengthSquared()          < kGyroQuietSq);
             g_renderDiag.jumpDeg[i]   = jumpDeg;
             g_renderDiag.gyroQuiet[i] = gyroQuiet;
 
-            if (gyroQuiet && jumpDeg > 20.0) {
+            if (gyroQuiet && jumpDeg > fox::body::kJumpDetect.threshDeg) {
                 auto smoothstep01 = [](double x){ x = std::clamp(x,0.0,1.0); return x*x*(3.0-2.0*x); };
-                const double rejectW = smoothstep01((jumpDeg - 20.0) / 15.0);
+                const double rejectW = smoothstep01(
+                    (jumpDeg - fox::body::kJumpDetect.threshDeg) /
+                    std::max(1.0, fox::body::kJumpDetect.blendRangeDeg));
                 g_renderDiag.rejectW[i] = rejectW;
                 if (rejectW > 0.999) {
                     if (m_test) {
@@ -13120,6 +13653,9 @@ CliArgs parseCli(int argc, char** argv)
         else if (a == "--wrist-constraint")         out.wristConstraint = true;
         else if (a == "--link"   || a == "-link")   { out.suit = SuitType::Link;   suitExplicit = true; }
         else if (a == "--awinda" || a == "-awinda") { out.suit = SuitType::Awinda; suitExplicit = true; }
+        else if ((a == "--lang" || a == "--language") && i + 1 < argc) {
+            out.language = QString::fromUtf8(argv[++i]).toLower();
+        }
         else if (a == "-h" || a == "--help") {
             std::cout <<
                 "Fox Mocap — MVN-style Xsens client (Link 240 Hz / Awinda 60 Hz)\n"
@@ -13136,7 +13672,8 @@ CliArgs parseCli(int argc, char** argv)
                 "  --link     Xsens Link suit — 240 Hz update rate (default for -test).\n"
                 "  --awinda   Xsens Awinda suit — 60 Hz update rate (default).\n"
                 "             --link/--awinda override -test's default in ANY order,\n"
-                "             so `-test -gloves -awinda` runs the 60 Hz Awinda suit.\n";
+                "             so `-test -gloves -awinda` runs the 60 Hz Awinda suit.\n"
+                "  --lang RU|EN  Force UI language without touching the user preference.\n";
             std::exit(0);
         }
     }
@@ -13184,6 +13721,9 @@ int main(int argc, char** argv)
     const CliArgs cli = parseCli(argc, argv);
     fox::pose_solver::g_testFlag().store(cli.test);
     fox::pose_solver::g_glovesFlag().store(cli.gloves);
+
+    if (cli.language == "ru") Lang::instance().setLanguage(Lang::RU);
+    else if (cli.language == "en") Lang::instance().setLanguage(Lang::EN);
     if (cli.test) {
         attachTestOutput();
 

@@ -56,7 +56,9 @@
 
 #define KFA_SKIN_TAU_S           0.15f
 
-#define N15 15
+#define N15 17
+#define IDX_MAGNORM 15
+#define IDX_SKINPHI 16
 
 static inline float DegToRad(float d) { return d * 0.017453292519943295f; }
 static inline float RadToDeg(float r) { return r * 57.29577951308232f; }
@@ -218,7 +220,7 @@ static void Sub3x3(const float *P15, int rowStart, int colStart, float out9[9]) 
             out9[i * 3 + j] = P15[(rowStart + i) * N15 + (colStart + j)];
 }
 
-static void ApplyDeltaX(FusionAhrs *ahrs, const float dx[15]) {
+static void ApplyDeltaX(FusionAhrs *ahrs, const float dx[N15]) {
 
     FusionVector dth = { .axis = { dx[0], dx[1], dx[2] } };
     ahrs->q = FusionQuaternionNormalise(FusionQuaternionProduct(ahrs->q, ExpQuat(dth)));
@@ -227,6 +229,8 @@ static void ApplyDeltaX(FusionAhrs *ahrs, const float dx[15]) {
     ahrs->b_a.axis.x += dx[6];  ahrs->b_a.axis.y += dx[7];  ahrs->b_a.axis.z += dx[8];
     ahrs->m0.axis.x  += dx[9];  ahrs->m0.axis.y  += dx[10]; ahrs->m0.axis.z  += dx[11];
     ahrs->v_lp.axis.x+= dx[12]; ahrs->v_lp.axis.y+= dx[13]; ahrs->v_lp.axis.z+= dx[14];
+    ahrs->magNormBias   += dx[IDX_MAGNORM];
+    ahrs->skinPhiScalar += dx[IDX_SKINPHI];
 }
 
 const FusionAhrsSettings fusionAhrsDefaultSettings = {
@@ -271,6 +275,13 @@ void FusionAhrsRestart(FusionAhrs *ahrs) {
     for (int i = 0; i < 3; ++i) ahrs->P[(9  + i) * N15 + (9  + i)] = sM * sM;
     for (int i = 0; i < 3; ++i) ahrs->P[(12 + i) * N15 + (12 + i)] = sV * sV;
 
+    const float sN = 0.05f;
+    const float sS = 3.0f * 0.017453292519943295f;
+    ahrs->P[IDX_MAGNORM * N15 + IDX_MAGNORM] = sN * sN;
+    ahrs->P[IDX_SKINPHI * N15 + IDX_SKINPHI] = sS * sS;
+    ahrs->magNormBias   = 0.0f;
+    ahrs->skinPhiScalar = 0.0f;
+
     ahrs->a_lp = FUSION_VECTOR_ZERO;
     ahrs->a_lp_ready = false;
     ahrs->a_lin_body  = FUSION_VECTOR_ZERO;
@@ -310,6 +321,21 @@ void FusionAhrsInitialise(FusionAhrs *ahrs) {
     FusionAhrsRestart(ahrs);
 }
 
+void FusionAhrsSetNoise(FusionAhrs *ahrs,
+                        float sigmaAccMs2,
+                        float sigmaGyrDegS,
+                        float sigmaMagNorm)
+{
+    if (sigmaAccMs2  > 0.0f) ahrs->sigmaAcc = sigmaAccMs2;
+    if (sigmaGyrDegS > 0.0f) ahrs->sigmaGyr = DegToRad(sigmaGyrDegS);
+    if (sigmaMagNorm > 0.0f) ahrs->sigmaMag = sigmaMagNorm;
+}
+
+void FusionAhrsSetSampleRate(FusionAhrs *ahrs, float sampleRateHz)
+{
+    if (sampleRateHz > 1.0f) ahrs->settings.sampleRateHz = sampleRateHz;
+}
+
 static void Predict(FusionAhrs *ahrs, FusionVector gyroDegS, float dt) {
     FusionVector omega = {{
         DegToRad(gyroDegS.axis.x) - ahrs->b_g.axis.x,
@@ -342,16 +368,30 @@ static void Predict(FusionAhrs *ahrs, FusionVector gyroDegS, float dt) {
             ahrs->P[i * N15 + j] = s;
         }
 
-    const float qO = ahrs->sigmaGyr * ahrs->sigmaGyr;
+    const float fs = (ahrs->settings.sampleRateHz > 1.0f)
+                      ? ahrs->settings.sampleRateHz : 240.0f;
+    const float n_gyr_psd = ahrs->sigmaGyr / sqrtf(fs);
+    const float qO = n_gyr_psd * n_gyr_psd;
     const float qG = ahrs->sBg * ahrs->sBg;
     const float qA = KFA_S_QV_ACC_LP * KFA_S_QV_ACC_LP;
     const float qM = KFA_S_QV_MAG_RW * KFA_S_QV_MAG_RW;
     const float qV = KFA_S_QV_ACC_LP * KFA_S_QV_ACC_LP;
-    for (int i = 0; i < 3; ++i) ahrs->P[(0  + i) * N15 + (0  + i)] += qO * dt * dt;
+    for (int i = 0; i < 3; ++i) ahrs->P[(0  + i) * N15 + (0  + i)] += qO * dt;
     for (int i = 0; i < 3; ++i) ahrs->P[(3  + i) * N15 + (3  + i)] += qG * dt;
     for (int i = 0; i < 3; ++i) ahrs->P[(6  + i) * N15 + (6  + i)] += qA * dt;
     for (int i = 0; i < 3; ++i) ahrs->P[(9  + i) * N15 + (9  + i)] += qM * dt;
     for (int i = 0; i < 3; ++i) ahrs->P[(12 + i) * N15 + (12 + i)] += qV * dt;
+
+    const float qN = 1.0e-4f * 1.0e-4f;
+    ahrs->P[IDX_MAGNORM * N15 + IDX_MAGNORM] += qN * dt;
+
+    const float skinSigma = 3.0f * 0.017453292519943295f;
+    const float skinTau   = KFA_SKIN_TAU_S;
+    const float skinDecay = expf(-2.0f * dt / skinTau);
+    ahrs->P[IDX_SKINPHI * N15 + IDX_SKINPHI] *= skinDecay;
+    ahrs->skinPhiScalar  *= expf(-dt / skinTau);
+    const float qS = (skinSigma * skinSigma) * (1.0f - skinDecay);
+    ahrs->P[IDX_SKINPHI * N15 + IDX_SKINPHI] += qS;
 
     Symm15(ahrs->P);
 }
@@ -420,7 +460,30 @@ static void ApplyAccUpdate(FusionAhrs *ahrs, FusionVector aSensorMs2) {
     }
 
     const FusionVector gWorld  = { .axis = { 0.0f, 0.0f, +KFA_GRAVITY_MS2 } };
-    const FusionVector hAcc    = RotByQInv(ahrs->q, gWorld);
+    FusionVector hAcc    = RotByQInv(ahrs->q, gWorld);
+    const float skinAng = ahrs->skinPhiScalar;
+    if (fabsf(skinAng) > 1e-6f) {
+        const float c = cosf(skinAng);
+        const float s = sinf(skinAng);
+        const float gx = hAcc.axis.x;
+        const float gy = hAcc.axis.y;
+        const float invXy = 1.0f / sqrtf(gx * gx + gy * gy + 1e-12f);
+        const float ax = -gy * invXy;
+        const float ay = +gx * invXy;
+        const float az = 0.0f;
+        const FusionVector hRot = {{
+            (c + ax * ax * (1.0f - c))             * hAcc.axis.x
+              + (ax * ay * (1.0f - c) - az * s)    * hAcc.axis.y
+              + (ax * az * (1.0f - c) + ay * s)    * hAcc.axis.z,
+            (ay * ax * (1.0f - c) + az * s)        * hAcc.axis.x
+              + (c + ay * ay * (1.0f - c))         * hAcc.axis.y
+              + (ay * az * (1.0f - c) - ax * s)    * hAcc.axis.z,
+            (az * ax * (1.0f - c) - ay * s)        * hAcc.axis.x
+              + (az * ay * (1.0f - c) + ax * s)    * hAcc.axis.y
+              + (c + az * az * (1.0f - c))         * hAcc.axis.z,
+        }};
+        hAcc = hRot;
+    }
     const FusionVector aCorr   = {{
         aSensorMs2.axis.x - ahrs->b_a.axis.x,
         aSensorMs2.axis.y - ahrs->b_a.axis.y,
@@ -438,6 +501,14 @@ static void ApplyAccUpdate(FusionAhrs *ahrs, FusionVector aSensorMs2) {
     for (int i = 0; i < 3; ++i)
         for (int j = 0; j < 3; ++j) H[i * N15 + (0 + j)] = Hth[i * 3 + j];
     for (int i = 0; i < 3; ++i)     H[i * N15 + (6 + i)] = +1.0f;
+
+    const float rNorm = sqrtf(r[0] * r[0] + r[1] * r[1] + r[2] * r[2]);
+    if (rNorm > 1e-6f) {
+        const float invN = 1.0f / rNorm;
+        H[0 * N15 + IDX_SKINPHI] = -r[0] * invN;
+        H[1 * N15 + IDX_SKINPHI] = -r[1] * invN;
+        H[2 * N15 + IDX_SKINPHI] = -r[2] * invN;
+    }
 
     const float Rs = (ahrs->sigmaAcc * ahrs->sigmaAcc) / ahrs->fAccBoost;
     const float Rdiag[3] = { Rs, Rs, Rs };
@@ -556,7 +627,11 @@ static void ApplyMagUpdate(FusionAhrs *ahrs, FusionVector m, float dt) {
     ahrs->magWasClosed = false;
     ahrs->magGateOpen = true;
 
-    const FusionVector hMag = RotByQInv(ahrs->q, ahrs->m0);
+    const float magNormScale = 1.0f + ahrs->magNormBias;
+    FusionVector hMag = RotByQInv(ahrs->q, ahrs->m0);
+    hMag.axis.x *= magNormScale;
+    hMag.axis.y *= magNormScale;
+    hMag.axis.z *= magNormScale;
     const float r[3] = {
         m.axis.x - hMag.axis.x,
         m.axis.y - hMag.axis.y,
@@ -576,6 +651,10 @@ static void ApplyMagUpdate(FusionAhrs *ahrs, FusionVector m, float dt) {
     H[0 * N15 + 9 + 0] = ex.axis.x;  H[0 * N15 + 9 + 1] = ey.axis.x;  H[0 * N15 + 9 + 2] = ez.axis.x;
     H[1 * N15 + 9 + 0] = ex.axis.y;  H[1 * N15 + 9 + 1] = ey.axis.y;  H[1 * N15 + 9 + 2] = ez.axis.y;
     H[2 * N15 + 9 + 0] = ex.axis.z;  H[2 * N15 + 9 + 1] = ey.axis.z;  H[2 * N15 + 9 + 2] = ez.axis.z;
+
+    H[0 * N15 + IDX_MAGNORM] = hMag.axis.x;
+    H[1 * N15 + IDX_MAGNORM] = hMag.axis.y;
+    H[2 * N15 + IDX_MAGNORM] = hMag.axis.z;
 
     float sigmaMagEff = ahrs->sigmaMag;
     if (ahrs->magRedefBoostTimer > 0.0f) {
@@ -823,6 +902,8 @@ FusionAhrsInternalStates FusionAhrsGetInternalStates(const FusionAhrs *ahrs) {
     s.magneticError = RadToDeg(ahrs->magResidualNorm);
     s.magnetometerIgnored = !ahrs->magGateOpen;
     s.magneticRecoveryTrigger = 0.0f;
+    s.magNormBias = ahrs->magNormBias;
+    s.skinPhiDeg  = RadToDeg(ahrs->skinPhiScalar);
     return s;
 }
 

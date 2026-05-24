@@ -49,7 +49,7 @@ constexpr int     kXsensSegmentCountWithDummies = 27;
 constexpr int     kFingerSegmentsHand = 20;
 constexpr double  kRenderFps          = 90.0;
 constexpr double  kStaleSeconds       = 2.0;
-constexpr int     kCalibrationSamples = 500;
+constexpr int     kCalibrationSamples = 720;
 constexpr int     kCountdownSeconds   = 3;
 
 enum class SuitType { Awinda, Link };
@@ -137,6 +137,9 @@ struct ActorConfig {
     double hipWidthCm      = 0.0;
     double shoulderWidthCm = 0.0;
     double trunkLengthCm   = 0.0;
+
+    fox::body::Gender gender = fox::body::GenderMale;
+
     bool   useGloves       = false;
 };
 
@@ -567,6 +570,9 @@ public:
     void setMagneticInclinationDeg(double deg);
     double magneticDeclinationDeg() const;
     double magneticInclinationDeg() const;
+
+    bool saveCalibration(const QString& path) const;
+    bool loadCalibration(const QString& path);
 
     QVector3D snapshotGyroAvg(int idx, int samples) const;
     QVector3D liveGyrSensor(int idx) const;
@@ -1288,6 +1294,7 @@ struct CliArgs {
     bool gloves = false;
     bool wristConstraint = false;
     SuitType suit = SuitType::Awinda;
+    QString language;
 };
 CliArgs parseCli(int argc, char** argv);
 

@@ -28,7 +28,10 @@ typedef struct {
     FusionVector     m0;
     FusionVector     v_lp;
 
-    float P[15 * 15];
+    float magNormBias;
+    float skinPhiScalar;
+
+    float P[17 * 17];
 
     FusionVector a_lp;
     bool         a_lp_ready;
@@ -79,6 +82,8 @@ typedef struct {
     float magneticError;
     bool  magnetometerIgnored;
     float magneticRecoveryTrigger;
+    float magNormBias;
+    float skinPhiDeg;
 } FusionAhrsInternalStates;
 
 typedef struct {
@@ -93,6 +98,13 @@ extern const FusionAhrsSettings fusionAhrsDefaultSettings;
 void FusionAhrsInitialise(FusionAhrs *ahrs);
 void FusionAhrsRestart(FusionAhrs *ahrs);
 void FusionAhrsSetSettings(FusionAhrs *ahrs, const FusionAhrsSettings *settings);
+
+void FusionAhrsSetNoise(FusionAhrs *ahrs,
+                        float sigmaAccMs2,
+                        float sigmaGyrDegS,
+                        float sigmaMagNorm);
+
+void FusionAhrsSetSampleRate(FusionAhrs *ahrs, float sampleRateHz);
 
 void FusionAhrsUpdate(FusionAhrs *ahrs,
                       FusionVector gyroscope,

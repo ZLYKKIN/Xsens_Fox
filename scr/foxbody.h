@@ -18,6 +18,76 @@ constexpr int kContactRows  = 26;
 enum Pose : std::uint8_t   { PoseT = 0, PoseN = 1 };
 enum Gender : std::uint8_t { GenderLegacy = 0, GenderMale = 1, GenderFemale = 2 };
 
+struct AnthroProportions {
+    double trunkRatio;
+    double thighRatio;
+    double shankRatio;
+    double handRatio;
+    double forearmRatio;
+    double upperArmRatio;
+    double shoulderWidthRatio;
+    double hipWidthRatio;
+    double hipHeightRatio;
+    double kneeHeightRatio;
+    double ankleHeightRatio;
+    double footRatio;
+};
+
+inline constexpr AnthroProportions kAnthroMale = {
+    .trunkRatio          = 0.295,
+    .thighRatio          = 0.245,
+    .shankRatio          = 0.246,
+    .handRatio           = 0.108,
+    .forearmRatio        = 0.146,
+    .upperArmRatio       = 0.186,
+    .shoulderWidthRatio  = 0.234,
+    .hipWidthRatio       = 0.181,
+    .hipHeightRatio      = 0.510,
+    .kneeHeightRatio     = 0.293,
+    .ankleHeightRatio    = 0.039,
+    .footRatio           = 0.144,
+};
+
+inline constexpr AnthroProportions kAnthroFemale = {
+    .trunkRatio          = 0.292,
+    .thighRatio          = 0.245,
+    .shankRatio          = 0.246,
+    .handRatio           = 0.108,
+    .forearmRatio        = 0.146,
+    .upperArmRatio       = 0.186,
+    .shoulderWidthRatio  = 0.222,
+    .hipWidthRatio       = 0.184,
+    .hipHeightRatio      = 0.505,
+    .kneeHeightRatio     = 0.290,
+    .ankleHeightRatio    = 0.039,
+    .footRatio           = 0.144,
+};
+
+inline constexpr AnthroProportions kAnthroLegacy = {
+    .trunkRatio          = 0.288,
+    .thighRatio          = 0.238,
+    .shankRatio          = 0.232,
+    .handRatio           = 0.105,
+    .forearmRatio        = 0.140,
+    .upperArmRatio       = 0.171,
+    .shoulderWidthRatio  = 0.234,
+    .hipWidthRatio       = 0.181,
+    .hipHeightRatio      = 0.510,
+    .kneeHeightRatio     = 0.293,
+    .ankleHeightRatio    = 0.039,
+    .footRatio           = 0.144,
+};
+
+inline constexpr const AnthroProportions& anthroFor(Gender g)
+{
+    switch (g) {
+        case GenderMale:   return kAnthroMale;
+        case GenderFemale: return kAnthroFemale;
+        case GenderLegacy:
+        default:           return kAnthroLegacy;
+    }
+}
+
 enum class ConfigurationLabel : std::uint8_t {
     FullBody = 0,
     FullBodyNoSternum,
@@ -611,6 +681,10 @@ inline constexpr ContactParams kContact = {
 inline constexpr int kFingerSensorsPerHand = 17;
 inline constexpr int kFingerSegmentsPerHand = 20;
 
+inline constexpr std::array<int, 5> kFingerBoneCount = { 3, 3, 4, 4, 3 };
+
+
+
 inline constexpr std::array<Quat, kFingerSegmentsPerHand> kFingerQBSRight = {{
     Quat(1, 0, 0, 0), Quat(1, 0, 0, 0), Quat(1, 0, 0, 0), Quat(1, 0, 0, 0),
     Quat(1, 0, 0, 0), Quat(1, 0, 0, 0), Quat(1, 0, 0, 0), Quat(1, 0, 0, 0),
@@ -626,6 +700,35 @@ inline constexpr std::array<Quat, kFingerSegmentsPerHand> kFingerQBSLeft = {{
     Quat(1, 0, 0, 0), Quat(1, 0, 0, 0), Quat(1, 0, 0, 0), Quat(1, 0, 0, 0),
     Quat(1, 0, 0, 0), Quat(1, 0, 0, 0), Quat(1, 0, 0, 0), Quat(1, 0, 0, 0),
 }};
+
+inline constexpr float kSpcAcceptanceP   = 0.5f;
+inline constexpr float kSpcSuitUncertSum = 4.0f;
+
+struct AnthroFloors {
+    double armSpanMin;
+    double legLengthMin;
+    double trunkLengthMin;
+    double hipHalfMin;
+    double scapHalfMin;
+};
+inline constexpr AnthroFloors kAnthroFloors = {
+    .armSpanMin     = 0.30,
+    .legLengthMin   = 0.30,
+    .trunkLengthMin = 0.40,
+    .hipHalfMin     = 0.04,
+    .scapHalfMin    = 0.05,
+};
+
+struct JumpDetectParams {
+    double threshDeg;
+    double blendRangeDeg;
+    double gyroQuietDegS;
+};
+inline constexpr JumpDetectParams kJumpDetect = {
+    .threshDeg     = 20.0,
+    .blendRangeDeg = 15.0,
+    .gyroQuietDegS = 25.0,
+};
 
 struct FingerSmoothParams {
     float emaAlphaThumb;
@@ -793,6 +896,47 @@ inline float magNoiseScaleForChip(ImuChipType c) {
     }
 }
 
+struct ImuChipNoise {
+    float sigmaAccMs2;
+    float sigmaGyrDegS;
+    float dynRangeAccMs2;
+    float dynRangeGyrDegS;
+    float gainErrorAcc;
+    float gainErrorGyr;
+};
+inline constexpr ImuChipNoise kImuChipNoiseW2 = {
+    .sigmaAccMs2     = 0.0232f,
+    .sigmaGyrDegS    = 0.20f,
+    .dynRangeAccMs2  = 157.0f,
+    .dynRangeGyrDegS = 2000.0f,
+    .gainErrorAcc    = 0.004f,
+    .gainErrorGyr    = 0.004f,
+};
+inline constexpr ImuChipNoise kImuChipNoiseX2 = {
+    .sigmaAccMs2     = 0.0232f,
+    .sigmaGyrDegS    = 0.20f,
+    .dynRangeAccMs2  = 157.0f,
+    .dynRangeGyrDegS = 2000.0f,
+    .gainErrorAcc    = 0.004f,
+    .gainErrorGyr    = 0.004f,
+};
+inline constexpr ImuChipNoise kImuChipNoiseX3 = {
+    .sigmaAccMs2     = 0.00899f,
+    .sigmaGyrDegS    = 0.075f,
+    .dynRangeAccMs2  = 157.0f,
+    .dynRangeGyrDegS = 2000.0f,
+    .gainErrorAcc    = 0.004f,
+    .gainErrorGyr    = 0.004f,
+};
+inline constexpr const ImuChipNoise& chipNoiseFor(ImuChipType c) {
+    switch (c) {
+        case ImuChipType::X3: return kImuChipNoiseX3;
+        case ImuChipType::X2: return kImuChipNoiseX2;
+        case ImuChipType::W2:
+        default:              return kImuChipNoiseW2;
+    }
+}
+
 struct SkinParams {
     double tauSec;
     double sigmaOriDeg;
@@ -904,7 +1048,9 @@ inline constexpr double kStdSamePosMeasXY   = 0.0003;
 inline constexpr double kStdSamePosMeasZ3d  = 0.002;
 inline constexpr double kStdSamePosMeasZ    = 10.0;
 
-inline constexpr int    kMaxIKSteps         = 2;
+inline constexpr int    kMaxIKSteps         = 5;
+inline constexpr double kIKGradTolRad       = 1.0e-4;
+inline constexpr double kIKStepTolRad       = 1.0e-5;
 inline constexpr double kJointLaxitySolver  = 0.005;
 inline constexpr double kHypExtPenaltySd    = 0.0002;
 
