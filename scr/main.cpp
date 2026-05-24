@@ -5499,12 +5499,16 @@ void MocapReceiver::run()
                                   << gyrNorm << "deg/s"
                    << "\n";
 
+                const double magGateDeg =
+                    fox::body::kMagnet.angleDiffFromModelMaxDeg;
+                const double accGateDeg =
+                    fox::body::kMagnet.angleDiffFromModelMaxDeg;
                 ss << "[mag]  Pelvis"
                    << "  magErr=" << std::setw(5) << std::setprecision(2)
                                   << I.dbgDynMagRej[kPelvis] << "deg"
-                   << "  accGate=" << (I.dbgDynAccRej[kPelvis] > 5.0
+                   << "  accGate=" << (I.dbgDynAccRej[kPelvis] > accGateDeg
                                         ? "REJECTED" : "open")
-                   << "  magGate=" << (I.dbgDynMagRej[kPelvis] > 5.0
+                   << "  magGate=" << (I.dbgDynMagRej[kPelvis] > magGateDeg
                                         ? "REJECTED" : "open")
                    << "\n";
                 std::cout << ss.str() << std::flush;
