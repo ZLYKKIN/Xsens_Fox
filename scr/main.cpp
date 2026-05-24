@@ -491,14 +491,24 @@ public:
                                         std::abs(double(w.y())) +
                                         std::abs(double(w.z())) < 1.0) ? 1.0 : 0.0;
 
+            const double vNorm = std::sqrt(double(v_world.x()) * double(v_world.x()) +
+                                           double(v_world.y()) * double(v_world.y()) +
+                                           double(v_world.z()) * double(v_world.z()));
+            const double wNorm = std::sqrt(double(w.x()) * double(w.x()) +
+                                           double(w.y()) * double(w.y()) +
+                                           double(w.z()) * double(w.z()));
             const double f_air = fb::kAir[0] +
+                                 fb::kAir[1] * vNorm +
                                  fb::kAir[2] * (1.0 - std::min(1.0,
                                      std::abs(aNorm - fb::constants::kGravityMs2) / 4.0)) +
                                  fb::kAir[3] * f_lowFreq +
                                  fb::kAir[4] * f_lowOmega +
                                  fb::kAir[5] * std::abs(double(v_world.z())) +
                                  fb::kAir[6] * std::min(1.0, lowZ / fb::kDLevelFoot) +
-                                 fb::kAir[8] * std::min(1.0, pelvisSpeed / 2.0);
+                                 fb::kAir[7] * wNorm +
+                                 fb::kAir[8] * std::min(1.0, pelvisSpeed / 2.0) +
+                                 fb::kAir[9] * std::min(1.0, double(v_world.z())) +
+                                 fb::kAir[10] * std::min(1.0, std::abs(double(v_world.z())) / 0.5);
 
             const double f_general = fb::kGeneralProb[0];
 
