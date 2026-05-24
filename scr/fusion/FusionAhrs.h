@@ -28,7 +28,10 @@ typedef struct {
     FusionVector     m0;
     FusionVector     v_lp;
 
-    float P[15 * 15];
+    float magNormBias;
+    float skinPhiScalar;
+
+    float P[17 * 17];
 
     FusionVector a_lp;
     bool         a_lp_ready;

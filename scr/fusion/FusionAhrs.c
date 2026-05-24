@@ -56,7 +56,9 @@
 
 #define KFA_SKIN_TAU_S           0.15f
 
-#define N15 15
+#define N15 17
+#define IDX_MAGNORM 15
+#define IDX_SKINPHI 16
 
 static inline float DegToRad(float d) { return d * 0.017453292519943295f; }
 static inline float RadToDeg(float r) { return r * 57.29577951308232f; }
