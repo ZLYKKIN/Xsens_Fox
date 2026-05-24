@@ -4363,11 +4363,13 @@ static void __cdecl foxManusErgonomicsCb(const void* raw)
         }
         const bool testMode = g_ergo.rawDump.load();
         auto alphaForJoint = [testMode](int idx, float delta, const char* hand) -> float {
-
+            const auto& cfg = fox::body::kFingerSmooth;
             const bool isThumb = (idx < 4);
-            const float baseAlpha = isThumb ? 0.15f : 0.35f;
-            const float outlierAlpha = isThumb ? 0.04f : 0.10f;
-            const float outlierThresh = isThumb ? 15.0f : 30.0f;
+            const float baseAlpha    = isThumb ? cfg.emaAlphaThumb    : cfg.emaAlphaFinger;
+            const float outlierAlpha = isThumb ? cfg.outlierAlphaThumb : cfg.outlierAlphaFinger;
+            const float outlierThresh = isThumb
+                ? cfg.outlierThreshThumbDeg
+                : cfg.outlierThreshFingerDeg;
             const bool outlier = (delta > outlierThresh);
             if (outlier && testMode) {
                 static const char* kFingerName[5] = { "thumb", "index", "middle", "ring", "pinky" };

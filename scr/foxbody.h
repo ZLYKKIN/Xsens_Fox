@@ -588,6 +588,23 @@ inline constexpr ContactParams kContact = {
     .secondWinWidthAfter       = 0.01,
 };
 
+struct FingerSmoothParams {
+    float emaAlphaThumb;
+    float emaAlphaFinger;
+    float outlierAlphaThumb;
+    float outlierAlphaFinger;
+    float outlierThreshThumbDeg;
+    float outlierThreshFingerDeg;
+};
+inline constexpr FingerSmoothParams kFingerSmooth = {
+    .emaAlphaThumb          = 0.15f,
+    .emaAlphaFinger         = 0.35f,
+    .outlierAlphaThumb      = 0.04f,
+    .outlierAlphaFinger     = 0.10f,
+    .outlierThreshThumbDeg  = 15.0f,
+    .outlierThreshFingerDeg = 30.0f,
+};
+
 struct GaitParams {
     double flightSecForRun;
     double standingPelvisSpeedMax;
