@@ -287,8 +287,7 @@ public:
         if (!m_inited) reset();
         double tauEff = fb::kSkin.tauSec;
         if (fb::kSkin.doSkinArtifactBasedOnDynamics && linAccMag > 0.0) {
-
-            const double ref = std::max(1e-6, 10.0);
+            const double ref   = std::max(1e-6, fb::kSkin.linAccRefMps2);
             const double blend = 1.0 - std::exp(-linAccMag / ref);
             tauEff = fb::kSkin.tauSlowSec
                    + blend * (fb::kSkin.tauFastSec - fb::kSkin.tauSlowSec);
@@ -307,13 +306,6 @@ public:
         const double K = m_varPos[seg] / (m_varPos[seg] + R);
         m_xPos[seg] = m_xPos[seg] + float(K) * rMeas;
         m_varPos[seg] = (1.0 - K) * m_varPos[seg];
-
-        const double maxNorm = 3.0 * fb::kSkin.sigmaPosM;
-        const double n = std::sqrt(
-            double(m_xPos[seg].x()) * double(m_xPos[seg].x()) +
-            double(m_xPos[seg].y()) * double(m_xPos[seg].y()) +
-            double(m_xPos[seg].z()) * double(m_xPos[seg].z()));
-        if (n > maxNorm) m_xPos[seg] = m_xPos[seg] * float(maxNorm / n);
     }
 
     QVector3D driftPos(int seg) const {
@@ -337,12 +329,6 @@ public:
         const double K = m_var[seg] / (m_var[seg] + R);
         m_x[seg]   = m_x[seg] + float(K) * r;
         m_var[seg] = (1.0 - K) * m_var[seg];
-
-        const double maxNorm = 3.0 * fb::kSkin.sigmaOriDeg * kD2R;
-        const double n = std::sqrt(double(m_x[seg].x())*double(m_x[seg].x()) +
-                                   double(m_x[seg].y())*double(m_x[seg].y()) +
-                                   double(m_x[seg].z())*double(m_x[seg].z()));
-        if (n > maxNorm) m_x[seg] = m_x[seg] * float(maxNorm / n);
     }
 
     QVector3D drift(int seg) const {
@@ -382,6 +368,7 @@ struct ActiveContact {
     QVector3D v_world;
     double    probability;
     double    sd_height;
+    double    z_floor;
 };
 
 class ContactDetector {
@@ -483,7 +470,8 @@ public:
 
             const double f_acc = fb::kAccProb[0] +
                                  (fb::kAccProb[2] - fb::kAccProb[0]) *
-                                 sigmoid((aNorm - 0.3) / std::max(1e-6, fb::kAccProb[3]));
+                                 sigmoid((aNorm - fb::kAccProb[1]) /
+                                         std::max(1e-6, fb::kAccProb[3]));
 
             const double f_vel = fb::kVelProb[2] -
                                  (fb::kVelProb[2] - fb::kVelProb[0]) *
@@ -494,37 +482,71 @@ public:
             const QVector3D p_xy  (p_world.x(),    p_world.y(),    0.0f);
             const double dCom = (cop_xy - p_xy).length();
             const double f_com = fb::kCom[1] + (fb::kCom[4] - fb::kCom[1]) *
-                                 sigmoid(-(dCom - 0.0) / std::max(1e-6, fb::kCom[2]));
+                                 sigmoid((dCom - fb::kCom[1]) /
+                                         std::max(1e-6, fb::kCom[2]));
 
             const double lowZ        = std::max(0.0,
                 fb::kDLevelDefault - (double(p_world.z()) - in.floorLevelZ));
-            const double f_lowFreq   = (aNorm < 12.0) ? 1.0 : 0.0;
+            const double aLowThresh =
+                fb::constants::kGravityMs2 + fb::kContact.impactTh / 8.0;
+            const double f_lowFreq   = (aNorm < aLowThresh) ? 1.0 : 0.0;
             const double f_lowOmega  = (std::abs(double(w.x())) +
                                         std::abs(double(w.y())) +
                                         std::abs(double(w.z())) < 1.0) ? 1.0 : 0.0;
 
+            const double vNorm = std::sqrt(double(v_world.x()) * double(v_world.x()) +
+                                           double(v_world.y()) * double(v_world.y()) +
+                                           double(v_world.z()) * double(v_world.z()));
+            const double wNorm = std::sqrt(double(w.x()) * double(w.x()) +
+                                           double(w.y()) * double(w.y()) +
+                                           double(w.z()) * double(w.z()));
             const double f_air = fb::kAir[0] +
+                                 fb::kAir[1] * vNorm +
                                  fb::kAir[2] * (1.0 - std::min(1.0,
                                      std::abs(aNorm - fb::constants::kGravityMs2) / 4.0)) +
                                  fb::kAir[3] * f_lowFreq +
                                  fb::kAir[4] * f_lowOmega +
                                  fb::kAir[5] * std::abs(double(v_world.z())) +
                                  fb::kAir[6] * std::min(1.0, lowZ / fb::kDLevelFoot) +
-                                 fb::kAir[8] * std::min(1.0, pelvisSpeed / 2.0);
+                                 fb::kAir[7] * wNorm +
+                                 fb::kAir[8] * std::min(1.0, pelvisSpeed / 2.0) +
+                                 fb::kAir[9] * std::min(1.0, double(v_world.z())) +
+                                 fb::kAir[10] * std::min(1.0, std::abs(double(v_world.z())) / 0.5);
 
-            const double f_general = fb::kGeneralProb[0];
+            const double f_general = fb::kGeneralProb[0] +
+                                     fb::kGeneralProb[1] * 1.0 +
+                                     fb::kGeneralProb[2] * std::max(0.0, lowZ);
 
             const double f_boost = fb::kBoost[0] * f_acc +
                                    fb::kBoost[1] * f_vel;
 
             const double f_pos = fb::kPos[0];
 
+            const double f_level = fb::kLevelProb[0] *
+                                   (1.0 - std::min(1.0,
+                                       std::abs(double(p_world.z()) - in.floorLevelZ) /
+                                       std::max(1e-6, fb::kDLevelDefault)));
+
             const double f_peak = (out.impactDetected && (seg == out.impactSeg))
-                                ? fb::kPeakDetection[0]
+                                ? fb::kPeakDetection[5]
                                 : 0.0;
 
-            const double score = f_air + f_acc + f_vel + f_com + f_general
-                               + f_boost + f_pos + f_peak;
+            const double samePosDist = (p_xy - cop_xy).length();
+            const double f_samepos = fb::kSamepos[7] *
+                                     std::exp(-samePosDist /
+                                              std::max(1e-6, fb::kSamepos[6]));
+
+            const double score = fb::kContactWeights.wAcc           * f_acc
+                               + fb::kContactWeights.wVel           * f_vel
+                               + fb::kContactWeights.wCom           * f_com
+                               + fb::kContactWeights.wAir           * f_air
+                               + fb::kContactWeights.wGeneral       * f_general
+                               + fb::kContactWeights.wLevel         * f_level
+                               + fb::kContactWeights.wBoost         * f_boost
+                               + fb::kContactWeights.wPos           * f_pos
+                               + fb::kContactWeights.wPeakDetection * f_peak
+                               + fb::kContactWeights.wSamepos       * f_samepos
+                               + fb::kContactWeights.bias;
             const double P = sigmoid(score);
 
             cands[nCand].seg          = seg;
@@ -534,6 +556,17 @@ public:
             cands[nCand].v_world      = v_world;
             cands[nCand].probability  = P;
             cands[nCand].sd_height    = fb::stdHeightMeasFor(seg);
+
+            double zFloorSeg = in.floorLevelZ;
+            if (seg == fb::kSEG_RFoot || seg == fb::kSEG_RToe ||
+                seg == fb::kSEG_RLowerLeg) {
+                zFloorSeg = floorLevelRight();
+            } else if (seg == fb::kSEG_LFoot || seg == fb::kSEG_LToe ||
+                       seg == fb::kSEG_LLowerLeg) {
+                zFloorSeg = floorLevelLeft();
+            }
+            cands[nCand].z_floor      = zFloorSeg;
+
             probs[nCand]              = P;
             ++nCand;
         };
@@ -551,6 +584,39 @@ public:
                   QVector3D(fb::kToeTipPoint.x(), -fb::kToeTipPoint.y(),
                             fb::kToeTipPoint.z()));
 
+        pushPoint(fb::kSEG_RLowerLeg, 5, fb::kKneeFrontPointR);
+        pushPoint(fb::kSEG_LLowerLeg, 5, fb::kKneeFrontPointL);
+
+        const double pelvisTiltDeg = [&]() {
+            if (!in.worldOrient) return 0.0;
+            const QVector3D zAxisLocal(0, 0, 1);
+            const QVector3D zAxisWorld =
+                vec_rotate(zAxisLocal, (*in.worldOrient)[fb::kSEG_Pelvis]);
+            return std::acos(std::clamp(double(zAxisWorld.z()), -1.0, 1.0)) *
+                   fb::constants::kRad2Deg;
+        }();
+        const double t8TiltDeg = [&]() {
+            if (!in.worldOrient) return 0.0;
+            const QVector3D zAxisLocal(0, 0, 1);
+            const QVector3D zAxisWorld =
+                vec_rotate(zAxisLocal, (*in.worldOrient)[fb::kSEG_T8]);
+            return std::acos(std::clamp(double(zAxisWorld.z()), -1.0, 1.0)) *
+                   fb::constants::kRad2Deg;
+        }();
+        const bool pelvisTiltOk =
+            pelvisTiltDeg >= fb::kContact.secondaryPelvisT8RejMinDeg &&
+            pelvisTiltDeg <= fb::kContact.secondaryPelvisT8RejMaxDeg;
+        const bool t8TiltOk =
+            t8TiltDeg >= fb::kContact.secondaryPelvisT8RejMinDeg &&
+            t8TiltDeg <= fb::kContact.secondaryPelvisT8RejMaxDeg;
+        (void)t8TiltOk;
+
+        if (pelvisTiltOk) {
+            pushPoint(fb::kSEG_Pelvis, 5, fb::kPelvisSIPSRight);
+            pushPoint(fb::kSEG_Pelvis, 6, fb::kPelvisSIPSLeft);
+            pushPoint(fb::kSEG_Pelvis, 14, fb::kPelvisCentralButtock);
+        }
+
         std::vector<size_t> order(nCand);
         for (size_t i = 0; i < nCand; ++i) order[i] = i;
         std::sort(order.begin(), order.end(),
@@ -559,7 +625,7 @@ public:
         const int K = std::min(fb::kContact.maxDetectedContacts, int(nCand));
         for (int i = 0; i < K; ++i) {
             const ActiveContact& c = cands[order[size_t(i)]];
-            if (c.probability < 0.05) break;
+            if (c.probability < fb::kZuptTh.th1) break;
             out.active.push_back(c);
         }
 
@@ -597,9 +663,10 @@ public:
             m_zRingHead = (m_zRingHead + 1) % kZRingCap;
             if (m_zRingCount < kZRingCap) ++m_zRingCount;
 
-            const double bin = std::max(1e-4, fb::kEstimator.multiLevelZhcClipVert);
-            std::array<int, 16>     binCnt{};
-            std::array<double, 16>  binSum{};
+            const double bin = std::max(1e-4, fb::kMultiLevel.sameLevelMargin);
+            constexpr int kMaxLevels = 10;
+            std::array<int, kMaxLevels>     binCnt{};
+            std::array<double, kMaxLevels>  binSum{};
             int nBins = 0;
             for (int i = 0; i < m_zRingCount; ++i) {
                 const double z = m_zRing[i];
@@ -607,7 +674,9 @@ public:
                 for (int b = 0; b < nBins; ++b) {
                     if (std::abs(binSum[b] / std::max(1, binCnt[b]) - z) < bin) { idx = b; break; }
                 }
-                if (idx < 0 && nBins < 16) { idx = nBins++; binCnt[idx] = 0; binSum[idx] = 0.0; }
+                if (idx < 0 && nBins < kMaxLevels) {
+                    idx = nBins++; binCnt[idx] = 0; binSum[idx] = 0.0;
+                }
                 if (idx >= 0) { binCnt[idx]++; binSum[idx] += z; }
             }
             std::array<double, 4> top4{};
@@ -638,7 +707,8 @@ public:
                 return best;
             };
 
-            const double aMix = std::exp(-in.dt / 1.0);
+            const double aMix = std::exp(-in.dt /
+                                         std::max(1e-3, fb::kMultiLevel.tauSmoothSec));
             if (haveR) {
                 const double zRl = pickLevel(zR);
                 if (m_floorRInited) m_floorR = aMix * m_floorR + (1.0 - aMix) * zRl;
@@ -656,6 +726,8 @@ public:
             } else {
                 m_floorEstimate = aMix * m_floorEstimate + (1.0 - aMix) * pickLevel(zMean);
             }
+
+            m_stairWalking = (nBins >= fb::kMultiLevel.maxLevelsToDetectStairWalking);
 
             if (g_testFlag().load(std::memory_order_relaxed) &&
                 g_glovesFlag().load(std::memory_order_relaxed)) {
@@ -680,6 +752,7 @@ public:
     double    floorLevel() const { return m_floorInited ? m_floorEstimate : 0.0; }
     double    floorLevelRight() const { return m_floorRInited ? m_floorR : floorLevel(); }
     double    floorLevelLeft()  const { return m_floorLInited ? m_floorL : floorLevel(); }
+    bool      stairWalking() const { return m_stairWalking; }
 
 private:
     static constexpr int kZRingCap = 240;
@@ -696,6 +769,7 @@ private:
     double             m_floorL       = 0.0;
     bool               m_floorRInited = false;
     bool               m_floorLInited = false;
+    bool               m_stairWalking = false;
 };
 
 class BodyPoseSolver {
@@ -912,9 +986,10 @@ public:
                 const QVector3D phiK = quat_log(quat_mult(o[lowerSeg],
                                                           o[upperSeg].conj()).normalized());
                 const double thKnee = std::abs(double(phiK.y()));
-                const double thScrew = fb::kCKnees[1] * (1.0 - std::cos(thKnee))
-                                       * fb::kKneeScrewMaxDeg
-                                       * fb::constants::kDeg2Rad;
+                const double thScrew = (fb::kCKnees[0] +
+                                         fb::kCKnees[2] * (1.0 - std::cos(thKnee))) *
+                                        fb::kKneeScrewMaxDeg *
+                                        fb::constants::kDeg2Rad;
                 const double signed_screw = isRight ? thScrew : -thScrew;
                 if (std::abs(signed_screw) < 1e-7) return;
                 const Quat dq(std::cos(0.5*signed_screw), 0.0, 0.0,
@@ -976,8 +1051,7 @@ public:
             auto evalLegBi = [&](int upperLeg, int foot) {
                 const QVector3D phiHip = quat_log(
                     quat_mult(o[upperLeg], o[0].conj()).normalized());
-                const double targetDorsiY =
-                    fb::kCLegs[0] * fb::kCLegs[1] * double(phiHip.y());
+                const double targetDorsiY = fb::kCLegs[1] * double(phiHip.y());
                 const QVector3D phiFoot = quat_log(
                     quat_mult(o[foot], o[upperLeg].conj()).normalized());
                 const Quat dqTarget = quat_exp_rotvec(double(phiFoot.x()),
@@ -1144,6 +1218,37 @@ public:
                 }
             }
 
+            {
+                const int idxT8In = 4, idxNeck = 5, idxHead = 6;
+                const double cNeck = 0.5 * (fb::kCSpine[5] + fb::kCSpine[6]);
+                const double cHead = 0.5 * (fb::kCSpine[7] + fb::kCSpine[8]);
+                const double sumNH = cNeck + cHead;
+                if (sumNH > 1e-9) {
+                    const Quat qT8In  = orient[idxT8In];
+                    const Quat qHeadIn = orient[idxHead];
+                    const QVector3D phiNH = quat_log(
+                        quat_mult(qHeadIn, qT8In.conj()).normalized());
+                    const double w_neck = 1.0 / (fb::kSpineNeck.stdNeck *
+                                                 fb::kSpineNeck.stdNeck);
+                    const double fNeck = cNeck / sumNH;
+                    const Quat qNeckTarget = quat_mult(
+                        quat_exp_rotvec(fNeck * double(phiNH.x()),
+                                        fNeck * double(phiNH.y()),
+                                        fNeck * double(phiNH.z())),
+                        qT8In).normalized();
+                    const QVector3D r = quat_log(
+                        quat_mult(qNeckTarget, orient[idxNeck].conj()).normalized());
+                    const int row = idxNeck * 3;
+                    for (int k = 0; k < 3; ++k) {
+                        JtWJ(row + k, row + k) += w_neck;
+                        JtWr(row + k)          -= w_neck *
+                            (k == 0 ? r.x() : k == 1 ? r.y() : r.z());
+                    }
+                    residSum += r.length();
+                    ++residN;
+                }
+            }
+
             const double w_bar = 1.0 /
                 (fb::kHypExtPenaltySd * fb::kHypExtPenaltySd);
             constexpr double kBarrierD2R = fox::body::constants::kDeg2Rad;
@@ -1177,16 +1282,21 @@ public:
 
             d.zuptActiveRows = 0;
             for (const auto& ac : activeContacts) {
-                if (ac.probability <= 0.5) continue;
+                if (ac.probability < fb::kZuptTh.th3) continue;
                 if (ac.seg < 0 || ac.seg >= N) continue;
+
+                const double weightFactor =
+                    (ac.probability >= fb::kZuptTh.th4)
+                        ? fb::kZuptTh.weightTh4
+                        : fb::kZuptTh.weightTh3;
 
                 const QVector3D bias = m_aidingBias[ac.seg];
 
                 const double sigmaVxy = fb::kStdSamePosMeasXY;
-                const double sigmaVz  = fb::kStdSamePosMeasZ3d;
-                const double w_xy = ac.probability /
+                const double sigmaVz  = fb::kStdSamePosMeasXY;
+                const double w_xy = (weightFactor * ac.probability) /
                                     (sigmaVxy * sigmaVxy + 1e-12);
-                const double w_z  = ac.probability /
+                const double w_z  = (weightFactor * ac.probability) /
                                     (sigmaVz  * sigmaVz  + 1e-12);
                 const double r_v[3] = { double(ac.v_world.x()) - double(bias.x()),
                                         double(ac.v_world.y()) - double(bias.y()),
@@ -1212,7 +1322,7 @@ public:
                 if (ac.sd_height > 0.0) {
                     const double sigmaZ = std::max(1e-4, ac.sd_height);
                     const double w_h    = ac.probability / (sigmaZ * sigmaZ);
-                    const double r_z    = double(ac.p_world.z());
+                    const double r_z    = double(ac.p_world.z()) - ac.z_floor;
                     JtWJ(row + 2, row + 2) += w_h;
                     JtWr(row + 2)          += w_h * r_z;
                     residSum += std::abs(r_z);
@@ -1226,8 +1336,9 @@ public:
                                          fb::kJointLaxitySolver);
 
             {
-                const double frac  = fb::kCPelvis[0];
-                const double scale = fb::kCPelvis[1];
+                const double frac     = fb::kCPelvis[0];
+                const double scale    = fb::kCPelvis[1];
+                const double latPen   = fb::kCPelvis[2];
                 if (std::abs(frac) > 1e-6) {
                     const QVector3D phiPel = quat_log(orient[0]);
                     const double tiltDeg = std::abs(double(phiPel.y())) *
@@ -1236,7 +1347,8 @@ public:
                         ? std::min(1.0, tiltDeg / scale) : 1.0;
                     const double frac_eff = frac * ramp;
                     if (std::abs(frac_eff) > 1e-9) {
-                        const Quat dq = quat_exp_rotvec(0.0,
+                        const double latPel = double(phiPel.x());
+                        const Quat dq = quat_exp_rotvec(latPen * latPel,
                                                         frac_eff * double(phiPel.y()),
                                                         0.0);
                         const Quat targetL5 = quat_mult(dq, orient[0]).normalized();
@@ -1327,9 +1439,10 @@ public:
                 const QVector3D phiK = quat_log(quat_mult(orient[lowerSeg],
                                                           orient[upperSeg].conj()).normalized());
                 const double thKnee = std::abs(double(phiK.y()));
-                const double thScrew = fb::kCKnees[1] * (1.0 - std::cos(thKnee))
-                                       * fb::kKneeScrewMaxDeg
-                                       * fb::constants::kDeg2Rad;
+                const double thScrew = (fb::kCKnees[0] +
+                                         fb::kCKnees[2] * (1.0 - std::cos(thKnee))) *
+                                        fb::kKneeScrewMaxDeg *
+                                        fb::constants::kDeg2Rad;
                 const double signedScrew = isRight ? thScrew : -thScrew;
                 if (isRight) {
                     d.kneeFlexRDeg  = thKnee * fb::constants::kRad2Deg;
@@ -1401,7 +1514,7 @@ public:
                 const QVector3D phiHip = quat_log(
                     quat_mult(orient[upperLeg], orient[0].conj()).normalized());
                 const double hipFlexY = double(phiHip.y());
-                const double targetDorsiY = fb::kCLegs[0] * fb::kCLegs[1] * hipFlexY;
+                const double targetDorsiY = fb::kCLegs[1] * hipFlexY;
 
                 const QVector3D phiFoot = quat_log(
                     quat_mult(orient[foot], orient[upperLeg].conj()).normalized());
@@ -1471,7 +1584,10 @@ public:
             for (int retry = 0; retry < kMaxLambdaRetries; ++retry) {
 
                 Eigen::MatrixXd JtWJ_damped = JtWJ;
-                for (int k = 0; k < DOF; ++k) JtWJ_damped(k, k) += m_lambda;
+                for (int k = 0; k < DOF; ++k) {
+                    const double dKK = std::max(1e-12, JtWJ(k, k));
+                    JtWJ_damped(k, k) += m_lambda * dKK;
+                }
 
                 Eigen::LDLT<Eigen::MatrixXd> ldlt(JtWJ_damped);
                 if (ldlt.info() != Eigen::Success) {
@@ -1493,7 +1609,11 @@ public:
                     const Quat dq = quat_exp_rotvec(double(phi.x()),
                                                     double(phi.y()),
                                                     double(phi.z()));
-                    orientTrial[i] = quat_mult(orientTrial[i], dq).normalized();
+                    Quat q = quat_mult(orientTrial[i], dq).normalized();
+                    if (q.w < 0.0) {
+                        q.w = -q.w; q.x = -q.x; q.y = -q.y; q.z = -q.z;
+                    }
+                    orientTrial[i] = q;
                 }
 
                 const double residTrial = evalResidual(orientTrial);
@@ -1523,7 +1643,10 @@ public:
 
         {
             Eigen::MatrixXd A = JtWJ;
-            for (int k = 0; k < DOF; ++k) A(k, k) += m_lambda;
+            for (int k = 0; k < DOF; ++k) {
+                const double dKK = std::max(1e-12, JtWJ(k, k));
+                A(k, k) += m_lambda * dKK;
+            }
             Eigen::LDLT<Eigen::MatrixXd> ldlt(A);
             if (ldlt.info() == Eigen::Success) {
 
@@ -1547,10 +1670,10 @@ public:
 
                 if (maxCov > 0.0 && maxCov < 1.0) {
                     const int sigmaBand =
-                        (maxCov < 0.005) ? fb::PoseQualityExcellent :
-                        (maxCov < 0.02 ) ? fb::PoseQualityGood      :
-                        (maxCov < 0.05 ) ? fb::PoseQualityAdequate  :
-                        (maxCov < 0.1  ) ? fb::PoseQualityPoor      :
+                        (maxCov < fb::kPoseQualityResidBands[0]) ? fb::PoseQualityExcellent :
+                        (maxCov < fb::kPoseQualityResidBands[1]) ? fb::PoseQualityGood      :
+                        (maxCov < fb::kPoseQualityResidBands[2]) ? fb::PoseQualityAdequate  :
+                        (maxCov < fb::kPoseQualityResidBands[3]) ? fb::PoseQualityPoor :
                                             fb::PoseQualityInvalid;
                     d.poseQualityBand = std::min(d.poseQualityBand, sigmaBand);
                 }
@@ -1600,7 +1723,6 @@ public:
         NA = 0,
         HS,
         FF,
-        MS,
         HO,
         TO,
         SW
@@ -1609,7 +1731,6 @@ public:
         switch (p) {
             case GaitPhase::HS: return "HS";
             case GaitPhase::FF: return "FF";
-            case GaitPhase::MS: return "MS";
             case GaitPhase::HO: return "HO";
             case GaitPhase::TO: return "TO";
             case GaitPhase::SW: return "SW";
@@ -1698,18 +1819,26 @@ public:
         const double sittingZ = std::max(0.30, sitHeightM);
         const bool   lowPelvis = pelvisZ < sittingZ;
 
+        const bool doubleSupport = rFootContact && lFootContact;
+        const bool anyFlight     = m_flightSec > fox::body::kGait.flightSecForRun;
         if (t8Inverted)                            m_phase = LocomotionPhase::Acrobatic;
-        else if (m_flightSec > 0.12 && pelvisSpeed > 2.0)
-                                                   m_phase = LocomotionPhase::Running;
+        else if (anyFlight)                        m_phase = LocomotionPhase::Running;
         else if (m_posture == BodyPosture::Sitting && lowPelvis)
                                                    m_phase = LocomotionPhase::Sitting;
         else if (!pelvisVertical && lowPelvis)     m_phase = LocomotionPhase::Sitting;
-        else if (rFootContact && lFootContact && pelvisSpeed < 0.3 && pelvisVertical)
+        else if (doubleSupport &&
+                 pelvisSpeed < fox::body::kGait.standingPelvisSpeedMax &&
+                 pelvisVertical)
                                                    m_phase = LocomotionPhase::Standing;
-        else if (anyContact && (rFootContact != lFootContact) &&
-                 m_altSec < fox::body::kContact.firstWinWidth)
-                                                   m_phase = LocomotionPhase::Walking;
-        else if (!anyContact && (pelvisTiltDeg > 90.0 || t8TiltDeg > 90.0))
+        else if (anyContact && pelvisVertical) {
+            const double winW = (pelvisSpeed > fox::body::kContact.highVelTh)
+                ? fox::body::kContact.firstWinWidthHighVel
+                : fox::body::kContact.firstWinWidth;
+            if (m_altSec < winW) m_phase = LocomotionPhase::Walking;
+        }
+        else if (!anyContact &&
+                 (pelvisTiltDeg > fox::body::kGait.acrobaticTiltDeg ||
+                  t8TiltDeg     > fox::body::kGait.acrobaticTiltDeg))
                                                    m_phase = LocomotionPhase::Acrobatic;
 
         return m_phase;
@@ -1720,21 +1849,20 @@ private:
                                  double pitchZ, double footVelZ,
                                  double dt, double& dur)
     {
-        constexpr double kPitchHeel  = -0.10;
-        constexpr double kPitchToe   = +0.10;
-        constexpr double kVelGround  = 0.05;
-        constexpr double kVelFlight  = 0.30;
-        constexpr double kFfHold     = 0.05;
-        constexpr double kMsHold     = 0.15;
+        const double pitchHeel = fox::body::kGait.pitchHeelRad;
+        const double pitchToe  = fox::body::kGait.pitchToeRad;
+        const double velGround = fox::body::kGait.velGround;
+        const double velFlight = fox::body::kGait.velFlight;
+        const double ffHold    = fox::body::kGait.ffHoldSec;
         dur += dt;
         const double absV = std::abs(footVelZ);
-        if (!contact && absV > kVelFlight) { dur = 0.0; return GaitPhase::SW; }
-        if (contact && pitchZ < kPitchHeel && absV < kVelGround) { dur = 0.0; return GaitPhase::HS; }
-        if (contact && std::abs(pitchZ) < kPitchToe && absV < kVelGround && dur > kMsHold)
-            return GaitPhase::MS;
-        if (contact && std::abs(pitchZ) < kPitchToe && absV < kVelGround && dur > kFfHold)
+        if (!contact && absV > velFlight) { dur = 0.0; return GaitPhase::SW; }
+        if (contact && pitchZ < pitchHeel && absV < velGround) {
+            dur = 0.0; return GaitPhase::HS;
+        }
+        if (contact && std::abs(pitchZ) < pitchToe && absV < velGround && dur > ffHold)
             return GaitPhase::FF;
-        if (contact && pitchZ > kPitchToe) return GaitPhase::HO;
+        if (contact && pitchZ > pitchToe) return GaitPhase::HO;
         if (!contact && cur == GaitPhase::HO) { dur = 0.0; return GaitPhase::TO; }
         return cur;
     }
@@ -1765,8 +1893,10 @@ public:
         m_lastT    = 0.0;
         m_lastCoM       = QVector3D(0, 0, 0);
         m_prevCoM       = QVector3D(0, 0, 0);
-        m_lastCoMVel    = QVector3D(0, 0, 0);
-        m_lastBodyMass  = 0.0;
+        m_lastCoMVel     = QVector3D(0, 0, 0);
+        m_lastCoMAccel   = QVector3D(0, 0, 0);
+        m_lastGRFNewtons = QVector3D(0, 0, 0);
+        m_lastBodyMass   = 0.0;
         m_haveCoMPrev   = false;
     }
 
@@ -1836,9 +1966,9 @@ public:
 
             int updatedSegs = 0;
             for (const auto& ac : cr.active) {
-                if (ac.probability < 0.5) continue;
+                if (ac.probability < fb::kZuptTh.th3) continue;
                 if (ac.seg < 0 || ac.seg >= fb::kSegmentCount) continue;
-                const double dz = ctx.floorLevelZ - double(ac.p_world.z());
+                const double dz = ac.z_floor - double(ac.p_world.z());
                 if (std::abs(dz) < 1e-5) continue;
 
                 const double sdH = fb::stdHeightMeasFor(ac.seg);
@@ -1853,9 +1983,9 @@ public:
         if (ctx.segCenter) {
             bool rContact = false, lContact = false;
             for (const auto& ac : cr.active) {
-                if (ac.probability < 0.5) continue;
-                if (ac.seg == 17) rContact = true;
-                if (ac.seg == 21) lContact = true;
+                if (ac.probability < fb::kZuptTh.th3) continue;
+                if (ac.seg == fb::kSEG_RFoot || ac.seg == fb::kSEG_RToe) rContact = true;
+                if (ac.seg == fb::kSEG_LFoot || ac.seg == fb::kSEG_LToe) lContact = true;
             }
             const QVector3D pelvis = (*ctx.segCenter)[0];
             const double pelvisSpeed = m_havePrev
@@ -1914,14 +2044,23 @@ public:
             double bodyMass = 0.0;
             const QVector3D com = fb::centerOfMass(*ctx.segCenter, &bodyMass);
             if (m_haveCoMPrev) {
-                m_lastCoMVel = (com - m_prevCoM) / float(std::max(1e-4, dt));
+                const QVector3D newVel =
+                    (com - m_prevCoM) / float(std::max(1e-4, dt));
+                m_lastCoMAccel = (newVel - m_lastCoMVel) / float(std::max(1e-4, dt));
+                m_lastCoMVel = newVel;
             } else {
-                m_lastCoMVel = QVector3D(0, 0, 0);
+                m_lastCoMVel   = QVector3D(0, 0, 0);
+                m_lastCoMAccel = QVector3D(0, 0, 0);
             }
             m_prevCoM      = com;
             m_lastCoM      = com;
             m_lastBodyMass = bodyMass;
             m_haveCoMPrev  = true;
+
+            const QVector3D gravityWorld(0.0f, 0.0f,
+                float(fb::constants::kGravityMs2));
+            m_lastGRFNewtons =
+                float(bodyMass) * (m_lastCoMAccel + gravityWorld);
 
             if (g_testFlag().load(std::memory_order_relaxed) &&
                 g_glovesFlag().load(std::memory_order_relaxed)) {
@@ -1932,7 +2071,8 @@ public:
                               << m_lastCoM.y() << "," << m_lastCoM.z()
                               << ") m  vel=(" << m_lastCoMVel.x() << ","
                               << m_lastCoMVel.y() << "," << m_lastCoMVel.z()
-                              << ") m/s  M_norm=" << m_lastBodyMass
+                              << ") m/s  M_kg=" << m_lastBodyMass
+                              << "  F_GRF_z=" << m_lastGRFNewtons.z() << " N"
                               << "  contactR=" << (rContact ? 1 : 0)
                               << "  contactL=" << (lContact ? 1 : 0)
                               << "\n";
@@ -1953,9 +2093,11 @@ public:
     const ContactDetector&      contacts() const { return m_contacts; }
     const LocomotionClassifier& locomotion() const { return m_locomotion; }
     int                         lastSkinPosUpdates() const { return m_lastSkinPosUpdates; }
-    QVector3D                   lastCoM()     const { return m_lastCoM; }
-    QVector3D                   lastCoMVel()  const { return m_lastCoMVel; }
-    double                      lastBodyMass() const { return m_lastBodyMass; }
+    QVector3D                   lastCoM()       const { return m_lastCoM; }
+    QVector3D                   lastCoMVel()    const { return m_lastCoMVel; }
+    QVector3D                   lastCoMAccel()  const { return m_lastCoMAccel; }
+    QVector3D                   lastGRFNewtons() const { return m_lastGRFNewtons; }
+    double                      lastBodyMass()  const { return m_lastBodyMass; }
 
 private:
     SkinArtifactState     m_skin;
@@ -1968,11 +2110,13 @@ private:
     double m_lastT    = 0.0;
 
     int       m_lastSkinPosUpdates = 0;
-    QVector3D m_lastCoM       {0, 0, 0};
-    QVector3D m_prevCoM       {0, 0, 0};
-    QVector3D m_lastCoMVel    {0, 0, 0};
-    double    m_lastBodyMass  = 0.0;
-    bool      m_haveCoMPrev   = false;
+    QVector3D m_lastCoM        {0, 0, 0};
+    QVector3D m_prevCoM        {0, 0, 0};
+    QVector3D m_lastCoMVel     {0, 0, 0};
+    QVector3D m_lastCoMAccel   {0, 0, 0};
+    QVector3D m_lastGRFNewtons {0, 0, 0};
+    double    m_lastBodyMass   = 0.0;
+    bool      m_haveCoMPrev    = false;
 };
 
 inline PoseRefiner&  g_refiner() {
@@ -2038,18 +2182,25 @@ void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
             std::cout << "[bio §45.1] c_spine=["
                       << fb::kCSpine[0] << ", " << fb::kCSpine[1] << ", "
                       << fb::kCSpine[2] << ", " << fb::kCSpine[3] << ", "
-                      << fb::kCSpine[4] << " (axial), "
+                      << fb::kCSpine[4] << " (spineNeck.cNeck), "
                       << fb::kCSpine[5] << ", " << fb::kCSpine[6] << ", "
                       << fb::kCSpine[7] << ", " << fb::kCSpine[8]
                       << "]  (Pelvis→T8 distribution + cervical chain)\n";
             std::cout << "[bio §45.3] c_pelvis=[" << fb::kCPelvis[0]
-                      << " (frac), " << fb::kCPelvis[1] << "° (ramp scale)]\n";
+                      << " (frac), " << fb::kCPelvis[1] << "° (ramp scale), "
+                      << fb::kCPelvis[2] << " (lat tilt penalty)]\n";
+            std::cout << "[bio §316.6] c_femoropelvic=" << fb::kCFemoropelvic
+                      << " (anti-pelvic-tilt on hip flexion)\n";
             std::cout << "[bio §46.1] c_arms=[" << fb::kCArms[0]
                       << " (X), " << fb::kCArms[1] << " (Y), "
-                      << fb::kCArms[2]
-                      << " (max)]  scapulo-humeral piecewise-linear\n";
+                      << fb::kCArms[2] << " (max), "
+                      << fb::kCArms[3] << ", " << fb::kCArms[4]
+                      << ", " << fb::kCArms[5]
+                      << "]  scapulo-humeral piecewise-linear\n";
             std::cout << "[bio §47.1] c_knees=[" << fb::kCKnees[0]
-                      << ", " << fb::kCKnees[1] << "]"
+                      << ", " << fb::kCKnees[1]
+                      << ", " << fb::kCKnees[2]
+                      << ", " << fb::kCKnees[3] << "]"
                       << "  screw-home max " << fb::kKneeScrewMaxDeg << "°\n";
             std::cout << "[bio §48.1] c_ankles=[" << fb::kCAnkles[0]
                       << ", " << fb::kCAnkles[1] << " (=" << (fb::kCAnkles[1]
@@ -2255,9 +2406,9 @@ void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
            << "° w=" << d.toeWeightL << "\n";
 
         ss << "[coupling-wls leg-bi] c_legs=["
-           << fb::kCLegs[0] << ", " << fb::kCLegs[1]
-           << "]  effective gain=" << (fb::kCLegs[0] * fb::kCLegs[1])
-           << " (hipFlexY · gain → target ankle dorsi Y)\n";
+           << fb::kCLegs[0] << ", " << fb::kCLegs[1] << ", " << fb::kCLegs[2]
+           << "]  effective gain=" << fb::kCLegs[1]
+           << " (hipFlexY · c_legs[1] → target ankle dorsi Y)\n";
         ss << std::setprecision(4);
     }
 
@@ -2322,43 +2473,7 @@ void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
 
 void SkeletonXsens::buildDefaultAngles()
 {
-
-    const double P = M_PI;
-
-    auto E = [](double x, double y, double z) {
-        return euler_to_quat(x, y, z, "XYZ");
-    };
-
-    if (m_pose == "tpose") {
-        m_defAng = {
-            E(0, -P/2, 0), E(0, -P/2, 0), E(0, -P/2, 0), E(0, -P/2, 0),
-            E(0, -P/2, 0), E(0, -P/2, 0), E(0, -P/2, 0),
-
-            E(0, 0, -P/2), E(0, 0, -P/2), E(0, 0, -P/2), E(0, 0, -P/2),
-
-            E(0, 0,  P/2), E(0, 0,  P/2), E(0, 0,  P/2), E(0, 0,  P/2),
-
-            E(0,  P/2, 0), E(0,  P/2, 0), E(0, 0, 0),     E(0, 0, 0),
-
-            E(0,  P/2, 0), E(0,  P/2, 0), E(0, 0, 0),     E(0, 0, 0),
-        };
-    } else {
-
-        m_defAng = {
-            E(0, -P/2, 0), E(0, -P/2, 0), E(0, -P/2, 0), E(0, -P/2, 0),
-            E(0, -P/2, 0), E(0, -P/2, 0), E(0, -P/2, 0),
-
-            E(0,    0, -P/2),
-            E( P/2, 0, -P/2), E( P/2, 0, -P/2), E( P/2, 0, -P/2),
-
-            E(0,    0,  P/2),
-            E(-P/2, 0,  P/2), E(-P/2, 0,  P/2), E(-P/2, 0,  P/2),
-
-            E(0,  P/2, 0), E(0,  P/2, 0), E(0, 0, 0), E(0, 0, 0),
-
-            E(0,  P/2, 0), E(0,  P/2, 0), E(0, 0, 0), E(0, 0, 0),
-        };
-    }
+    m_defAng = defaultSegAnglesFor(m_pose);
 
     if (fox::pose_solver::g_testFlag().load(std::memory_order_relaxed) &&
         fox::pose_solver::g_glovesFlag().load(std::memory_order_relaxed)) {
@@ -2396,52 +2511,56 @@ void SkeletonXsens::buildLengths(const ActorConfig& actor)
     const double fl = actor.footLengthCm / 100.0;
     const double heightScale = (h > 1e-3) ? (h / fb::kRefHeightM) : 1.0;
 
-    double armScale = heightScale;
-    if (actor.armSpanCm > 0.0) {
-        const double refArmOneSide =
-            specLen(fb::kSEG_RShoulder) +
-            specLen(fb::kSEG_RShoulder + 1) +
-            specLen(fb::kSEG_RShoulder + 2) +
-            specLen(fb::kSEG_RShoulder + 3);
-        const double refSpanM = 2.0 * refArmOneSide + 2.0 * double(fb::kShoulderHalfY);
-        armScale = std::max(0.30, actor.armSpanCm / 100.0) / refSpanM;
-    }
+    const double refArmOneSide =
+        specLen(fb::kSEG_RShoulder) +
+        specLen(fb::kSEG_RShoulder + 1) +
+        specLen(fb::kSEG_RShoulder + 2) +
+        specLen(fb::kSEG_RShoulder + 3);
+    const double refScapHalfY = 0.08;
+    const double refSpanM = 2.0 * refArmOneSide + 2.0 * refScapHalfY;
+    const double targetArmSpanM = (actor.armSpanCm > 0.0)
+        ? std::max(0.30, actor.armSpanCm / 100.0)
+        : 1.06 * h;
+    double armScale = (refSpanM > 1e-6) ? targetArmSpanM / refSpanM : heightScale;
 
-    double legScale = heightScale;
-    if (actor.legLengthCm > 0.0) {
-        const double refLegM = specLen(fb::kSEG_RUpperLeg)
-                             + specLen(fb::kSEG_RLowerLeg)
-                             + fb::ankleHeightM(fb::kRefHeightM);
-        legScale = std::max(0.30, actor.legLengthCm / 100.0) / refLegM;
-    }
+    const double refLegM = specLen(fb::kSEG_RUpperLeg)
+                         + specLen(fb::kSEG_RLowerLeg)
+                         + fb::ankleHeightM(fb::kRefHeightM);
+    const double targetLegM = (actor.legLengthCm > 0.0)
+        ? std::max(0.30, actor.legLengthCm / 100.0)
+        : 0.471 * h;
+    double legScale = (refLegM > 1e-6) ? targetLegM / refLegM : heightScale;
 
     double heelToBallM, ballToTipM;
     {
-        const double specFoot = specLen(fb::kSEG_RFoot);
-        const double specToe  = specLen(18);
+        const QVector3D footBoneVec = fb::kSensorToBone[fb::kSEG_RFoot].L_bone;
+        const QVector3D toeBoneVec  = fb::kSensorToBone[18].L_bone;
+        const double specFootX = std::abs(double(footBoneVec.x()));
+        const double specToeX  = std::abs(double(toeBoneVec.x()));
         if (fl > 0.05) {
-            const double frac = specFoot / (specFoot + specToe);
+            const double denom = specFootX + specToeX;
+            const double frac = (denom > 1e-6) ? (specFootX / denom) : 0.69;
             heelToBallM = fl * frac;
             ballToTipM  = fl * (1.0 - frac);
         } else {
-            heelToBallM = specFoot * heightScale;
-            ballToTipM  = specToe  * heightScale;
+            heelToBallM = specFootX * heightScale;
+            ballToTipM  = specToeX  * heightScale;
         }
     }
 
     const double pelvisHalfM = (actor.hipWidthCm > 0.0)
         ? std::max(0.04, actor.hipWidthCm / 200.0)
-        : double(fb::kHipHalfY) * heightScale;
+        : 0.0905 * h;
     const double scapHalfM = (actor.shoulderWidthCm > 0.0)
         ? std::max(0.05, actor.shoulderWidthCm / 200.0)
-        : double(fb::kShoulderHalfY) * heightScale;
+        : 0.08 * heightScale;
 
-    double trunkScale = heightScale;
-    if (actor.trunkLengthCm > 0.0) {
-        double refTrunkM = 0.0;
-        for (int s = 0; s <= 5; ++s) refTrunkM += specLen(s);
-        trunkScale = std::max(0.40, actor.trunkLengthCm / 100.0) / refTrunkM;
-    }
+    double refTrunkM = 0.0;
+    for (int s = 0; s <= 5; ++s) refTrunkM += specLen(s);
+    const double targetTrunkM = (actor.trunkLengthCm > 0.0)
+        ? std::max(0.40, actor.trunkLengthCm / 100.0)
+        : 0.288 * h;
+    double trunkScale = (refTrunkM > 1e-6) ? targetTrunkM / refTrunkM : heightScale;
 
     auto spineLen = [&](int s) { return float(specLen(s) * trunkScale); };
     auto armLen   = [&](int s) { return float(specLen(s) * armScale);   };
@@ -2490,10 +2609,10 @@ void SkeletonXsens::buildLengths(const ActorConfig& actor)
         return vec_rotate(Lspec, m_defAng[origSeg].conj());
     };
 
-    const double specFoot_m = specLen(fb::kSEG_RFoot);
-    const double specToe_m  = specLen(18);
-    const double footScaleR = (specFoot_m > 1e-6) ? heelToBallM / specFoot_m : heightScale;
-    const double toeScaleR  = (specToe_m  > 1e-6) ? ballToTipM  / specToe_m  : heightScale;
+    const double specFootX_m = std::abs(double(fb::kSensorToBone[fb::kSEG_RFoot].L_bone.x()));
+    const double specToeX_m  = std::abs(double(fb::kSensorToBone[18].L_bone.x()));
+    const double footScaleR  = (specFootX_m > 1e-6) ? heelToBallM / specFootX_m : heightScale;
+    const double toeScaleR   = (specToeX_m  > 1e-6) ? ballToTipM  / specToeX_m  : heightScale;
 
     m_localOffset = {{
 
@@ -2607,7 +2726,7 @@ SkeletonXsens::addDummySegments(const std::array<Quat, kXsensSegmentCount>& s) c
     auto femoropelvicOffset = [&](const Quat& qUpperLeg) -> Quat {
         const Quat qRel = canon(quat_mult(qUpperLeg, s[SEG_Pelvis].conj()).normalized());
         const QVector3D phi = quat_log(qRel);
-        const double cR = fb::kCSpine[4];
+        const double cR = fb::kCFemoropelvic;
         return quat_exp_rotvec(cR * double(phi.x()),
                                cR * double(phi.y()), 0.0);
     };
@@ -2685,7 +2804,14 @@ SkeletonXsens::computeKeypoints(const std::array<Quat, kXsensSegmentCount>& raw,
         g_renderDiag.spineW_L5  = dg.spineFracL5;
         g_renderDiag.spineW_L3  = dg.spineFracL3;
         g_renderDiag.spineW_T12 = dg.spineFracT12;
-        g_renderDiag.neckW      = 0.5;
+        {
+            const double cNeck = 0.5 * (fox::body::kCSpine[5] +
+                                        fox::body::kCSpine[6]);
+            const double cHead = 0.5 * (fox::body::kCSpine[7] +
+                                        fox::body::kCSpine[8]);
+            const double sumNH = cNeck + cHead;
+            g_renderDiag.neckW = (sumNH > 1e-9) ? (cNeck / sumNH) : 0.5;
+        }
         g_renderDiag.scapUpZR   = std::sin(dg.scapThetaRDeg * M_PI / 180.0);
         g_renderDiag.scapUpZL   = std::sin(dg.scapThetaLDeg * M_PI / 180.0);
         g_renderDiag.scapActiveR= dg.scapThetaRDeg > 0.0;
@@ -2733,7 +2859,15 @@ SkeletonXsens::computeKeypoints(const std::array<Quat, kXsensSegmentCount>& raw,
 
     for (int s = 0; s < kXsensSegmentCountWithDummies; ++s) {
         const int a = m_start[s];
-        if (a < kXsensSegmentCount) m_lastSegCenter[a] = kp[a];
+        const int b = m_end[s];
+        if (a < kXsensSegmentCount) {
+            const double ratio = fox::body::kWinterProxToComRatio[a];
+            if (b < kXsensKeypointCount && b >= 0) {
+                m_lastSegCenter[a] = kp[a] + (kp[b] - kp[a]) * float(ratio);
+            } else {
+                m_lastSegCenter[a] = kp[a];
+            }
+        }
     }
     m_haveLastSegCenter = true;
 
@@ -2754,7 +2888,7 @@ SkeletonXsens::computeKeypoints(const std::array<Quat, kXsensSegmentCount>& raw,
         if (!sensorRbsDumped) {
             sensorRbsDumped = true;
             std::cout << "[sensor-rbs §89] per-segment IMU mount r_bs (m) — sensor"
-                         " offset on the bone, used for GPS aiding and rendering\n";
+                         " offset on the bone, used for rendering and contact reasoning\n";
             for (int i = 0; i < kXsensSegmentCount; ++i) {
                 const QVector3D r_bs = fox::body::kSensorToBone[i].r_bs;
                 if (r_bs.lengthSquared() < 1e-12f) continue;
@@ -3135,7 +3269,13 @@ QVector3D LocomotionSolver::update(const Quat& qR,
         m_confL = applyRollHyst(rollingL, m_confL, newConfL,
                                 m_confLFrozenForRoll, m_confLFrozenValue);
 
-        const double pelvisRotKill = std::max(0.0, std::min(1.0, (m_pelvisAngV - 0.6) / 0.8));
+        const double pelvisStill = std::max(1e-3, m_pelvisStillRad);
+        const double pelvisRange = std::max(pelvisStill,
+                                            fox::body::kContact.highVelTh);
+        const double pelvisRotKill =
+            std::max(0.0,
+                     std::min(1.0,
+                              (m_pelvisAngV - pelvisStill) / pelvisRange));
         const bool pelvisRotating = pelvisRotKill > 0.5;
         m_dbgPelvisRotKill = pelvisRotKill;
 
@@ -3453,14 +3593,14 @@ QVector3D LocomotionSolver::update(const Quat& qR,
 const char* connStatusName(ConnStatus s)
 {
     switch (s) {
-        case ConnStatus::NotInitialized: return "not initialised";
-        case ConnStatus::NoDriver:       return "driver missing";
-        case ConnStatus::Scanning:       return "scanning";
-        case ConnStatus::NoDevice:       return "no device";
-        case ConnStatus::Connecting:     return "connecting";
-        case ConnStatus::Streaming:      return "streaming";
-        case ConnStatus::Stale:          return "stale";
-        case ConnStatus::Failed:         return "failed";
+        case ConnStatus::NotInitialized: return "не инициализирован";
+        case ConnStatus::NoDriver:       return "драйвер отсутствует";
+        case ConnStatus::Scanning:       return "сканирование";
+        case ConnStatus::NoDevice:       return "устройство не найдено";
+        case ConnStatus::Connecting:     return "подключение";
+        case ConnStatus::Streaming:      return "поток";
+        case ConnStatus::Stale:          return "устаревший поток";
+        case ConnStatus::Failed:         return "сбой";
     }
     return "?";
 }
@@ -3468,7 +3608,17 @@ const char* connStatusName(ConnStatus s)
 static double monotonicSec()
 {
     using clk = std::chrono::steady_clock;
-    return std::chrono::duration<double>(clk::now().time_since_epoch()).count();
+    static std::atomic<double> sLastT{0.0};
+    const double now =
+        std::chrono::duration<double>(clk::now().time_since_epoch()).count();
+    constexpr double kEps = 1e-6;
+    double last = sLastT.load(std::memory_order_relaxed);
+    double t    = (now > last + kEps) ? now : (last + kEps);
+    while (!sLastT.compare_exchange_weak(last, t,
+                                         std::memory_order_relaxed)) {
+        t = (now > last + kEps) ? now : (last + kEps);
+    }
+    return t;
 }
 
 static int segmentFromLocationId(int loc)
@@ -3558,6 +3708,8 @@ using FnDataPacketFreeAcc         =
     XsVectorBlob*(*)(const XsDataPacketBlob*, XsVectorBlob*);
 using FnDataPacketContainsSampleTimeFine = int (*)(const XsDataPacketBlob*);
 using FnDataPacketSampleTimeFine         = quint32(*)(const XsDataPacketBlob*);
+using FnDataPacketContainsTemperature    = int (*)(const XsDataPacketBlob*);
+using FnDataPacketTemperature            = double (*)(const XsDataPacketBlob*);
 
 struct Api {
     HMODULE xda = nullptr;
@@ -3617,6 +3769,8 @@ struct Api {
     FnDataPacketFreeAcc                   dataPacketFreeAcc        = nullptr;
     FnDataPacketContainsSampleTimeFine    dataPacketContainsSTF    = nullptr;
     FnDataPacketSampleTimeFine            dataPacketSTF            = nullptr;
+    FnDataPacketContainsTemperature       dataPacketContainsTemperature = nullptr;
+    FnDataPacketTemperature               dataPacketTemperature    = nullptr;
 
     struct ContainsProbe {
         const char* name;
@@ -3761,6 +3915,8 @@ static bool loadApi(Api& api, QString& errDetail)
     resolveProc (api.xst, "XsDataPacket_freeAcceleration",          api.dataPacketFreeAcc);
     resolveProc (api.xst, "XsDataPacket_containsSampleTimeFine",    api.dataPacketContainsSTF);
     resolveProc (api.xst, "XsDataPacket_sampleTimeFine",            api.dataPacketSTF);
+    resolveProc (api.xst, "XsDataPacket_containsTemperature",       api.dataPacketContainsTemperature);
+    resolveProc (api.xst, "XsDataPacket_temperature",               api.dataPacketTemperature);
 
     resolveProc (api.xst, "XsDataPacket_containsOrientationIncrement",
                  api.dataPacketContainsOrientationIncrement);
@@ -3813,6 +3969,12 @@ struct MocapReceiver::Impl {
     std::array<bool,       kXsensSegmentCount>           fusionReady{};
     std::array<FusionAhrsSettings, kXsensSegmentCount>   ahrsCfg{};
     double           freqHz       = 240.0;
+
+    std::atomic<double> magDeclinationDeg{fox::body::kMagnet.declinationDeg};
+    std::atomic<double> magInclinationDeg{fox::body::kMagnet.inclinationDeg};
+
+    std::array<quint32, kXsensSegmentCount> lastStf{};
+    std::array<bool,    kXsensSegmentCount> haveLastStf{};
 
     std::array<Quat, kXsensSegmentCount> s2s{};
     std::array<Quat, kXsensSegmentCount> s2sInv{};
@@ -3905,7 +4067,7 @@ void MocapReceiver::setTransport(Transport t)
 
 void MocapReceiver::setExpectedRate(double hz)
 {
-    if (hz > 1.0) m_impl->expectedRateHz.store(hz);
+    if (hz > 1.0 && hz <= 1000.0) m_impl->expectedRateHz.store(hz);
 }
 
 void MocapReceiver::restart()
@@ -3970,49 +4132,48 @@ struct FingerBaselineState {
 static FingerBaselineState g_fingerBaseline;
 
 static const double kFingerBoneLen[5][4] = {
-    { 0.045, 0.030, 0.025, 0.020 },
-    { 0.045, 0.040, 0.025, 0.020 },
-    { 0.045, 0.045, 0.028, 0.022 },
-    { 0.045, 0.040, 0.027, 0.022 },
-    { 0.045, 0.033, 0.021, 0.019 },
+    { 0.046, 0.031, 0.025,  0.000 },
+    { 0.068, 0.039, 0.022,  0.0156 },
+    { 0.064, 0.045, 0.026,  0.0166 },
+    { 0.058, 0.040, 0.025,  0.0156 },
+    { 0.053, 0.032, 0.018,  0.0124 },
 };
 
 static const QVector3D kFingerBaseOffset[5] = {
-    QVector3D(0.035f,  0.030f,  0.015f),
-    QVector3D(0.080f,  0.020f,  0.000f),
-    QVector3D(0.083f,  0.005f,  0.000f),
-    QVector3D(0.080f, -0.010f,  0.000f),
-    QVector3D(0.075f, -0.025f,  0.000f),
+    QVector3D(0.027f,  0.0274f,  0.000f),
+    QVector3D(0.080f,  0.0121f,  0.000f),
+    QVector3D(0.083f,  0.000f,   0.000f),
+    QVector3D(0.080f, -0.0121f,  0.000f),
+    QVector3D(0.075f, -0.0274f,  0.000f),
 };
 
-static const double kSpreadSign[5] = { +1.0, +0.5, 0.0, -0.5, -1.0 };
+static const double kSpreadSign[5] = { +1.0, +1.0, +1.0, +1.0, +1.0 };
 
 const FingerJointLimit kFingerLimits[5][3] = {
     {
-
-        { -M_PI * 0.40,  M_PI * 0.60,  -M_PI / 5.0,    M_PI * 0.65 },
-        { -M_PI / 10.0,  M_PI / 10.0,  -M_PI / 24.0,   M_PI * 0.60 },
-        {  0.0,          0.0,          -M_PI / 24.0,   M_PI * 0.40 }
+        { -M_PI / 18.0,  M_PI / 3.0,   -M_PI / 9.0,    M_PI * 5.0/18.0 },
+        { -M_PI / 36.0,  M_PI / 36.0,   0.0,           M_PI * 4.0/9.0  },
+        {  0.0,          0.0,           0.0,           M_PI * 0.50     }
     },
     {
-        { -M_PI / 9.0,   M_PI / 9.0,   -M_PI / 12.0,  M_PI * 0.50 },
-        {  0.0,          0.0,           0.0,          M_PI * 0.65 },
-        {  0.0,          0.0,           0.0,          M_PI / 3.0  }
+        { -M_PI / 9.0,   M_PI / 9.0,    0.0,           M_PI * 0.50 },
+        {  0.0,          0.0,           0.0,           M_PI * 11.0/18.0 },
+        {  0.0,          0.0,           0.0,           M_PI * 4.0/9.0   }
     },
     {
-        { -M_PI / 18.0,  M_PI / 18.0,  -M_PI / 12.0,  M_PI * 0.50 },
-        {  0.0,          0.0,           0.0,          M_PI * 0.65 },
-        {  0.0,          0.0,           0.0,          M_PI / 3.0  }
+        { -M_PI / 9.0,   M_PI / 9.0,    0.0,           M_PI * 0.50 },
+        {  0.0,          0.0,           0.0,           M_PI * 11.0/18.0 },
+        {  0.0,          0.0,           0.0,           M_PI * 4.0/9.0   }
     },
     {
-        { -M_PI / 9.0,   M_PI / 9.0,   -M_PI / 12.0,  M_PI * 0.50 },
-        {  0.0,          0.0,           0.0,          M_PI * 0.65 },
-        {  0.0,          0.0,           0.0,          M_PI / 3.0  }
+        { -M_PI / 9.0,   M_PI / 9.0,    0.0,           M_PI * 0.50 },
+        {  0.0,          0.0,           0.0,           M_PI * 11.0/18.0 },
+        {  0.0,          0.0,           0.0,           M_PI * 4.0/9.0   }
     },
     {
-        { -M_PI / 8.0,   M_PI / 8.0,   -M_PI / 12.0,  M_PI * 0.50 },
-        {  0.0,          0.0,           0.0,          M_PI * 0.65 },
-        {  0.0,          0.0,           0.0,          M_PI / 3.0  }
+        { -M_PI / 9.0,   M_PI / 9.0,    0.0,           M_PI * 0.50 },
+        {  0.0,          0.0,           0.0,           M_PI * 11.0/18.0 },
+        {  0.0,          0.0,           0.0,           M_PI * 4.0/9.0   }
     }
 };
 
@@ -4064,18 +4225,7 @@ static void parseErgoHand(const float* degs20, bool isLeft,
     dg.baselineApplied = (effectivePtr == effective);
     for (int i = 0; i < 20; ++i) { dg.raw[i] = degs20[i]; dg.effective[i] = effectivePtr[i]; }
 
-    constexpr double kThumbCmcRadialDeg     = 40.0;
-    constexpr double kThumbCmcOppositionDeg = 15.0;
-
-    static constexpr bool kEnableLeftThumbVariant = true;
-    const double radSign = (isLeft && kEnableLeftThumbVariant) ? -1.0 : +1.0;
-    const double oppSign = (isLeft && kEnableLeftThumbVariant) ? -1.0 : +1.0;
-    const Quat thumbPreRot = quat_mult(
-        axisAngleQuat(QVector3D(0,0,1),
-                      radSign * kThumbCmcRadialDeg     * M_PI / 180.0),
-        axisAngleQuat(QVector3D(1,0,0),
-                      oppSign * -kThumbCmcOppositionDeg * M_PI / 180.0)
-    ).normalized();
+    const Quat thumbPreRot(1.0, 0.0, 0.0, 0.0);
 
     for (int f = 0; f < 5; ++f) {
         const float* d = effectivePtr + f * 4;
@@ -4085,12 +4235,18 @@ static void parseErgoHand(const float* degs20, bool isLeft,
         const double a3     = d[3] * M_PI / 180.0;
 
         const auto& Lm = kFingerLimits[f];
-        (void)sideSign;
-        const double spreadEff = spread * kSpreadSign[f];
+        const double spreadEff = spread * sideSign * kSpreadSign[f];
         const double spreadC = std::clamp(spreadEff, Lm[0].spreadMin, Lm[0].spreadMax);
         const double a1c     = std::clamp(a1, Lm[0].flexMin, Lm[0].flexMax);
         const double a2c     = std::clamp(a2, Lm[1].flexMin, Lm[1].flexMax);
-        const double a3c     = std::clamp(a3, Lm[2].flexMin, Lm[2].flexMax);
+        double a3c           = std::clamp(a3, Lm[2].flexMin, Lm[2].flexMax);
+
+        if (f > 0) {
+            const double a3Linked = (2.0 / 3.0) * a2c;
+            const double linkedC  = std::clamp(a3Linked, Lm[2].flexMin, Lm[2].flexMax);
+            a3c = std::min(a3c, linkedC) > 0.0 ? std::max(a3c, linkedC) : a3c;
+            a3c = linkedC;
+        }
 
         {
             const double Kdeg = 180.0 / M_PI;
@@ -4216,11 +4372,13 @@ static void __cdecl foxManusErgonomicsCb(const void* raw)
         }
         const bool testMode = g_ergo.rawDump.load();
         auto alphaForJoint = [testMode](int idx, float delta, const char* hand) -> float {
-
+            const auto& cfg = fox::body::kFingerSmooth;
             const bool isThumb = (idx < 4);
-            const float baseAlpha = isThumb ? 0.15f : 0.35f;
-            const float outlierAlpha = isThumb ? 0.04f : 0.10f;
-            const float outlierThresh = isThumb ? 15.0f : 30.0f;
+            const float baseAlpha    = isThumb ? cfg.emaAlphaThumb    : cfg.emaAlphaFinger;
+            const float outlierAlpha = isThumb ? cfg.outlierAlphaThumb : cfg.outlierAlphaFinger;
+            const float outlierThresh = isThumb
+                ? cfg.outlierThreshThumbDeg
+                : cfg.outlierThreshFingerDeg;
             const bool outlier = (delta > outlierThresh);
             if (outlier && testMode) {
                 static const char* kFingerName[5] = { "thumb", "index", "middle", "ring", "pinky" };
@@ -4597,15 +4755,16 @@ bool MocapReceiver::connectGloves()
     return glovesOn;
 }
 
-bool MocapReceiver::glovesReady()     const { return m_impl->manusGloveCount > 0; }
+bool MocapReceiver::glovesReady()     const { return m_impl->manusGloveCount >= 2; }
 bool MocapReceiver::glovesCoreReady() const { return m_impl->manusCoreReady; }
 bool MocapReceiver::glovesDllLoaded() const { return m_impl->manusDllLoaded; }
 
 void MocapReceiver::resetFusion()
 {
-
+    resetS2sAlignment();
     m_impl->calGen.fetch_add(1, std::memory_order_relaxed);
-    testLog("[fusion] reset — all per-sensor §43 EKFs will re-init", m_impl->test);
+    testLog("[fusion] reset — all per-sensor §43 EKFs will re-init "
+            "(incl. s2s reset per §24.5)", m_impl->test);
 }
 
 void MocapReceiver::setS2sAlignment(const std::array<Quat, kXsensSegmentCount>& s2s)
@@ -4653,6 +4812,7 @@ void MocapReceiver::setMagNormalisation(const std::array<double, kXsensSegmentCo
     m_impl->magMagn = mm;
     m_impl->magNormActive = true;
     m_impl->magSoftActive = false;
+    m_impl->calGen.fetch_add(1, std::memory_order_relaxed);
     testLog("[s2s] per-sensor mag_magn normalisation installed", m_impl->test);
 }
 
@@ -4661,6 +4821,7 @@ void MocapReceiver::setAccNormalisation(const std::array<double, kXsensSegmentCo
     QMutexLocker lk(&m_impl->lock);
     m_impl->accMagn = am;
     m_impl->accNormActive = true;
+    m_impl->calGen.fetch_add(1, std::memory_order_relaxed);
     testLog("[s2s] per-sensor acc_magn normalisation installed", m_impl->test);
 }
 
@@ -4681,6 +4842,7 @@ void MocapReceiver::setMagSoftIron(const std::array<std::array<double, 9>, kXsen
     m_impl->magSoftOff = offset;
     m_impl->magSoftActive = true;
     m_impl->magNormActive = false;
+    m_impl->calGen.fetch_add(1, std::memory_order_relaxed);
     testLog("[s2s] per-sensor mag soft-iron correction installed", m_impl->test);
 }
 
@@ -4691,6 +4853,30 @@ void MocapReceiver::setSegmentGain(const std::array<float, kXsensSegmentCount>& 
     m_impl->segGainActive = true;
     m_impl->calGen.fetch_add(1, std::memory_order_relaxed);
     testLog("[s2s] per-segment AHRS gain installed", m_impl->test);
+}
+
+void MocapReceiver::setMagneticDeclinationDeg(double deg)
+{
+    m_impl->magDeclinationDeg.store(deg, std::memory_order_relaxed);
+    m_impl->calGen.fetch_add(1, std::memory_order_relaxed);
+    testLog("[mag] declination updated", m_impl->test);
+}
+
+void MocapReceiver::setMagneticInclinationDeg(double deg)
+{
+    m_impl->magInclinationDeg.store(deg, std::memory_order_relaxed);
+    m_impl->calGen.fetch_add(1, std::memory_order_relaxed);
+    testLog("[mag] inclination (dip) updated", m_impl->test);
+}
+
+double MocapReceiver::magneticDeclinationDeg() const
+{
+    return m_impl->magDeclinationDeg.load(std::memory_order_relaxed);
+}
+
+double MocapReceiver::magneticInclinationDeg() const
+{
+    return m_impl->magInclinationDeg.load(std::memory_order_relaxed);
 }
 
 QVector3D MocapReceiver::snapshotGyroAvg(int idx, int samples) const
@@ -5104,7 +5290,29 @@ void MocapReceiver::run()
                 stf = api.dataPacketSTF(pkt); haveStf = true;
             }
 
-            const double dt = 1.0 / I.freqHz;
+            double sensorTempC = std::numeric_limits<double>::quiet_NaN();
+            if (api.dataPacketContainsTemperature && api.dataPacketTemperature &&
+                api.dataPacketContainsTemperature(pkt)) {
+                sensorTempC = api.dataPacketTemperature(pkt);
+            }
+            (void)sensorTempC;
+
+            double dt = 1.0 / I.freqHz;
+            if (haveStf && targetSeg >= 0 && targetSeg < kXsensSegmentCount) {
+                if (I.haveLastStf[targetSeg]) {
+                    const quint32 last = I.lastStf[targetSeg];
+                    const quint32 diff = stf - last;
+                    if (diff > 0 && diff < 100000) {
+                        const double measured = double(diff) * 1.0e-4;
+                        const double nominal = 1.0 / I.freqHz;
+                        if (measured > 0.25 * nominal && measured < 4.0 * nominal) {
+                            dt = measured;
+                        }
+                    }
+                }
+                I.lastStf[targetSeg]     = stf;
+                I.haveLastStf[targetSeg] = true;
+            }
             constexpr double kRadToDeg = 57.29577951308232;
             constexpr double kMs2ToG   = 1.0 / 9.80665;
             QVector3D accForFilter, gyrForFilter;
@@ -5114,9 +5322,23 @@ void MocapReceiver::run()
                 const QVector3D accSI(float(velInc.x() * I.freqHz),
                                       float(velInc.y() * I.freqHz),
                                       float(velInc.z() * I.freqHz));
-                const QVector3D gyrSI(float(2.0 * dq.x * I.freqHz),
-                                      float(2.0 * dq.y * I.freqHz),
-                                      float(2.0 * dq.z * I.freqHz));
+
+                const double vNorm = std::sqrt(dq.x * dq.x +
+                                               dq.y * dq.y +
+                                               dq.z * dq.z);
+                double phiX = 0.0, phiY = 0.0, phiZ = 0.0;
+                if (vNorm > 1e-12) {
+                    const double absW = std::min(1.0, std::abs(dq.w));
+                    const double halfAngle = std::atan2(vNorm, absW);
+                    const double sgn = (dq.w >= 0.0) ? 1.0 : -1.0;
+                    const double scale = (2.0 * halfAngle) / vNorm;
+                    phiX = sgn * dq.x * scale;
+                    phiY = sgn * dq.y * scale;
+                    phiZ = sgn * dq.z * scale;
+                }
+                const QVector3D gyrSI(float(phiX * I.freqHz),
+                                      float(phiY * I.freqHz),
+                                      float(phiZ * I.freqHz));
                 accForFilter = accSI * float(kMs2ToG);
                 gyrForFilter = gyrSI * float(kRadToDeg);
                 fuseReady = true;
@@ -5210,15 +5432,15 @@ void MocapReceiver::run()
                     s.convention   = FusionConventionNwu;
                     s.sampleRateHz = float(std::max(60.0, I.freqHz));
 
-                    s.magDipModelDeg    = float(fox::body::kMagnet.inclinationDeg);
-                    s.magDeclinationDeg = float(fox::body::kMagnet.declinationDeg);
+                    s.magDipModelDeg    = float(I.magInclinationDeg.load(std::memory_order_relaxed));
+                    s.magDeclinationDeg = float(I.magDeclinationDeg.load(std::memory_order_relaxed));
 
                     const fox::body::CalibMagE& mE = fox::body::kCalibMagE;
                     float refNorm = 1.0f;
                     switch (targetSeg) {
                         case SEG_Head:                                  refNorm = float(1.0 + mE.e_norm_head);   break;
                         case SEG_RHand: case SEG_LHand:                 refNorm = float(1.0 + mE.e_norm_hands);  break;
-                        case SEG_RFoot: case SEG_LFoot:                 refNorm = float(1.0 + 0.1 * mE.e_mag_feet); break;
+                        case SEG_RFoot: case SEG_LFoot:                 refNorm = float(1.0 + mE.e_norm_feet);  break;
                         case SEG_Pelvis:                                refNorm = float(1.0 + mE.e_norm_pelvis); break;
                         default:                                        refNorm = 1.0f;                           break;
                     }
@@ -5260,7 +5482,8 @@ void MocapReceiver::run()
                         I.dbgGyrFused[targetSeg]  = QVector3D(g.axis.x, g.axis.y, g.axis.z);
                     }
                     const float dtF = float(dt);
-                    const float aEma = float(1.0 - std::exp(-double(dtF) / 5.0));
+                    const double tauEma = std::max(0.1, fox::body::kFilter.tauAcc);
+                    const float aEma = float(1.0 - std::exp(-double(dtF) / tauEma));
                     I.segAccErrEma[targetSeg] = (1.0f - aEma) * I.segAccErrEma[targetSeg]
                                               + aEma * st.accelerationError;
                     I.segMagErrEma[targetSeg] = (1.0f - aEma) * I.segMagErrEma[targetSeg]
@@ -5427,12 +5650,16 @@ void MocapReceiver::run()
                                   << gyrNorm << "deg/s"
                    << "\n";
 
+                const double magGateDeg =
+                    fox::body::kMagnet.angleDiffFromModelMaxDeg;
+                const double accGateDeg =
+                    fox::body::kMagnet.angleDiffFromModelMaxDeg;
                 ss << "[mag]  Pelvis"
                    << "  magErr=" << std::setw(5) << std::setprecision(2)
                                   << I.dbgDynMagRej[kPelvis] << "deg"
-                   << "  accGate=" << (I.dbgDynAccRej[kPelvis] > 5.0
+                   << "  accGate=" << (I.dbgDynAccRej[kPelvis] > accGateDeg
                                         ? "REJECTED" : "open")
-                   << "  magGate=" << (I.dbgDynMagRej[kPelvis] > 5.0
+                   << "  magGate=" << (I.dbgDynMagRej[kPelvis] > magGateDeg
                                         ? "REJECTED" : "open")
                    << "\n";
                 std::cout << ss.str() << std::flush;
@@ -6181,7 +6408,12 @@ static float computeFeature(
     std::vector<float> work = target;
     if (f.band != SpcBand::None) {
         const int N = int(target.size());
-        std::vector<float> mag = realDftMag(target);
+        std::vector<float> centered = target;
+        double mean = 0.0;
+        for (float v : centered) mean += double(v);
+        if (N > 0) mean /= double(N);
+        for (float& v : centered) v = float(double(v) - mean);
+        std::vector<float> mag = realDftMag(centered);
         double fLo = 0.0, fHi = 0.0;
         switch (f.band) {
             case SpcBand::Band0p5To4:   fLo = 0.5;  fHi = 4.0;  break;
@@ -6390,12 +6622,13 @@ struct PlacementClassifier {
 };
 
 struct PlacementReport {
-    bool        haveModel = false;
-    bool        haveData  = false;
-    int         verified  = 0;
-    int         total     = 0;
+    bool        haveModel            = false;
+    bool        haveData             = false;
+    int         verified             = 0;
+    int         total                = 0;
     QStringList mismatches;
-    float       avgMaxP   = 0.0f;
+    float       avgMaxP              = 0.0f;
+    bool        suitUncertaintyAlarm = false;
 };
 
 static PlacementReport analyzePlacement(
@@ -6426,10 +6659,17 @@ static PlacementReport analyzePlacement(
 
     std::array<std::array<float, fox::body::kSpcClassCount>,
                fox::body::kSpcClassCount> cost{};
-    for (int r = 0; r < row; ++r) {
-        for (int c = 0; c < fox::body::kSpcClassCount; ++c) {
-            const float p = std::max(probs[r][c], 1e-6f);
-            cost[r][c] = -std::log(p);
+    constexpr float kPhantomCost = 1.0e6f;
+    for (int r = 0; r < int(fox::body::kSpcClassCount); ++r) {
+        if (r < row) {
+            for (int c = 0; c < fox::body::kSpcClassCount; ++c) {
+                const float p = std::max(probs[r][c], 1e-6f);
+                cost[r][c] = -std::log(p);
+            }
+        } else {
+            for (int c = 0; c < fox::body::kSpcClassCount; ++c) {
+                cost[r][c] = kPhantomCost;
+            }
         }
     }
     auto assign = hungarian17(cost);
@@ -6453,7 +6693,7 @@ static PlacementReport analyzePlacement(
 
         if (assignedClass == expectedClass) {
             ++rep.verified;
-        } else if (maxP > 0.4f) {
+        } else if (maxP >= 0.5f) {
             rep.mismatches << QString("%1→%2 (p=%3)")
                                 .arg(QString::fromUtf8(kSegmentNames[seg]))
                                 .arg(QString::fromUtf8(
@@ -6463,6 +6703,14 @@ static PlacementReport analyzePlacement(
         ++rep.total;
     }
     rep.avgMaxP = (row > 0) ? sumMax / float(row) : 0.0f;
+
+    float suitUncertainty = 0.0f;
+    for (int r = 0; r < row; ++r) {
+        const float maxP = *std::max_element(probs[r].begin(), probs[r].end());
+        suitUncertainty += (1.0f - maxP);
+    }
+    rep.suitUncertaintyAlarm = suitUncertainty > 4.0f;
+
     return rep;
 }
 
@@ -6511,7 +6759,12 @@ NewSessionWizard::NewSessionWizard(MocapReceiver* rx, bool testMode, QWidget* pa
     m_statusTimer.start();
 
     m_countTimer.setInterval(100);
-    m_captureTimer.setInterval(10);
+    {
+        const double nativeRateHz =
+            std::max(60.0, fox::body::constants::kSampleRateHz);
+        const int captureMs = std::max(1, int(1000.0 / nativeRateHz + 0.5));
+        m_captureTimer.setInterval(captureMs);
+    }
     connect(&m_countTimer,   &QTimer::timeout, this, &NewSessionWizard::onCountdownTick);
     connect(&m_captureTimer, &QTimer::timeout, this, &NewSessionWizard::onCaptureTick);
 
@@ -7466,6 +7719,28 @@ void NewSessionWizard::abortCalibration()
     m_samples.clear();
     m_havePrev = false;
     m_calibComplete = false;
+
+    for (int i = 0; i < kXsensSegmentCount; ++i) {
+        m_accAccumT[i]    = QVector3D(0, 0, 0);
+        m_gyrAccumT[i]    = QVector3D(0, 0, 0);
+        m_magAccumT[i]    = QVector3D(0, 0, 0);
+        m_accMagAccumT[i] = 0.0;
+        m_magMagAccumT[i] = 0.0;
+        m_accumCountT[i]  = 0;
+        m_accAccumN[i]    = QVector3D(0, 0, 0);
+        m_gyrAccumN[i]    = QVector3D(0, 0, 0);
+        m_magAccumN[i]    = QVector3D(0, 0, 0);
+        m_accMagAccumN[i] = 0.0;
+        m_magMagAccumN[i] = 0.0;
+        m_accumCountN[i]  = 0;
+    }
+
+    for (int j = 0; j < 20; ++j) {
+        m_fingerAccumR[j] = 0.0;
+        m_fingerAccumL[j] = 0.0;
+    }
+    m_fingerAccumCount = 0;
+
     m_phase = CalibPhase::Idle;
     logCalibPhaseTransition("aborted");
     refreshPoseImage();
@@ -7493,11 +7768,13 @@ void NewSessionWizard::onCalibrationBegin()
         m_gyrAccumT[i]    = QVector3D(0, 0, 0);
         m_magAccumT[i]    = QVector3D(0, 0, 0);
         m_accMagAccumT[i] = 0.0;
+        m_magMagAccumT[i] = 0.0;
         m_accumCountT[i]  = 0;
         m_accAccumN[i]    = QVector3D(0, 0, 0);
         m_gyrAccumN[i]    = QVector3D(0, 0, 0);
         m_magAccumN[i]    = QVector3D(0, 0, 0);
         m_accMagAccumN[i] = 0.0;
+        m_magMagAccumN[i] = 0.0;
         m_accumCountN[i]  = 0;
         m_gyrSqAccumT[i]  = QVector3D(0, 0, 0);
         m_gyrSqAccumN[i]  = QVector3D(0, 0, 0);
@@ -7528,6 +7805,7 @@ void NewSessionWizard::onCalibrationBegin()
     m_gyrAccum    = &m_gyrAccumT;
     m_magAccum    = &m_magAccumT;
     m_accMagAccum = &m_accMagAccumT;
+    m_magMagAccum = &m_magMagAccumT;
     m_accumCount  = &m_accumCountT;
     m_gyrSqAccum    = &m_gyrSqAccumT;
     m_magOuterAccum = &m_magOuterAccumT;
@@ -7638,6 +7916,9 @@ void NewSessionWizard::onCaptureTick()
             (*m_gyrAccum)[i]    += fr.gyrSensor[i];
             (*m_magAccum)[i]    += fr.magSensor[i];
             (*m_accMagAccum)[i] += fr.accSensor[i].length();
+            if (m_magMagAccum) {
+                (*m_magMagAccum)[i] += fr.magSensor[i].length();
+            }
             (*m_accumCount)[i]++;
             if (m_gyrSqAccum) {
                 (*m_gyrSqAccum)[i] += QVector3D(g.x()*g.x(), g.y()*g.y(), g.z()*g.z());
@@ -7740,6 +8021,7 @@ void NewSessionWizard::onCaptureTick()
         m_gyrAccum      = &m_gyrAccumN;
         m_magAccum      = &m_magAccumN;
         m_accMagAccum   = &m_accMagAccumN;
+        m_magMagAccum   = &m_magMagAccumN;
         m_accumCount    = &m_accumCountN;
         m_gyrSqAccum    = &m_gyrSqAccumN;
         m_magOuterAccum = &m_magOuterAccumN;
@@ -7798,7 +8080,7 @@ void NewSessionWizard::onCaptureTick()
     }
 
     auto clampBias = [](float v) {
-        const float kMax = 0.2f;
+        const float kMax = float(fox::body::kEstimator.gyrBiasStdMaxDeg);
         return v > kMax ? kMax : (v < -kMax ? -kMax : v);
     };
 
@@ -7814,9 +8096,10 @@ void NewSessionWizard::onCaptureTick()
         tposeValid[i] = (dist2 > 1e-12);
     }
 
+    constexpr std::size_t kCalibMinSamplesPerSeg = 60;
     for (int i = 0; i < kXsensSegmentCount; ++i) {
         if (!fox::body::kSensorPresent[i]) continue;
-        if (sampN[i].size() < 10) continue;
+        if (sampN[i].size() < kCalibMinSamplesPerSeg) continue;
 
         const Quat qAvgN  = fox::quat_avg_markley(sampN[i]);
         m_result.calibReference[i] = qAvgN;
@@ -7872,9 +8155,7 @@ void NewSessionWizard::onCaptureTick()
             const int    cTot   = cT + cN;
             const double invTot = 1.0 / double(cTot);
             accMagn[i] = (m_accMagAccumT[i] + m_accMagAccumN[i]) * invTot;
-            const QVector3D meanM_all = (m_magAccumT[i] + m_magAccumN[i])
-                                        * float(invTot);
-            magMagn[i] = double(meanM_all.length());
+            magMagn[i] = (m_magMagAccumT[i] + m_magMagAccumN[i]) * invTot;
             const QVector3D meanG_all = (m_gyrAccumT[i] + m_gyrAccumN[i])
                                         * float(invTot);
             gyrBias[i] = QVector3D(clampBias(meanG_all.x()),
@@ -7958,6 +8239,9 @@ void NewSessionWizard::onCaptureTick()
             QString style = "color:#9B9B9B;";
             if (!rep.haveData) {
                 msg   = Lang::t("asl_no_data");
+            } else if (rep.suitUncertaintyAlarm) {
+                msg   = Lang::t("asl_low_confidence");
+                style = "color:#E04545; font-weight:700;";
             } else if (rep.avgMaxP < 0.35f) {
                 msg   = Lang::t("asl_low_confidence");
                 style = "color:#E0A030; font-weight:700;";
@@ -8007,6 +8291,10 @@ void NewSessionWizard::closeEvent(QCloseEvent* e)
     m_countTimer.stop();
     m_captureTimer.stop();
     m_statusTimer.stop();
+
+    if (m_phase != CalibPhase::Idle && m_phase != CalibPhase::Done) {
+        abortCalibration();
+    }
     QDialog::closeEvent(e);
 }
 
@@ -8973,8 +9261,10 @@ void MocapViewport::drawSkeleton()
 
     float minZ = kp[0].z();
     for (const auto& p : kp) if (p.z() < minZ) minZ = p.z();
-    m_lastFloorClamp = (minZ < -0.02f) ? -minZ : 0.0f;
-    if (minZ < -0.02f) {
+    constexpr float kFloorClampShallowM = -0.10f;
+    const bool shallowPenetration = (minZ < -0.02f && minZ >= kFloorClampShallowM);
+    m_lastFloorClamp = shallowPenetration ? -minZ : 0.0f;
+    if (shallowPenetration) {
         const QVector3D shift(0, 0, -minZ);
         for (auto& p : kp) p += shift;
     }
@@ -9136,7 +9426,9 @@ void MocapViewport::mouseMoveEvent (QMouseEvent* e)
     const QPoint d = e->pos() - m_lastMouse;
     m_lastMouse = e->pos();
     if (e->buttons() & Qt::LeftButton) {
-        m_yaw   += d.x() * 0.4f;
+        m_yaw    = std::fmod(m_yaw + d.x() * 0.4f, 360.0f);
+        if (m_yaw <    0.0f) m_yaw += 360.0f;
+        if (m_yaw >= 360.0f) m_yaw -= 360.0f;
         m_pitch  = std::max(-85.0f, std::min(85.0f, m_pitch + d.y() * 0.3f));
         update();
     }
@@ -11170,7 +11462,8 @@ QVector3D worldPelvisWithLoco(const SkeletonXsens& skel,
     for (auto& p : kp) p += locoOffset;
     float minZ = kp[0].z();
     for (const auto& p : kp) if (p.z() < minZ) minZ = p.z();
-    if (minZ < -0.02f) {
+    constexpr float kFloorClampShallowM = -0.10f;
+    if (minZ < -0.02f && minZ >= kFloorClampShallowM) {
         const QVector3D up(0.0f, 0.0f, -minZ);
         for (auto& p : kp) p += up;
     }
@@ -11709,14 +12002,15 @@ void MainWindow::onRenderTick()
                 for (int i = 0; i < fox::body::kSegmentCount && i < kXsensSegmentCount; ++i) {
                     QVector3D origin = pts[i];
                     QVector3D end    = (i + 1 < kXsensKeypointCount) ? pts[i + 1] : pts[i];
-                    segCenters[i] = (origin + end) * 0.5f;
+                    const double ratio = fox::body::kWinterProxToComRatio[i];
+                    segCenters[i] = origin + (end - origin) * float(ratio);
                 }
                 double M = 0.0;
                 const QVector3D com = fox::body::centerOfMass(segCenters, &M);
                 ss << "--- [COM] §12.1 body centre of mass ---\n";
                 ss << "  com=(" << std::setw(7) << com.x() << ","
                    << std::setw(7) << com.y() << ","
-                   << std::setw(7) << com.z() << ")  Σm%=" << M << "\n";
+                   << std::setw(7) << com.z() << ")  m=" << M << " kg\n";
 
                 const auto ergo = fox::ergo::jointAnglesErgoAll(fk.oriented);
                 ss << "--- [ROM] joints approaching limits (≥90% range) ---\n";

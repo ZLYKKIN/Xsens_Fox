@@ -18,6 +18,24 @@ constexpr int kContactRows  = 26;
 enum Pose : std::uint8_t   { PoseT = 0, PoseN = 1 };
 enum Gender : std::uint8_t { GenderLegacy = 0, GenderMale = 1, GenderFemale = 2 };
 
+enum class ConfigurationLabel : std::uint8_t {
+    FullBody = 0,
+    FullBodyNoSternum,
+    UpperBody,
+    UpperBodyNoSternum,
+    LowerBody,
+    PelvisSternum,
+    PelvisOnly,
+    Sternum,
+    SingleDevice,
+    Hands,
+    UpperBodyWithHands,
+    FullBodyWithHands,
+    Generic,
+};
+
+inline constexpr int kConfigurationLabelCount = 13;
+
 inline constexpr std::array<double, kSegmentCount> kMassRatio = {
     11.7188,
      7.8125,
@@ -43,6 +61,34 @@ inline constexpr std::array<double, kSegmentCount> kMassRatio = {
      1.0742,
      0.3906,
 };
+
+inline constexpr std::array<double, kSegmentCount> kWinterProxToComRatio = {
+    0.500,
+    0.500,
+    0.500,
+    0.500,
+    0.500,
+    0.500,
+    0.500,
+    0.000,
+    0.436,
+    0.430,
+    0.506,
+    0.000,
+    0.436,
+    0.430,
+    0.506,
+    0.433,
+    0.433,
+    0.500,
+    0.500,
+    0.433,
+    0.433,
+    0.500,
+    0.500,
+};
+
+inline constexpr double kDefaultBodyMassKg = 70.0;
 
 inline constexpr std::array<QVector3D, kSegmentCount> kBoneVec = {{
     { -0.011f, 0.0f,   0.097f },
@@ -341,17 +387,21 @@ inline constexpr std::array<double, 9> kCSpine = {
     0.05, 0.45, 0.65, 0.85, 0.35, 0.9, 0.9, 0.9, 0.9
 };
 
-inline constexpr std::array<double, 2> kCPelvis = { 0.35, 25.0 };
+inline constexpr double kCFemoropelvic = 0.12;
 
-inline constexpr std::array<double, 3> kCArms = { 0.95, 0.95, 0.99 };
+inline constexpr std::array<double, 3> kCPelvis = { 0.35, 25.0, 0.30 };
 
-inline constexpr std::array<double, 2> kCLegs  = { 0.9,  0.95 };
+inline constexpr std::array<double, 6> kCArms =
+    { 0.95, 0.95, 0.99, 0.20, 0.15, 0.05 };
 
-inline constexpr std::array<double, 2> kCKnees = { 0.9,  0.95 };
+inline constexpr std::array<double, 3> kCLegs  = { 0.5, 0.3, 0.15 };
+
+inline constexpr std::array<double, 4> kCKnees = { 0.05, 0.1, 0.95, 1.0 };
 
 inline constexpr std::array<double, 4> kCAnkles = { 2.0, 0.523599, 0.5, 0.0 };
 
-inline constexpr std::array<double, 6> kCToes = { 0.2, 1.05, -0.5, 1.0, 0.1, 0.0872 };
+inline constexpr std::array<double, 6> kCToes =
+    { 0.1, 1.05, 0.5, 0.785, 0.1, 0.0872 };
 
 inline constexpr std::array<double, 3> kALumpA_sub   = { 1.000, 1.000, 1.000  };
 inline constexpr std::array<double, 3> kALumpA_jump1 = { 0.900, 0.900, 0.900  };
@@ -558,6 +608,88 @@ inline constexpr ContactParams kContact = {
     .secondWinWidthAfter       = 0.01,
 };
 
+inline constexpr int kFingerSensorsPerHand = 17;
+inline constexpr int kFingerSegmentsPerHand = 20;
+
+inline constexpr std::array<Quat, kFingerSegmentsPerHand> kFingerQBSRight = {{
+    Quat(1, 0, 0, 0), Quat(1, 0, 0, 0), Quat(1, 0, 0, 0), Quat(1, 0, 0, 0),
+    Quat(1, 0, 0, 0), Quat(1, 0, 0, 0), Quat(1, 0, 0, 0), Quat(1, 0, 0, 0),
+    Quat(1, 0, 0, 0), Quat(1, 0, 0, 0), Quat(1, 0, 0, 0), Quat(1, 0, 0, 0),
+    Quat(1, 0, 0, 0), Quat(1, 0, 0, 0), Quat(1, 0, 0, 0), Quat(1, 0, 0, 0),
+    Quat(1, 0, 0, 0), Quat(1, 0, 0, 0), Quat(1, 0, 0, 0), Quat(1, 0, 0, 0),
+}};
+
+inline constexpr std::array<Quat, kFingerSegmentsPerHand> kFingerQBSLeft = {{
+    Quat(1, 0, 0, 0), Quat(1, 0, 0, 0), Quat(1, 0, 0, 0), Quat(1, 0, 0, 0),
+    Quat(1, 0, 0, 0), Quat(1, 0, 0, 0), Quat(1, 0, 0, 0), Quat(1, 0, 0, 0),
+    Quat(1, 0, 0, 0), Quat(1, 0, 0, 0), Quat(1, 0, 0, 0), Quat(1, 0, 0, 0),
+    Quat(1, 0, 0, 0), Quat(1, 0, 0, 0), Quat(1, 0, 0, 0), Quat(1, 0, 0, 0),
+    Quat(1, 0, 0, 0), Quat(1, 0, 0, 0), Quat(1, 0, 0, 0), Quat(1, 0, 0, 0),
+}};
+
+struct FingerSmoothParams {
+    float emaAlphaThumb;
+    float emaAlphaFinger;
+    float outlierAlphaThumb;
+    float outlierAlphaFinger;
+    float outlierThreshThumbDeg;
+    float outlierThreshFingerDeg;
+};
+inline constexpr FingerSmoothParams kFingerSmooth = {
+    .emaAlphaThumb          = 0.15f,
+    .emaAlphaFinger         = 0.35f,
+    .outlierAlphaThumb      = 0.04f,
+    .outlierAlphaFinger     = 0.10f,
+    .outlierThreshThumbDeg  = 15.0f,
+    .outlierThreshFingerDeg = 30.0f,
+};
+
+struct GaitParams {
+    double flightSecForRun;
+    double standingPelvisSpeedMax;
+    double sittingDoubleSupportFrac;
+    double pitchHeelRad;
+    double pitchToeRad;
+    double velGround;
+    double velFlight;
+    double ffHoldSec;
+    double acrobaticTiltDeg;
+};
+inline constexpr GaitParams kGait = {
+    .flightSecForRun          = 0.05,
+    .standingPelvisSpeedMax   = 0.30,
+    .sittingDoubleSupportFrac = 0.10,
+    .pitchHeelRad             = -0.10,
+    .pitchToeRad              =  0.10,
+    .velGround                =  0.05,
+    .velFlight                =  0.30,
+    .ffHoldSec                =  0.05,
+    .acrobaticTiltDeg         = 90.0,
+};
+
+struct ZuptThresholds {
+    double th1;
+    double th2;
+    double th3;
+    double th4;
+    double th2Toe;
+    double th3Toe;
+    double th1Knee;
+    double weightTh3;
+    double weightTh4;
+};
+inline constexpr ZuptThresholds kZuptTh = {
+    .th1       = 0.05,
+    .th2       = 0.25,
+    .th3       = 0.25,
+    .th4       = 0.40,
+    .th2Toe    = 0.20,
+    .th3Toe    = 0.20,
+    .th1Knee   = 0.08,
+    .weightTh3 = 0.7,
+    .weightTh4 = 1.0,
+};
+
 struct MagnetParams {
     double declinationDeg;
     double inclinationDeg;
@@ -679,6 +811,7 @@ struct SkinParams {
     double tauFastSec;
     double tauSlowSec;
     double tauMotionRefRad;
+    double linAccRefMps2;
 };
 inline constexpr SkinParams kSkin = {
     .tauSec                       = 0.15,
@@ -693,10 +826,11 @@ inline constexpr SkinParams kSkin = {
     .stdSensorToBodyPosFloor      = 0.004,
     .doGaussMarkov                = true,
     .doChangeTauInCF              = false,
-    .doSkinArtifactBasedOnDynamics= true,
+    .doSkinArtifactBasedOnDynamics= false,
     .tauFastSec                   = 0.05,
     .tauSlowSec                   = 0.30,
     .tauMotionRefRad              = 1.0,
+    .linAccRefMps2                = 1.0,
 };
 
 struct FilterParams {
@@ -799,7 +933,7 @@ inline constexpr double kScapHumThetaHighDeg = 90.0;
 
 inline constexpr double kKneeScrewMaxDeg     = 15.0;
 
-inline constexpr double kAnkleDorsiLimitRad  = 45.0 * 0.017453292519943295;
+inline constexpr double kAnkleDorsiLimitRad  = 0.349066;
 
 inline constexpr double kToeRockerLowRad     = 5.0  * 0.017453292519943295;
 inline constexpr double kToeRockerHighRad    = 30.0 * 0.017453292519943295;
@@ -819,6 +953,36 @@ inline constexpr std::array<double, 4> kGeneralProb = { 0.5, 0.4, 0.275, 0.0015 
 inline constexpr std::array<double, 7> kPeakDetection = {
     3.6515, 0.1667, 20.0, 10.0, 1.5, 1.0, 0.025
 };
+
+struct ContactWeights {
+    double wAcc;
+    double wVel;
+    double wCom;
+    double wAir;
+    double wGeneral;
+    double wLevel;
+    double wBoost;
+    double wPos;
+    double wPeakDetection;
+    double wSamepos;
+    double bias;
+};
+
+inline constexpr ContactWeights kContactWeights = {
+    .wAcc           = 1.0,
+    .wVel           = 1.0,
+    .wCom           = 1.0,
+    .wAir           = 1.0,
+    .wGeneral       = 1.0,
+    .wLevel         = 1.0,
+    .wBoost         = 1.0,
+    .wPos           = 1.0,
+    .wPeakDetection = 1.0,
+    .wSamepos       = 1.0,
+    .bias           = 0.0,
+};
+
+inline constexpr std::array<double, 2> kLevelProb = { 0.1, 0.0 };
 
 inline constexpr std::array<double, 8> kSamepos = {
     0.02, 0.02, 0.07, 0.05, 0.005, 0.005, 0.15, 0.8
@@ -861,6 +1025,11 @@ struct MultiLevelParams {
     double zhcMaximumLikelihood;
     double zhcMaxLikelihoodBoost;
     double zhcMinimumLikelihood;
+    double tauSmoothSec;
+    double cdSameSegmentBonus;
+    double cdSameSegmentPenalty;
+    double zhSameSegmentBonus;
+    double zhSameSegmentPenalty;
 };
 inline constexpr MultiLevelParams kMultiLevel = {
     .averagingStairHeight          = 5,
@@ -874,6 +1043,11 @@ inline constexpr MultiLevelParams kMultiLevel = {
     .zhcMaximumLikelihood          = 0.9,
     .zhcMaxLikelihoodBoost         = 1000.0,
     .zhcMinimumLikelihood          = 0.4,
+    .tauSmoothSec                  = 0.2,
+    .cdSameSegmentBonus            = 0.03,
+    .cdSameSegmentPenalty          = -0.02,
+    .zhSameSegmentBonus            = 0.05,
+    .zhSameSegmentPenalty          = -1.0,
 };
 
 struct CalibMagE {
@@ -890,6 +1064,7 @@ struct CalibMagE {
     double e_norm_hands;
     double e_norm_head;
     double e_norm_pelvis;
+    double e_norm_feet;
     double e_sternum_pelvis;
 };
 inline constexpr CalibMagE kCalibMagE = {
@@ -906,6 +1081,7 @@ inline constexpr CalibMagE kCalibMagE = {
     .e_norm_hands     = 0.35,
     .e_norm_head      = 0.3,
     .e_norm_pelvis    = 0.2,
+    .e_norm_feet      = 0.22,
     .e_sternum_pelvis = 25.0,
 };
 
@@ -927,6 +1103,14 @@ inline constexpr std::array<FootPoint, 4> kFootPointsLeft = {{
 }};
 
 inline constexpr QVector3D kToeTipPoint = QVector3D(0.064f, 0.0f, -0.015f);
+
+inline constexpr QVector3D kKneeFrontPointR = QVector3D(0.040f,  0.000f, -0.050f);
+inline constexpr QVector3D kKneeFrontPointL = QVector3D(0.040f,  0.000f, -0.050f);
+
+inline constexpr QVector3D kPelvisSIPSRight = QVector3D(-0.0407f, -0.050f,  0.0951f);
+inline constexpr QVector3D kPelvisSIPSLeft  = QVector3D(-0.0407f,  0.050f,  0.0951f);
+
+inline constexpr QVector3D kPelvisCentralButtock = QVector3D(-0.045f, 0.0f, -0.030f);
 
 struct FingerRom {
     const char* label;
@@ -1252,7 +1436,7 @@ inline const char* fingerJointTypeName(FingerJointType t) {
 }
 
 inline constexpr std::array<double, 5> kPoseQualityResidBands = {
-    0.005, 0.02, 0.05, 0.1, 1.0
+    0.02, 0.03, 0.05, 0.10, 1.00
 };
 
 enum PoseQualityBand : int {
@@ -1352,7 +1536,8 @@ inline double trunkLengthM(double subjectHeightM) {
 }
 
 inline QVector3D centerOfMass(const std::array<QVector3D, kSegmentCount>& segCenters,
-                              double* M = nullptr) {
+                              double* M = nullptr,
+                              double bodyMassKg = kDefaultBodyMassKg) {
     double sx = 0.0, sy = 0.0, sz = 0.0, sm = 0.0;
     for (int i = 0; i < kSegmentCount; ++i) {
         const double m = kMassRatio[i];
@@ -1361,7 +1546,10 @@ inline QVector3D centerOfMass(const std::array<QVector3D, kSegmentCount>& segCen
         sz += m * double(segCenters[i].z());
         sm += m;
     }
-    if (M) *M = sm;
+    if (M) {
+        const double total100 = totalMassRatio();
+        *M = (total100 > 1e-9) ? (bodyMassKg * (sm / total100)) : 0.0;
+    }
     if (sm <= 0.0) return QVector3D(0, 0, 0);
     const double inv = 1.0 / sm;
     return QVector3D(float(sx * inv), float(sy * inv), float(sz * inv));
