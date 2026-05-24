@@ -1078,7 +1078,7 @@ inline constexpr double kScapHumThetaHighDeg = 90.0;
 
 inline constexpr double kKneeScrewMaxDeg     = 15.0;
 
-inline constexpr double kAnkleDorsiLimitRad  = 0.349066;
+inline constexpr double kAnkleDorsiLimitRad  = 0.785398;
 
 inline constexpr double kToeRockerLowRad     = 5.0  * 0.017453292519943295;
 inline constexpr double kToeRockerHighRad    = 30.0 * 0.017453292519943295;
