@@ -585,10 +585,35 @@ public:
         pushPoint(fb::kSEG_RLowerLeg, 5, fb::kKneeFrontPointR);
         pushPoint(fb::kSEG_LLowerLeg, 5, fb::kKneeFrontPointL);
 
-        pushPoint(fb::kSEG_Pelvis, 5, fb::kPelvisSIPSRight);
-        pushPoint(fb::kSEG_Pelvis, 6, fb::kPelvisSIPSLeft);
+        const double pelvisTiltDeg = [&]() {
+            if (!in.worldOrient) return 0.0;
+            const QVector3D zAxisLocal(0, 0, 1);
+            const QVector3D zAxisWorld =
+                vec_rotate(zAxisLocal, (*in.worldOrient)[fb::kSEG_Pelvis]);
+            return std::acos(std::clamp(double(zAxisWorld.z()), -1.0, 1.0)) *
+                   fb::constants::kRad2Deg;
+        }();
+        const double t8TiltDeg = [&]() {
+            if (!in.worldOrient) return 0.0;
+            const QVector3D zAxisLocal(0, 0, 1);
+            const QVector3D zAxisWorld =
+                vec_rotate(zAxisLocal, (*in.worldOrient)[fb::kSEG_T8]);
+            return std::acos(std::clamp(double(zAxisWorld.z()), -1.0, 1.0)) *
+                   fb::constants::kRad2Deg;
+        }();
+        const bool pelvisTiltOk =
+            pelvisTiltDeg >= fb::kContact.secondaryPelvisT8RejMinDeg &&
+            pelvisTiltDeg <= fb::kContact.secondaryPelvisT8RejMaxDeg;
+        const bool t8TiltOk =
+            t8TiltDeg >= fb::kContact.secondaryPelvisT8RejMinDeg &&
+            t8TiltDeg <= fb::kContact.secondaryPelvisT8RejMaxDeg;
+        (void)t8TiltOk;
 
-        pushPoint(fb::kSEG_Pelvis, 14, fb::kPelvisCentralButtock);
+        if (pelvisTiltOk) {
+            pushPoint(fb::kSEG_Pelvis, 5, fb::kPelvisSIPSRight);
+            pushPoint(fb::kSEG_Pelvis, 6, fb::kPelvisSIPSLeft);
+            pushPoint(fb::kSEG_Pelvis, 14, fb::kPelvisCentralButtock);
+        }
 
         std::vector<size_t> order(nCand);
         for (size_t i = 0; i < nCand; ++i) order[i] = i;
