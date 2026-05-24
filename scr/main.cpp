@@ -4638,9 +4638,10 @@ bool MocapReceiver::glovesDllLoaded() const { return m_impl->manusDllLoaded; }
 
 void MocapReceiver::resetFusion()
 {
-
+    resetS2sAlignment();
     m_impl->calGen.fetch_add(1, std::memory_order_relaxed);
-    testLog("[fusion] reset — all per-sensor §43 EKFs will re-init", m_impl->test);
+    testLog("[fusion] reset — all per-sensor §43 EKFs will re-init "
+            "(incl. s2s reset per §24.5)", m_impl->test);
 }
 
 void MocapReceiver::setS2sAlignment(const std::array<Quat, kXsensSegmentCount>& s2s)
