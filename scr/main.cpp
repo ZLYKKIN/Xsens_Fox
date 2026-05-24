@@ -518,7 +518,7 @@ public:
             const double f_pos = fb::kPos[0];
 
             const double f_peak = (out.impactDetected && (seg == out.impactSeg))
-                                ? fb::kPeakDetection[0]
+                                ? fb::kPeakDetection[5]
                                 : 0.0;
 
             const double score = f_air + f_acc + f_vel + f_com + f_general
