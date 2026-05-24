@@ -2444,10 +2444,10 @@ void SkeletonXsens::buildLengths(const ActorConfig& actor)
 
     const double pelvisHalfM = (actor.hipWidthCm > 0.0)
         ? std::max(0.04, actor.hipWidthCm / 200.0)
-        : double(fb::kHipHalfY) * heightScale;
+        : 0.0905 * h;
     const double scapHalfM = (actor.shoulderWidthCm > 0.0)
         ? std::max(0.05, actor.shoulderWidthCm / 200.0)
-        : double(fb::kShoulderHalfY) * heightScale;
+        : 0.08 * heightScale;
 
     double trunkScale = heightScale;
     if (actor.trunkLengthCm > 0.0) {
