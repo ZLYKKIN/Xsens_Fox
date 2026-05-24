@@ -10355,6 +10355,15 @@ exportBakedOffsetsCm(const SkeletonXsens& skel)
     return off;
 }
 
+static QVector3D exportEndSiteOffsetCm(int j, const SkeletonXsens& skel)
+{
+    const int seg = kBoneToSeg[j];
+    if (seg < 0 || seg >= kXsensSegmentCount) return QVector3D(0, 0, 0);
+    const QVector3D Lspec = fox::body::kSensorToBone[seg].L_bone;
+    const QVector3D localTipNwu = vec_rotate(Lspec, skel.defAngFor(seg).inv());
+    return localTipNwu * 100.0f;
+}
+
 static inline Quat exportLocalRot(int j,
                                   const std::array<Quat, kXsensSegmentCount>& W)
 {
@@ -10410,9 +10419,11 @@ static bool writeBvh(const QString& path,
             if (int(kBvh[j].parent) == idx) emitBone(int(j), indent + 1);
         }
         if (childCount[idx] == 0) {
+            const QVector3D end = exportEndSiteOffsetCm(idx, skel);
             os << pad(indent+1) << "End Site\n";
             os << pad(indent+1) << "{\n";
-            os << pad(indent+2) << "OFFSET 0.0 5.0 0.0\n";
+            os << pad(indent+2) << "OFFSET "
+               << end.x() << " " << end.y() << " " << end.z() << "\n";
             os << pad(indent+1) << "}\n";
         }
         os << pad(indent) << "}\n";
