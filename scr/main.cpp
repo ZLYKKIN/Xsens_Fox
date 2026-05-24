@@ -8168,6 +8168,10 @@ void NewSessionWizard::closeEvent(QCloseEvent* e)
     m_countTimer.stop();
     m_captureTimer.stop();
     m_statusTimer.stop();
+
+    if (m_phase != CalibPhase::Idle && m_phase != CalibPhase::Done) {
+        abortCalibration();
+    }
     QDialog::closeEvent(e);
 }
 
