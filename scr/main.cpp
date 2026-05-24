@@ -2430,15 +2430,18 @@ void SkeletonXsens::buildLengths(const ActorConfig& actor)
 
     double heelToBallM, ballToTipM;
     {
-        const double specFoot = specLen(fb::kSEG_RFoot);
-        const double specToe  = specLen(18);
+        const QVector3D footBoneVec = fb::kSensorToBone[fb::kSEG_RFoot].L_bone;
+        const QVector3D toeBoneVec  = fb::kSensorToBone[18].L_bone;
+        const double specFootX = std::abs(double(footBoneVec.x()));
+        const double specToeX  = std::abs(double(toeBoneVec.x()));
         if (fl > 0.05) {
-            const double frac = specFoot / (specFoot + specToe);
+            const double denom = specFootX + specToeX;
+            const double frac = (denom > 1e-6) ? (specFootX / denom) : 0.69;
             heelToBallM = fl * frac;
             ballToTipM  = fl * (1.0 - frac);
         } else {
-            heelToBallM = specFoot * heightScale;
-            ballToTipM  = specToe  * heightScale;
+            heelToBallM = specFootX * heightScale;
+            ballToTipM  = specToeX  * heightScale;
         }
     }
 
