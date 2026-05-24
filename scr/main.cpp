@@ -4123,7 +4123,7 @@ struct FingerBaselineState {
 static FingerBaselineState g_fingerBaseline;
 
 static const double kFingerBoneLen[5][4] = {
-    { 0.046, 0.031, 0.0,    0.025 },
+    { 0.046, 0.031, 0.025,  0.000 },
     { 0.068, 0.039, 0.022,  0.0156 },
     { 0.064, 0.045, 0.026,  0.0166 },
     { 0.058, 0.040, 0.025,  0.0156 },
