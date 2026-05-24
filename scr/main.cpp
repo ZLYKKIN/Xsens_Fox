@@ -727,6 +727,8 @@ public:
                 m_floorEstimate = aMix * m_floorEstimate + (1.0 - aMix) * pickLevel(zMean);
             }
 
+            m_stairWalking = (nBins >= fb::kMultiLevel.maxLevelsToDetectStairWalking);
+
             if (g_testFlag().load(std::memory_order_relaxed) &&
                 g_glovesFlag().load(std::memory_order_relaxed)) {
                 static int floorTick = 0;
@@ -750,6 +752,7 @@ public:
     double    floorLevel() const { return m_floorInited ? m_floorEstimate : 0.0; }
     double    floorLevelRight() const { return m_floorRInited ? m_floorR : floorLevel(); }
     double    floorLevelLeft()  const { return m_floorLInited ? m_floorL : floorLevel(); }
+    bool      stairWalking() const { return m_stairWalking; }
 
 private:
     static constexpr int kZRingCap = 240;
@@ -766,6 +769,7 @@ private:
     double             m_floorL       = 0.0;
     bool               m_floorRInited = false;
     bool               m_floorLInited = false;
+    bool               m_stairWalking = false;
 };
 
 class BodyPoseSolver {
