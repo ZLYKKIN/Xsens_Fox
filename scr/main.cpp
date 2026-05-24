@@ -4067,7 +4067,7 @@ void MocapReceiver::setTransport(Transport t)
 
 void MocapReceiver::setExpectedRate(double hz)
 {
-    if (hz > 1.0) m_impl->expectedRateHz.store(hz);
+    if (hz > 1.0 && hz <= 1000.0) m_impl->expectedRateHz.store(hz);
 }
 
 void MocapReceiver::restart()
