@@ -147,80 +147,98 @@ void applyNeckRhythm(std::array<Quat, fox::body::kSegmentCount>& orient)
 }
 
 // ----------------------------------------------------------------------------
-//  Spec §45.3 — pelvic tilt transmission: c_pelvis[0] = 0.35 fraction of
-//  the pelvis sagittal tilt is forwarded into L5.  Operates in the
-//  pelvis-relative frame to avoid double-counting yaw.
+//  Spec §45.3 — pelvic tilt transmission: c_pelvis[0] = 0.35 is the asymptotic
+//  fraction of pelvis sagittal tilt forwarded into L5/S1; c_pelvis[1] = 25 is
+//  the degree-scale that softens the engagement.  Transmission magnitude:
+//      transmission(|tilt|) = c_pelvis[0] · saturate(|tilt_deg| / c_pelvis[1])
+//  At |tilt|=0 the fraction is 0, ramps linearly with the spec-quoted scale
+//  factor up to 25°, then saturates at the full 0.35 share.  This avoids the
+//  step-discontinuity at zero tilt that the old fixed-fraction form had and
+//  matches the spec phrasing "масштабный коэффициент / порог".
 // ----------------------------------------------------------------------------
 void applyPelvisTilt(std::array<Quat, fox::body::kSegmentCount>& orient)
 {
     namespace fb = fox::body;
-    const double frac = fb::kCPelvis[0];        // = 0.35
+    const double frac  = fb::kCPelvis[0];           // = 0.35
+    const double scale = fb::kCPelvis[1];           // = 25.0   (deg scale)
     if (std::abs(frac) <= 1e-6) return;
 
     // Pelvis tilt = log(qPelvis) → its Y component is the sagittal tilt
-    // angle (about the body anterior-posterior axis).  We add fraction *
-    // tilt to L5 along the Y axis only.
+    // angle (about the body anterior-posterior axis).
     const Quat qPel = canon(orient[kSEG_Pelvis]);
     const QVector3D phiPel = quat_log(qPel);
-    const Quat dq = quat_exp_rotvec(0.0, frac * double(phiPel.y()), 0.0);
+    const double tiltDeg = std::abs(double(phiPel.y())) * kR2D;
+    const double ramp    = (scale > 1e-6) ? std::min(1.0, tiltDeg / scale) : 1.0;
+    const double frac_eff = frac * ramp;
+    if (std::abs(frac_eff) <= 1e-9) return;
+    const Quat dq = quat_exp_rotvec(0.0, frac_eff * double(phiPel.y()), 0.0);
     orient[kSEG_L5] = quat_mult(dq, orient[kSEG_L5]).normalized();
 }
 
 // ----------------------------------------------------------------------------
 //  Spec §46 — scapulo-humeral rhythm.  c_eff is piecewise-linear in
-//  humerus elevation, applied to the abduction (X) and flexion (Y)
-//  components of the shoulder→upper-arm relative orientation.
+//  humerus elevation, applied INDEPENDENTLY to the abduction (X) and flexion
+//  (Y) components of the shoulder→upper-arm relative orientation (spec §46.4
+//  "Лопаточно-плечевой ритм действует на КАЖДЫЙ компонент отдельно").
+//  Per-axis form uses c_arms[0]=0.95 as the low-angle abduction (X) baseline
+//  and c_arms[1]=0.95 as the low-angle flexion (Y) baseline; both ramp to
+//  c_arms[2]=0.99 between 60° and 90° (kScapHumThetaLow/HighDeg).
 // ----------------------------------------------------------------------------
 namespace {
 
-double scapCEff(double thetaHumerusDeg)
+double scapCEffAxis(double thetaAxisDeg, double cArmLow)
 {
     namespace fb = fox::body;
     const double low  = fb::kScapHumThetaLowDeg;     // 60
     const double high = fb::kScapHumThetaHighDeg;    // 90
-    if (thetaHumerusDeg <= low)  return fb::kCArms[0];        // 0.95
-    if (thetaHumerusDeg >= high) return fb::kCArms[2];        // 0.99
-    const double t = (thetaHumerusDeg - low) / (high - low);
-    return fb::kCArms[0] + t * (fb::kCArms[2] - fb::kCArms[0]);
+    const double a = std::abs(thetaAxisDeg);
+    if (a <= low)  return cArmLow;
+    if (a >= high) return fb::kCArms[2];             // 0.99
+    const double t = (a - low) / (high - low);
+    return cArmLow + t * (fb::kCArms[2] - cArmLow);
 }
 
 void applyOneScap(std::array<Quat, fox::body::kSegmentCount>& orient,
                   int shoulderSeg, int upperArmSeg, bool diagIsR)
 {
-    // Spec §46.2 — scapulo-humeral rhythm.
+    // Spec §46.2 + §46.4 — scapulo-humeral rhythm with per-axis c_eff.
     //
-    //     theta_humerus_total = log( qUpperArm ⊗ conj(qT8) )      ← T8 reference
-    //     theta_scapula       = c_eff(theta_humerus_total) · theta_humerus_total
-    //     qScapula            = exp(theta_scapula) ⊗ qT8           ← absolute
+    //     theta_humerus = log( qUpperArm ⊗ conj(qT8) )            ← T8 reference
+    //     c_eff_X = piecewise(|theta.X|, c_arms[0]→c_arms[2])      ← abduction
+    //     c_eff_Y = piecewise(|theta.Y|, c_arms[1]→c_arms[2])      ← flexion
+    //     theta_scapula.X = c_eff_X · theta_humerus.X
+    //     theta_scapula.Y = c_eff_Y · theta_humerus.Y
+    //     theta_scapula.Z = 0                                      ← axial twist
+    //                                                                stays on humerus
+    //     qScapula = exp(theta_scapula) ⊗ qT8                      ← absolute
     //
     // The spec phrases the rhythm in the T8 (sternum) frame, NOT in the
-    // gleno-humeral relative.  At physiological elevation c_eff is 0.95–0.99,
-    // so the scapula picks up the bulk of the elevation and the gleno-humeral
-    // joint (humerus relative to scapula) only contributes the residual ~5 %.
-    // The UpperArm world orientation is the direct IMU measurement and is
-    // preserved.  Only the (X, Y) elevation components couple — axial humerus
-    // twist (Z) stays with the humerus, not the scapula (clinical convention).
+    // gleno-humeral relative.  At physiological elevation c_eff_{X,Y} is
+    // 0.95–0.99, so the scapula picks up the bulk of the elevation and the
+    // gleno-humeral joint only contributes the residual ~5 %.  UpperArm world
+    // orientation stays the direct IMU measurement.
     const Quat qT8       = orient[kSEG_T8];
     const Quat qUpperArm = orient[upperArmSeg];
 
     const Quat qRelHumT8 = canon(quat_mult(qUpperArm, qT8.conj()).normalized());
     const QVector3D phi  = quat_log(qRelHumT8);
+    const double cEffX   = scapCEffAxis(double(phi.x()) * kR2D, fb::kCArms[0]);
+    const double cEffY   = scapCEffAxis(double(phi.y()) * kR2D, fb::kCArms[1]);
     const double thetaH  = std::sqrt(double(phi.x() * phi.x() + phi.y() * phi.y()
                                             + phi.z() * phi.z())) * kR2D;
-    const double cEff    = scapCEff(thetaH);
 
-    // Scapula in T8 frame = c_eff × humerus elevation (X, Y); zero axial twist.
-    const Quat dqScapInT8 = quat_exp_rotvec(cEff * double(phi.x()),
-                                            cEff * double(phi.y()),
+    // Scapula in T8 frame = per-axis c_eff × humerus elevation, zero axial twist.
+    const Quat dqScapInT8 = quat_exp_rotvec(cEffX * double(phi.x()),
+                                            cEffY * double(phi.y()),
                                             0.0);
     orient[shoulderSeg] = quat_mult(dqScapInT8, qT8).normalized();
-    // UpperArm world orientation unchanged — direct IMU measurement is the
-    // ground truth; the scapula is the constrained quantity.
-    // (orient[upperArmSeg] left alone)
 
     Diagnostics& d = diagnostics();
-    if (diagIsR) { d.scapThetaRDeg = thetaH; d.scapCEffR = cEff; }
-    else         { d.scapThetaLDeg = thetaH; d.scapCEffL = cEff; }
+    // Diag fields keep "cEff" semantics: report the averaged X/Y c_eff so the
+    // -test -gloves [coupling-wls arm] dump reads the same way as before.
+    const double cEffAvg = 0.5 * (cEffX + cEffY);
+    if (diagIsR) { d.scapThetaRDeg = thetaH; d.scapCEffR = cEffAvg; }
+    else         { d.scapThetaLDeg = thetaH; d.scapCEffL = cEffAvg; }
 }
 
 }  // namespace
