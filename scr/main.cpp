@@ -11417,9 +11417,9 @@ static void hdJointLimits(std::vector<RecordedFrame>& fr, const SkeletonXsens& s
                           const std::function<void(double)>& cb = {})
 {
     const int N = int(fr.size());
-    const double kneeSwing  = 175.0 * M_PI / 180.0;
+    const double kneeSwing  = 135.0 * M_PI / 180.0;
     const double kneeTwist  =  40.0 * M_PI / 180.0;
-    const double elbowSwing = 175.0 * M_PI / 180.0;
+    const double elbowSwing = 150.0 * M_PI / 180.0;
     const double elbowTwist = M_PI;
     for (int i = 0; i < N; ++i) {
         if (cb && (i & 0x0FFF) == 0) cb(double(i) / double(N));
@@ -12212,9 +12212,9 @@ void MainWindow::onRenderTick()
     s_haveOut[SEG_Neck] = s_haveOut[SEG_RToe] = s_haveOut[SEG_LToe] = true;
 
     if (m_skel) {
-        const double kneeSwing  = 178.0 * M_PI / 180.0;
+        const double kneeSwing  = 135.0 * M_PI / 180.0;
         const double kneeTwist  =  45.0 * M_PI / 180.0;
-        const double elbowSwing = 178.0 * M_PI / 180.0;
+        const double elbowSwing = 150.0 * M_PI / 180.0;
         projectHingeLimit(q, SEG_RUpperLeg, SEG_RLowerLeg, *m_skel, kneeSwing,  kneeTwist);
         projectHingeLimit(q, SEG_LUpperLeg, SEG_LLowerLeg, *m_skel, kneeSwing,  kneeTwist);
         projectHingeLimit(q, SEG_RUpperArm, SEG_RForearm,  *m_skel, elbowSwing, M_PI);
