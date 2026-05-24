@@ -5343,7 +5343,7 @@ void MocapReceiver::run()
                     switch (targetSeg) {
                         case SEG_Head:                                  refNorm = float(1.0 + mE.e_norm_head);   break;
                         case SEG_RHand: case SEG_LHand:                 refNorm = float(1.0 + mE.e_norm_hands);  break;
-                        case SEG_RFoot: case SEG_LFoot:                 refNorm = float(1.0 + 0.1 * mE.e_mag_feet); break;
+                        case SEG_RFoot: case SEG_LFoot:                 refNorm = float(1.0 + mE.e_norm_feet);  break;
                         case SEG_Pelvis:                                refNorm = float(1.0 + mE.e_norm_pelvis); break;
                         default:                                        refNorm = 1.0f;                           break;
                     }

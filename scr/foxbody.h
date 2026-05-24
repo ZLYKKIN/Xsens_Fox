@@ -1008,6 +1008,7 @@ struct CalibMagE {
     double e_norm_hands;
     double e_norm_head;
     double e_norm_pelvis;
+    double e_norm_feet;
     double e_sternum_pelvis;
 };
 inline constexpr CalibMagE kCalibMagE = {
@@ -1024,6 +1025,7 @@ inline constexpr CalibMagE kCalibMagE = {
     .e_norm_hands     = 0.35,
     .e_norm_head      = 0.3,
     .e_norm_pelvis    = 0.2,
+    .e_norm_feet      = 0.22,
     .e_sternum_pelvis = 25.0,
 };
 
