@@ -10601,8 +10601,14 @@ static void quatToEulerZXYdeg(const Quat& q, double& rz, double& rx, double& ry)
 
     const double sx = std::clamp(m21, -1.0, 1.0);
     const double xrad = std::asin(sx);
-    const double zrad = std::atan2(-m01, m11);
-    const double yrad = std::atan2(-m20, m22);
+    double zrad, yrad;
+    if (std::abs(sx) > 0.999) {
+        zrad = std::atan2(m10, m00);
+        yrad = 0.0;
+    } else {
+        zrad = std::atan2(-m01, m11);
+        yrad = std::atan2(-m20, m22);
+    }
     const double K = 180.0 / M_PI;
     rx = xrad * K;
     ry = yrad * K;
