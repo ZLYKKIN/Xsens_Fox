@@ -2850,7 +2850,15 @@ SkeletonXsens::computeKeypoints(const std::array<Quat, kXsensSegmentCount>& raw,
 
     for (int s = 0; s < kXsensSegmentCountWithDummies; ++s) {
         const int a = m_start[s];
-        if (a < kXsensSegmentCount) m_lastSegCenter[a] = kp[a];
+        const int b = m_end[s];
+        if (a < kXsensSegmentCount) {
+            const double ratio = fox::body::kWinterProxToComRatio[a];
+            if (b < kXsensKeypointCount && b >= 0) {
+                m_lastSegCenter[a] = kp[a] + (kp[b] - kp[a]) * float(ratio);
+            } else {
+                m_lastSegCenter[a] = kp[a];
+            }
+        }
     }
     m_haveLastSegCenter = true;
 
