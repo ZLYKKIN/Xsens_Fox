@@ -4355,6 +4355,61 @@ struct FingerDiag {
 };
 static FingerDiag g_fingerDiag;
 
+class FoxKFAGloveFilter {
+public:
+    void reset() {
+        for (auto& q : m_state) q = Quat(1, 0, 0, 0);
+        for (auto& p : m_var)   p = (5.0 * 0.017453292519943295) * (5.0 * 0.017453292519943295);
+        m_initialised = false;
+    }
+    void setFingerTrackingData(bool isLeft,
+                               const std::array<Quat, kFingerSegmentsHand>& q_meas) {
+        auto& dst = isLeft ? m_pendingLeft : m_pendingRight;
+        dst = q_meas;
+        (isLeft ? m_havePendingLeft : m_havePendingRight) = true;
+    }
+    void process(double dt) {
+        if (!m_initialised) {
+            if (m_havePendingRight) m_state = m_pendingRight;
+            if (m_havePendingLeft)  m_stateLeft = m_pendingLeft;
+            m_initialised = true;
+        }
+        const double tau = 0.080;
+        const double alpha = 1.0 - std::exp(-dt / std::max(1e-3, tau));
+        const double R = (1.0 * 0.017453292519943295) * (1.0 * 0.017453292519943295);
+        for (int i = 0; i < kFingerSegmentsHand; ++i) {
+            if (m_havePendingRight) {
+                const double K = m_var[i] / (m_var[i] + R);
+                m_state[i] = slerp_quat(m_state[i], m_pendingRight[i], float(std::clamp(K, alpha, 1.0)));
+                m_state[i] = m_state[i].normalized();
+                m_var[i]   = (1.0 - K) * m_var[i] + 1e-7;
+            }
+            if (m_havePendingLeft) {
+                const double K = m_varLeft[i] / (m_varLeft[i] + R);
+                m_stateLeft[i] = slerp_quat(m_stateLeft[i], m_pendingLeft[i], float(std::clamp(K, alpha, 1.0)));
+                m_stateLeft[i] = m_stateLeft[i].normalized();
+                m_varLeft[i]   = (1.0 - K) * m_varLeft[i] + 1e-7;
+            }
+        }
+        m_havePendingRight = false;
+        m_havePendingLeft  = false;
+    }
+    void outputRight(std::array<Quat, kFingerSegmentsHand>& out) const { out = m_state; }
+    void outputLeft (std::array<Quat, kFingerSegmentsHand>& out) const { out = m_stateLeft; }
+private:
+    std::array<Quat,   kFingerSegmentsHand> m_state{};
+    std::array<Quat,   kFingerSegmentsHand> m_stateLeft{};
+    std::array<double, kFingerSegmentsHand> m_var{};
+    std::array<double, kFingerSegmentsHand> m_varLeft{};
+    std::array<Quat,   kFingerSegmentsHand> m_pendingRight{};
+    std::array<Quat,   kFingerSegmentsHand> m_pendingLeft{};
+    bool m_havePendingRight = false;
+    bool m_havePendingLeft  = false;
+    bool m_initialised      = false;
+};
+
+static FoxKFAGloveFilter g_gloveFilter;
+
 static void parseErgoHand(const float* degs20, bool isLeft,
                           std::array<Quat,      kFingerSegmentsHand>& outQ,
                           std::array<QVector3D, kFingerSegmentsHand>& outP)
@@ -4597,6 +4652,13 @@ static void __cdecl foxManusErgonomicsCb(const void* raw)
     }
 
     if (haveL || haveR) {
+        if (haveL) g_gloveFilter.setFingerTrackingData(true,  lQ);
+        if (haveR) g_gloveFilter.setFingerTrackingData(false, rQ);
+        const double kFilterDt = 1.0 / 120.0;
+        g_gloveFilter.process(kFilterDt);
+        if (haveL) g_gloveFilter.outputLeft(lQ);
+        if (haveR) g_gloveFilter.outputRight(rQ);
+
         QMutexLocker lk(&g_ergo.lock);
         if (haveL) { g_ergo.leftQ  = lQ;  g_ergo.leftP  = lP;  g_ergo.haveLeft.store(true); }
         if (haveR) { g_ergo.rightQ = rQ;  g_ergo.rightP = rP;  g_ergo.haveRight.store(true); }
