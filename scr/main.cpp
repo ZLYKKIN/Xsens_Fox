@@ -1187,6 +1187,37 @@ public:
                 }
             }
 
+            {
+                const int idxT8In = 4, idxNeck = 5, idxHead = 6;
+                const double cNeck = 0.5 * (fb::kCSpine[5] + fb::kCSpine[6]);
+                const double cHead = 0.5 * (fb::kCSpine[7] + fb::kCSpine[8]);
+                const double sumNH = cNeck + cHead;
+                if (sumNH > 1e-9) {
+                    const Quat qT8In  = orient[idxT8In];
+                    const Quat qHeadIn = orient[idxHead];
+                    const QVector3D phiNH = quat_log(
+                        quat_mult(qHeadIn, qT8In.conj()).normalized());
+                    const double w_neck = 1.0 / (fb::kSpineNeck.stdNeck *
+                                                 fb::kSpineNeck.stdNeck);
+                    const double fNeck = cNeck / sumNH;
+                    const Quat qNeckTarget = quat_mult(
+                        quat_exp_rotvec(fNeck * double(phiNH.x()),
+                                        fNeck * double(phiNH.y()),
+                                        fNeck * double(phiNH.z())),
+                        qT8In).normalized();
+                    const QVector3D r = quat_log(
+                        quat_mult(qNeckTarget, orient[idxNeck].conj()).normalized());
+                    const int row = idxNeck * 3;
+                    for (int k = 0; k < 3; ++k) {
+                        JtWJ(row + k, row + k) += w_neck;
+                        JtWr(row + k)          -= w_neck *
+                            (k == 0 ? r.x() : k == 1 ? r.y() : r.z());
+                    }
+                    residSum += r.length();
+                    ++residN;
+                }
+            }
+
             const double w_bar = 1.0 /
                 (fb::kHypExtPenaltySd * fb::kHypExtPenaltySd);
             constexpr double kBarrierD2R = fox::body::constants::kDeg2Rad;
