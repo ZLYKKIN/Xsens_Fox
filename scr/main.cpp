@@ -1185,6 +1185,7 @@ public:
                                                   fb::kSpineNeck.stdSpine);
 
                     const double cAxial = fb::kCSpine[4];
+                    const int rowPel = idxPelvis * 3;
                     auto enforce = [&](int idx, double fraction) {
                         const Quat qExp = quat_mult(
                             quat_exp_rotvec(fraction * double(phi.x()),
@@ -1199,6 +1200,14 @@ public:
                             JtWJ(row + k, row + k) += w_spine;
                             JtWr(row + k)          -= w_spine *
                                 (k == 0 ? r.x() : k == 1 ? r.y() : r.z());
+                        }
+                        const double w_coupleParent = w_spine * fraction;
+                        for (int k = 0; k < 3; ++k) {
+                            const double axisFactor = (k == 2) ? cAxial : 1.0;
+                            const double couple = w_coupleParent * axisFactor;
+                            JtWJ(rowPel + k, rowPel + k) += couple * fraction;
+                            JtWJ(row    + k, rowPel + k) -= couple;
+                            JtWJ(rowPel + k, row    + k) -= couple;
                         }
                         residSum += r.length();
                         ++residN;
