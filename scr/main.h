@@ -563,6 +563,11 @@ public:
 
     void setSegmentGain(const std::array<float, kXsensSegmentCount>& gain);
 
+    void setMagneticDeclinationDeg(double deg);
+    void setMagneticInclinationDeg(double deg);
+    double magneticDeclinationDeg() const;
+    double magneticInclinationDeg() const;
+
     QVector3D snapshotGyroAvg(int idx, int samples) const;
     QVector3D liveGyrSensor(int idx) const;
 

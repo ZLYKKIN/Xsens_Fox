@@ -3961,6 +3961,9 @@ struct MocapReceiver::Impl {
     std::array<FusionAhrsSettings, kXsensSegmentCount>   ahrsCfg{};
     double           freqHz       = 240.0;
 
+    std::atomic<double> magDeclinationDeg{fox::body::kMagnet.declinationDeg};
+    std::atomic<double> magInclinationDeg{fox::body::kMagnet.inclinationDeg};
+
     std::array<quint32, kXsensSegmentCount> lastStf{};
     std::array<bool,    kXsensSegmentCount> haveLastStf{};
 
@@ -4841,6 +4844,30 @@ void MocapReceiver::setSegmentGain(const std::array<float, kXsensSegmentCount>& 
     testLog("[s2s] per-segment AHRS gain installed", m_impl->test);
 }
 
+void MocapReceiver::setMagneticDeclinationDeg(double deg)
+{
+    m_impl->magDeclinationDeg.store(deg, std::memory_order_relaxed);
+    m_impl->calGen.fetch_add(1, std::memory_order_relaxed);
+    testLog("[mag] declination updated", m_impl->test);
+}
+
+void MocapReceiver::setMagneticInclinationDeg(double deg)
+{
+    m_impl->magInclinationDeg.store(deg, std::memory_order_relaxed);
+    m_impl->calGen.fetch_add(1, std::memory_order_relaxed);
+    testLog("[mag] inclination (dip) updated", m_impl->test);
+}
+
+double MocapReceiver::magneticDeclinationDeg() const
+{
+    return m_impl->magDeclinationDeg.load(std::memory_order_relaxed);
+}
+
+double MocapReceiver::magneticInclinationDeg() const
+{
+    return m_impl->magInclinationDeg.load(std::memory_order_relaxed);
+}
+
 QVector3D MocapReceiver::snapshotGyroAvg(int idx, int samples) const
 {
     if (idx < 0 || idx >= kXsensSegmentCount) return QVector3D(0, 0, 0);
@@ -5387,8 +5414,8 @@ void MocapReceiver::run()
                     s.convention   = FusionConventionNwu;
                     s.sampleRateHz = float(std::max(60.0, I.freqHz));
 
-                    s.magDipModelDeg    = float(fox::body::kMagnet.inclinationDeg);
-                    s.magDeclinationDeg = float(fox::body::kMagnet.declinationDeg);
+                    s.magDipModelDeg    = float(I.magInclinationDeg.load(std::memory_order_relaxed));
+                    s.magDeclinationDeg = float(I.magDeclinationDeg.load(std::memory_order_relaxed));
 
                     const fox::body::CalibMagE& mE = fox::body::kCalibMagE;
                     float refNorm = 1.0f;
