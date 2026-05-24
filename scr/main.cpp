@@ -9608,7 +9608,20 @@ struct LiveStreamSender::Impl {
     }
 
     qint64 lastSendWarnMs = -1;
+    qint64 lastMtuWarnMs  = -1;
+    static constexpr int kMtuSoftLimit = 1472;
     void sendChecked(const QByteArray& pkt) {
+        if (pkt.size() > kMtuSoftLimit) {
+            const qint64 now = timer.elapsed();
+            if (lastMtuWarnMs < 0 || (now - lastMtuWarnMs) >= 5000) {
+                lastMtuWarnMs = now;
+                std::cerr << "[stream] WARNING: UDP datagram size "
+                          << pkt.size() << " bytes > " << kMtuSoftLimit
+                          << " (IPv4 MTU minus 28-byte header). Consider"
+                          << " enabling splitGloveDatagrams to avoid"
+                          << " fragmentation/drop.\n";
+            }
+        }
         if (sock.writeDatagram(pkt, host, port) >= 0) return;
         const qint64 now = timer.elapsed();
         if (lastSendWarnMs < 0 || (now - lastSendWarnMs) >= 1000) {
