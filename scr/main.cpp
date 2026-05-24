@@ -4688,6 +4688,7 @@ void MocapReceiver::setMagNormalisation(const std::array<double, kXsensSegmentCo
     m_impl->magMagn = mm;
     m_impl->magNormActive = true;
     m_impl->magSoftActive = false;
+    m_impl->calGen.fetch_add(1, std::memory_order_relaxed);
     testLog("[s2s] per-sensor mag_magn normalisation installed", m_impl->test);
 }
 
@@ -4696,6 +4697,7 @@ void MocapReceiver::setAccNormalisation(const std::array<double, kXsensSegmentCo
     QMutexLocker lk(&m_impl->lock);
     m_impl->accMagn = am;
     m_impl->accNormActive = true;
+    m_impl->calGen.fetch_add(1, std::memory_order_relaxed);
     testLog("[s2s] per-sensor acc_magn normalisation installed", m_impl->test);
 }
 
@@ -4716,6 +4718,7 @@ void MocapReceiver::setMagSoftIron(const std::array<std::array<double, 9>, kXsen
     m_impl->magSoftOff = offset;
     m_impl->magSoftActive = true;
     m_impl->magNormActive = false;
+    m_impl->calGen.fetch_add(1, std::memory_order_relaxed);
     testLog("[s2s] per-sensor mag soft-iron correction installed", m_impl->test);
 }
 
