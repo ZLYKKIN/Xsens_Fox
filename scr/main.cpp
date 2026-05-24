@@ -2506,10 +2506,10 @@ void SkeletonXsens::buildLengths(const ActorConfig& actor)
         return vec_rotate(Lspec, m_defAng[origSeg].conj());
     };
 
-    const double specFoot_m = specLen(fb::kSEG_RFoot);
-    const double specToe_m  = specLen(18);
-    const double footScaleR = (specFoot_m > 1e-6) ? heelToBallM / specFoot_m : heightScale;
-    const double toeScaleR  = (specToe_m  > 1e-6) ? ballToTipM  / specToe_m  : heightScale;
+    const double specFootX_m = std::abs(double(fb::kSensorToBone[fb::kSEG_RFoot].L_bone.x()));
+    const double specToeX_m  = std::abs(double(fb::kSensorToBone[18].L_bone.x()));
+    const double footScaleR  = (specFootX_m > 1e-6) ? heelToBallM / specFootX_m : heightScale;
+    const double toeScaleR   = (specToeX_m  > 1e-6) ? ballToTipM  / specToeX_m  : heightScale;
 
     m_localOffset = {{
 
