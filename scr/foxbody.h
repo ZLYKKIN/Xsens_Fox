@@ -560,6 +560,29 @@ inline constexpr ContactParams kContact = {
     .secondWinWidthAfter       = 0.01,
 };
 
+struct GaitParams {
+    double flightSecForRun;
+    double standingPelvisSpeedMax;
+    double sittingDoubleSupportFrac;
+    double pitchHeelRad;
+    double pitchToeRad;
+    double velGround;
+    double velFlight;
+    double ffHoldSec;
+    double acrobaticTiltDeg;
+};
+inline constexpr GaitParams kGait = {
+    .flightSecForRun          = 0.05,
+    .standingPelvisSpeedMax   = 0.30,
+    .sittingDoubleSupportFrac = 0.10,
+    .pitchHeelRad             = -0.10,
+    .pitchToeRad              =  0.10,
+    .velGround                =  0.05,
+    .velFlight                =  0.30,
+    .ffHoldSec                =  0.05,
+    .acrobaticTiltDeg         = 90.0,
+};
+
 struct ZuptThresholds {
     double th1;
     double th2;

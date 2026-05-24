@@ -1759,18 +1759,23 @@ public:
         const double sittingZ = std::max(0.30, sitHeightM);
         const bool   lowPelvis = pelvisZ < sittingZ;
 
+        const bool doubleSupport = rFootContact && lFootContact;
+        const bool anyFlight     = m_flightSec > fox::body::kGait.flightSecForRun;
         if (t8Inverted)                            m_phase = LocomotionPhase::Acrobatic;
-        else if (m_flightSec > 0.12 && pelvisSpeed > 2.0)
-                                                   m_phase = LocomotionPhase::Running;
+        else if (anyFlight)                        m_phase = LocomotionPhase::Running;
         else if (m_posture == BodyPosture::Sitting && lowPelvis)
                                                    m_phase = LocomotionPhase::Sitting;
         else if (!pelvisVertical && lowPelvis)     m_phase = LocomotionPhase::Sitting;
-        else if (rFootContact && lFootContact && pelvisSpeed < 0.3 && pelvisVertical)
+        else if (doubleSupport &&
+                 pelvisSpeed < fox::body::kGait.standingPelvisSpeedMax &&
+                 pelvisVertical)
                                                    m_phase = LocomotionPhase::Standing;
-        else if (anyContact && (rFootContact != lFootContact) &&
+        else if (anyContact && pelvisVertical &&
                  m_altSec < fox::body::kContact.firstWinWidth)
                                                    m_phase = LocomotionPhase::Walking;
-        else if (!anyContact && (pelvisTiltDeg > 90.0 || t8TiltDeg > 90.0))
+        else if (!anyContact &&
+                 (pelvisTiltDeg > fox::body::kGait.acrobaticTiltDeg ||
+                  t8TiltDeg     > fox::body::kGait.acrobaticTiltDeg))
                                                    m_phase = LocomotionPhase::Acrobatic;
 
         return m_phase;
@@ -1781,21 +1786,20 @@ private:
                                  double pitchZ, double footVelZ,
                                  double dt, double& dur)
     {
-        constexpr double kPitchHeel  = -0.10;
-        constexpr double kPitchToe   = +0.10;
-        constexpr double kVelGround  = 0.05;
-        constexpr double kVelFlight  = 0.30;
-        constexpr double kFfHold     = 0.05;
-        constexpr double kMsHold     = 0.15;
+        const double pitchHeel = fox::body::kGait.pitchHeelRad;
+        const double pitchToe  = fox::body::kGait.pitchToeRad;
+        const double velGround = fox::body::kGait.velGround;
+        const double velFlight = fox::body::kGait.velFlight;
+        const double ffHold    = fox::body::kGait.ffHoldSec;
         dur += dt;
         const double absV = std::abs(footVelZ);
-        if (!contact && absV > kVelFlight) { dur = 0.0; return GaitPhase::SW; }
-        if (contact && pitchZ < kPitchHeel && absV < kVelGround) { dur = 0.0; return GaitPhase::HS; }
-        if (contact && std::abs(pitchZ) < kPitchToe && absV < kVelGround && dur > kMsHold)
-            return GaitPhase::MS;
-        if (contact && std::abs(pitchZ) < kPitchToe && absV < kVelGround && dur > kFfHold)
+        if (!contact && absV > velFlight) { dur = 0.0; return GaitPhase::SW; }
+        if (contact && pitchZ < pitchHeel && absV < velGround) {
+            dur = 0.0; return GaitPhase::HS;
+        }
+        if (contact && std::abs(pitchZ) < pitchToe && absV < velGround && dur > ffHold)
             return GaitPhase::FF;
-        if (contact && pitchZ > kPitchToe) return GaitPhase::HO;
+        if (contact && pitchZ > pitchToe) return GaitPhase::HO;
         if (!contact && cur == GaitPhase::HO) { dur = 0.0; return GaitPhase::TO; }
         return cur;
     }
