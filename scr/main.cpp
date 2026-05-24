@@ -2415,7 +2415,8 @@ void SkeletonXsens::buildLengths(const ActorConfig& actor)
             specLen(fb::kSEG_RShoulder + 1) +
             specLen(fb::kSEG_RShoulder + 2) +
             specLen(fb::kSEG_RShoulder + 3);
-        const double refSpanM = 2.0 * refArmOneSide + 2.0 * double(fb::kShoulderHalfY);
+        const double refScapHalfY = 0.08;
+        const double refSpanM = 2.0 * refArmOneSide + 2.0 * refScapHalfY;
         armScale = std::max(0.30, actor.armSpanCm / 100.0) / refSpanM;
     }
 
