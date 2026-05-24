@@ -904,7 +904,9 @@ inline constexpr double kStdSamePosMeasXY   = 0.0003;
 inline constexpr double kStdSamePosMeasZ3d  = 0.002;
 inline constexpr double kStdSamePosMeasZ    = 10.0;
 
-inline constexpr int    kMaxIKSteps         = 2;
+inline constexpr int    kMaxIKSteps         = 5;
+inline constexpr double kIKGradTolRad       = 1.0e-4;
+inline constexpr double kIKStepTolRad       = 1.0e-5;
 inline constexpr double kJointLaxitySolver  = 0.005;
 inline constexpr double kHypExtPenaltySd    = 0.0002;
 

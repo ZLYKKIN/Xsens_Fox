@@ -1636,6 +1636,12 @@ public:
                 ? (thisResidPost / double(residN)) : 0.0;
 
             if (!accepted) break;
+
+            const double gradNorm = JtWr.norm() / std::max(1, residN);
+            if (gradNorm < fb::kIKGradTolRad &&
+                thisStepNorm < fb::kIKStepTolRad) {
+                break;
+            }
         }
 
         d.residualMeanRad = initialResidN > 0
