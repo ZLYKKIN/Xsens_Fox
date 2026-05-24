@@ -617,6 +617,10 @@ static void ApplyMagUpdate(FusionAhrs *ahrs, FusionVector m, float dt) {
     H[1 * N15 + 9 + 0] = ex.axis.y;  H[1 * N15 + 9 + 1] = ey.axis.y;  H[1 * N15 + 9 + 2] = ez.axis.y;
     H[2 * N15 + 9 + 0] = ex.axis.z;  H[2 * N15 + 9 + 1] = ey.axis.z;  H[2 * N15 + 9 + 2] = ez.axis.z;
 
+    H[0 * N15 + IDX_MAGNORM] = hMag.axis.x;
+    H[1 * N15 + IDX_MAGNORM] = hMag.axis.y;
+    H[2 * N15 + IDX_MAGNORM] = hMag.axis.z;
+
     float sigmaMagEff = ahrs->sigmaMag;
     if (ahrs->magRedefBoostTimer > 0.0f) {
         const float frac = ahrs->magRedefBoostTimer / KFA_REDEF_RAMP_S;
