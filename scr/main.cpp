@@ -2033,18 +2033,19 @@ public:
             const int t1 = (t + 1) % kWindow;
             if (!m_ring[t].valid || !m_ring[t1].valid) continue;
             for (int s = 0; s < fb::kSegmentCount; ++s) {
-                const double P_f = m_ring[t].P_diag[s * 3];
-                const double P_p = m_ring[t1].P_diag[s * 3];
-                if (P_p < 1e-12) continue;
-                const double G = P_f / P_p;
                 const Quat qf = m_ring[t].orient_filtered[s];
                 const Quat qp = m_ring[t1].orient_filtered[s];
                 const Quat dq = quat_mult(x_s[s], qp.conj()).normalized();
                 const QVector3D phi = quat_log(dq);
-                const double gainClamp = std::clamp(G, 0.0, 1.0);
-                const Quat qShift = quat_exp_rotvec(gainClamp * double(phi.x()),
-                                                     gainClamp * double(phi.y()),
-                                                     gainClamp * double(phi.z()));
+                double g[3];
+                for (int k = 0; k < 3; ++k) {
+                    const double P_f = m_ring[t].P_diag[s * 3 + k];
+                    const double P_p = m_ring[t1].P_diag[s * 3 + k];
+                    g[k] = (P_p > 1e-12) ? std::clamp(P_f / P_p, 0.0, 1.0) : 0.0;
+                }
+                const Quat qShift = quat_exp_rotvec(g[0] * double(phi.x()),
+                                                     g[1] * double(phi.y()),
+                                                     g[2] * double(phi.z()));
                 x_s[s] = quat_mult(qShift, qf).normalized();
             }
         }
