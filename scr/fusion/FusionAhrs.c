@@ -310,6 +310,16 @@ void FusionAhrsInitialise(FusionAhrs *ahrs) {
     FusionAhrsRestart(ahrs);
 }
 
+void FusionAhrsSetNoise(FusionAhrs *ahrs,
+                        float sigmaAccMs2,
+                        float sigmaGyrDegS,
+                        float sigmaMagNorm)
+{
+    if (sigmaAccMs2  > 0.0f) ahrs->sigmaAcc = sigmaAccMs2;
+    if (sigmaGyrDegS > 0.0f) ahrs->sigmaGyr = DegToRad(sigmaGyrDegS);
+    if (sigmaMagNorm > 0.0f) ahrs->sigmaMag = sigmaMagNorm;
+}
+
 static void Predict(FusionAhrs *ahrs, FusionVector gyroDegS, float dt) {
     FusionVector omega = {{
         DegToRad(gyroDegS.axis.x) - ahrs->b_g.axis.x,

@@ -5562,6 +5562,14 @@ void MocapReceiver::run()
                         s.magNormGateRelax = relax.normMul;
                     }
                     FusionAhrsSetSettings(&ahrs, &s);
+
+                    if (targetSeg >= 0 && targetSeg < fox::body::kSegmentCount) {
+                        const fox::body::ImuChipNoise& nz =
+                            fox::body::chipNoiseFor(fox::body::kImuChipPerSeg[targetSeg]);
+                        FusionAhrsSetNoise(&ahrs, nz.sigmaAccMs2,
+                                                   nz.sigmaGyrDegS,
+                                                   -1.0f);
+                    }
                     I.fusionReady[targetSeg] = true;
                 }
 

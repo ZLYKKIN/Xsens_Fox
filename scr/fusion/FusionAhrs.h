@@ -94,6 +94,11 @@ void FusionAhrsInitialise(FusionAhrs *ahrs);
 void FusionAhrsRestart(FusionAhrs *ahrs);
 void FusionAhrsSetSettings(FusionAhrs *ahrs, const FusionAhrsSettings *settings);
 
+void FusionAhrsSetNoise(FusionAhrs *ahrs,
+                        float sigmaAccMs2,
+                        float sigmaGyrDegS,
+                        float sigmaMagNorm);
+
 void FusionAhrsUpdate(FusionAhrs *ahrs,
                       FusionVector gyroscope,
                       FusionVector accelerometer,
