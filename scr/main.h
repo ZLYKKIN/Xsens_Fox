@@ -49,7 +49,7 @@ constexpr int     kXsensSegmentCountWithDummies = 27;
 constexpr int     kFingerSegmentsHand = 20;
 constexpr double  kRenderFps          = 90.0;
 constexpr double  kStaleSeconds       = 2.0;
-constexpr int     kCalibrationSamples = 500;
+constexpr int     kCalibrationSamples = 720;
 constexpr int     kCountdownSeconds   = 3;
 
 enum class SuitType { Awinda, Link };
