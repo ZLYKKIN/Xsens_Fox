@@ -930,6 +930,14 @@ inline constexpr std::array<FootPoint, 4> kFootPointsLeft = {{
 
 inline constexpr QVector3D kToeTipPoint = QVector3D(0.064f, 0.0f, -0.015f);
 
+inline constexpr QVector3D kKneeFrontPointR = QVector3D(0.040f,  0.000f, -0.050f);
+inline constexpr QVector3D kKneeFrontPointL = QVector3D(0.040f,  0.000f, -0.050f);
+
+inline constexpr QVector3D kPelvisSIPSRight = QVector3D(-0.0407f, -0.050f,  0.0951f);
+inline constexpr QVector3D kPelvisSIPSLeft  = QVector3D(-0.0407f,  0.050f,  0.0951f);
+
+inline constexpr QVector3D kPelvisCentralButtock = QVector3D(-0.045f, 0.0f, -0.030f);
+
 struct FingerRom {
     const char* label;
     double flxMin, flxMax;

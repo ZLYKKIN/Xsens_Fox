@@ -549,6 +549,14 @@ public:
                   QVector3D(fb::kToeTipPoint.x(), -fb::kToeTipPoint.y(),
                             fb::kToeTipPoint.z()));
 
+        pushPoint(fb::kSEG_RLowerLeg, 5, fb::kKneeFrontPointR);
+        pushPoint(fb::kSEG_LLowerLeg, 5, fb::kKneeFrontPointL);
+
+        pushPoint(fb::kSEG_Pelvis, 5, fb::kPelvisSIPSRight);
+        pushPoint(fb::kSEG_Pelvis, 6, fb::kPelvisSIPSLeft);
+
+        pushPoint(fb::kSEG_Pelvis, 14, fb::kPelvisCentralButtock);
+
         std::vector<size_t> order(nCand);
         for (size_t i = 0; i < nCand; ++i) order[i] = i;
         std::sort(order.begin(), order.end(),
