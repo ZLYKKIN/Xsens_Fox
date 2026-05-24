@@ -1626,7 +1626,9 @@ public:
                 Eigen::LDLT<Eigen::MatrixXd> ldlt(JtWJ_damped);
                 if (ldlt.info() != Eigen::Success) {
 
-                    break;
+                    m_lambda = std::min(kLambdaMax, m_lambda * 10.0);
+                    ++d.rejectedSteps;
+                    continue;
                 }
                 Eigen::VectorXd dx = ldlt.solve(-JtWr);
 
