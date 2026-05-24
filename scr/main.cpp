@@ -1517,12 +1517,17 @@ public:
                 const Quat targetFoot = quat_mult(qRelNew, orient[lowerSeg]).normalized();
                 const QVector3D r = quat_log(quat_mult(targetFoot,
                                                        orient[footSeg].conj()).normalized());
-                const int rowF = footSeg * 3;
+                const int rowF = footSeg  * 3;
+                const int rowT = lowerSeg * 3;
                 for (int k = 0; k < 3; ++k) {
                     JtWJ(rowF + k, rowF + k) += w_coup;
                     JtWr(rowF + k)           -= w_coup *
                         (k == 0 ? r.x() : k == 1 ? r.y() : r.z());
                 }
+                const double evDpfSlope = fb::kCAnkles[2] * std::cos(thPf);
+                const double w_couple = w_coup * evDpfSlope;
+                JtWJ(rowF + 0, rowT + 1) -= w_couple;
+                JtWJ(rowT + 1, rowF + 0) -= w_couple;
                 residSum += r.length();
                 ++residN;
             };
