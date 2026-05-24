@@ -2331,6 +2331,47 @@ void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
                           << cp.x << "," << std::setw(8) << cp.y << ","
                           << std::setw(8) << cp.z << ")\n";
             }
+            // Spec §94 — KfaGloveParams (full 80+ literal set per scenario).
+            // The FusionAhrs body filter currently shares its KFA_* defines
+            // across glove and body sensors; the structs below publish the
+            // exact spec scenario tables so a future per-channel selection
+            // can plug them through FusionAhrsSettings.
+            std::cout << "[glove-kfa §94.2] gloveBase   (per glove sensor):"
+                      "  nominalT=" << fb::kGloveBase.nominalT << " s"
+                      "  σ_init_ori=" << fb::kGloveBase.sdInitOrientDeg << "°"
+                      "  σ_init_gyrBias=" << fb::kGloveBase.sdInitGyrBiasDeg << "°"
+                      "  gyrBiasStd=[" << fb::kGloveBase.gyrBiasStdMinDeg
+                      << "°, " << fb::kGloveBase.gyrBiasStdMaxDeg << "°]"
+                      "  magResThr=" << fb::kGloveBase.magResThreshold
+                      << "  magResWin=" << fb::kGloveBase.magResWinTime << " s\n";
+            std::cout << "[glove-kfa §94.2]  accDivMon: th=" << fb::kGloveBase.accDivMonThreshold
+                      << " velTh=" << fb::kGloveBase.accDivMonVelThreshold
+                      << " time=" << fb::kGloveBase.accDivMonTime << " s"
+                      << " decay=" << fb::kGloveBase.accDivMonTauDecay
+                      << " highBoost=" << fb::kGloveBase.accDivMonThresholdHighBoost
+                      << "\n";
+            std::cout << "[glove-kfa §94.2]  fAccBoost: max=" << fb::kGloveBase.fAccBoost
+                      << " inc=" << fb::kGloveBase.fAccBoostIncreaseTime << " s"
+                      << " dec=" << fb::kGloveBase.fAccBoostDecreaseTime << " s\n";
+            std::cout << "[glove-kfa §94.2]  τ_M0: fast=" << fb::kGloveBase.tauM0AvgFast
+                      << " med=" << fb::kGloveBase.tauM0AvgMedium
+                      << " slow=" << fb::kGloveBase.tauM0AvgSlow << " s"
+                      << "  Q_acc_lp=" << fb::kGloveBase.sQvAccLowPass
+                      << "  Q_mag_rw=" << fb::kGloveBase.sQvMagRandomWalk << "\n";
+            std::cout << "[glove-kfa §94.3] gloveHuman overrides:"
+                      "  accDivMonHighBoost=" << fb::kGloveHuman.accDivMonThresholdHighBoost
+                      << "  doProjectMagOnHoriPlane="
+                      << (fb::kGloveHuman.doProjectMagOnHoriPlane ? "true" : "false")
+                      << "  doRedefineTemporal="
+                      << (fb::kGloveHuman.doRedefineTemporal ? "true" : "false")
+                      << "\n";
+            std::cout << "[glove-kfa §94.4] gloveVRU overrides:"
+                      "  doMagnetometerUpdate="
+                      << (fb::kGloveVRU.doMagnetometerUpdate ? "true" : "false")
+                      << "  doM0Update="
+                      << (fb::kGloveVRU.doM0Update ? "true" : "false")
+                      << "  doZru=" << (fb::kGloveVRU.doZru ? "true" : "false")
+                      << "\n";
             std::cout << std::setprecision(4);
             std::cout.flush();
         }

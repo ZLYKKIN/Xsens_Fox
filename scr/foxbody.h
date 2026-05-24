@@ -1276,6 +1276,250 @@ inline constexpr std::array<FingerRom, 19> kFingerRom = {{
     /* 18 reserved / fillers */ { "RSV",       -5.0,   5.0,    0.0,   0.0,    0.0,  0.0 },
 }};
 
+// ---------------------------------------------------------------------------
+//  §94 — FOX_KFA_Filter.glove parameters (full 80+ literal set extracted
+//  from the engine model).  Three scenarios:
+//    kGloveBase  — production glove sensors (gloveBase, §94.2)
+//    kGloveHuman — body sensors (gloveHuman, §94.3, overrides on top of
+//                  gloveBase)
+//    kGloveVRU   — heading-only / VRU mode (§94.4)
+//  The FusionAhrs library currently picks the body-default constants
+//  via #define KFA_*; A.5 publishes these structs so the inner AHRS
+//  parameter set can be picked per channel (glove vs body vs VRU).
+//  The struct is a pure-data container with no member functions; integration
+//  into FusionAhrs.c happens via per-instance settings extension.
+// ---------------------------------------------------------------------------
+struct KfaGloveParams {
+    // — accelerometer divergence monitor (§43.7 + §94.2)
+    double accDivMonTauDecay;            // 0.1
+    double accDivMonThreshold;           // 0.5  (low band, m/s²)
+    double accDivMonThresholdHighBoost;  // 2 (glove) / 3 (body)
+    double accDivMonTime;                // 2 s
+    double accDivMonTimeAboveThreshold;  // 0.5 s
+    double accDivMonVelThreshold;        // 2  m/s
+    bool   allowRedefineReset;           // B1 (glove) / B0 (body)
+    // — magnetic gate (§38.4 + §51.3 + §94.2)
+    double angleDiffFromModelMaxDeg;     // 6.0°
+    double dipDiffFromModelMaxDeg;       // 3.5°
+    double normDiffFromModelMax;         // 0.03 (3 %)
+    double magResThreshold;              // 0.9
+    double magResThresholdGyrBiasDeg;    // 0.03°
+    double magResTimeUp;                 // 0.6 s
+    double magResTimeDown;               // 3.0 s
+    double magResWinTime;                // 0.06 s
+    double magResWinThreshold;           // 0.5
+    double magResWinCountDelayTime;      // 0.05 s
+    // — magnet field model (§94.2)
+    double cMagSpatMin;                  // 0.5
+    double m0defNorm;                    // 1.0
+    double magDistAvgMax;                // 0.002
+    double magDistAvgMin;                // 0.0003
+    double magDistMax;                   // 1.0
+    double magDistMin;                   // 1e-6
+    double magDistNormMax;               // 2.0
+    double magDistThreshold;             // 0.1
+    double magDistTime;                  // 1.0
+    double magIndicatorGyroClipTimer;    // 2.0
+    double magNormGyroClipThreshold;     // 0.1
+    double magRedefEventTime;            // 2.0 s
+    double magRedefWindowTime;           // 1.0 s
+    double magVarInputClamp;             // 0.04
+    double magVerticalAngleThresholdDeg; // 85°
+    double normDiffMaxM0Avg;             // 0.5
+    double pMagSpat;                     // 0.1
+    double sCmagBoost;                   // 0.015
+    // — adaptive booleans (§94.2)
+    bool   doAccCalib;                   // B0
+    bool   doAccDivMonHMScenario;        // B1
+    bool   doAdaptiveInitAcc;            // B1
+    bool   doAdaptiveMagnetometerTau;    // B1
+    bool   doDominantFieldLearning;      // B0
+    bool   doHeadingRedef;               // B0
+    bool   doIcc;                        // B0
+    bool   doLinearMagnetometerDetection;// B0
+    bool   doLowPassAccUpdate;           // B1
+    bool   doM0Update;                   // B0
+    bool   doMagneticRandomWalk;         // B1
+    bool   doMagneticSdi;                // B0
+    bool   doMagnetometerOutlierRejections; // B1
+    bool   doMagnetometerUpdate;         // B0
+    bool   doProjectMagOnHoriPlane;      // B0 (glove) / B1 (body)
+    bool   doRedefBasedOnDomField;       // B0
+    bool   doRedefBasedOnState;          // B1
+    bool   doRedefineAfterWindow;        // B1 (glove) / B0 (body)
+    bool   doRedefineDistortionCheck;    // B1 (glove) / B0 (body)
+    bool   doRedefineDominantCheck;      // B1
+    bool   doRedefineNotInStatic;        // B1 (glove) / B0 (body)
+    bool   doRedefineOnlyInStatic;       // B0
+    bool   doRedefineSdHeading;          // B0
+    bool   doRedefineSpatial;            // B0
+    bool   doRedefineTemporal;           // B0 (glove) / B1 (body)
+    bool   doStableHorizon;              // B0
+    bool   doZru;                        // B1
+    // — Q (process noise) and σ (init std) — §94.2
+    double sdInitAcc;                    // 1.0
+    double sdInitGyrBiasDeg;             // 0.3
+    double sdInitMag;                    // 0.2
+    double sdInitMagvar;                 // 0.1
+    double sdInitOrientDeg;              // 3.0
+    double sQvAccLowPass;                // 0.04
+    double sQvM0Def;                     // 0.014
+    double sQvMagConverging;             // 0.01
+    double sQvMagRandomWalk;             // 0.01
+    double sQwMagSpat;                   // 0.03
+    double dpBoost;                      // 10.0
+    double fAccBoost;                    // 1000
+    double fAccBoostDecreaseTime;        // 60 s
+    double fAccBoostIncreaseTime;        // 5  s
+    double fAccClip;                     // 1
+    double fAccDynamic;                  // 0
+    double fAngleDiff;                   // 0.04
+    double fGyrClip;                     // 0.5
+    double fGyrClipSoft;                 // 0.05
+    double fGyrDynamic;                  // 4e-8
+    double fGyrLpfClipBoost;             // 3.0
+    double fGyrLpfDynamic;               // 4e-8
+    double fMagDist;                     // 300000
+    double fMagGyrBiasStdExp;            // 2
+    double fMagGyrBiasStdMax;            // 1
+    double fMagGyrBiasStdMin;            // 0.15
+    double fMagMagAvgVarExp;             // 1.5
+    double fMagMagAvgVarMin;             // 0.5
+    double fMagVar;                      // 500
+    double fStillnessRedefThreshold;     // 20
+    double fTauGyrBiasStdMin;            // 0.9
+    double fTauMagDistAvgMax;            // 1.6
+    double fTauMagDistAvgMin;            // 0.9
+    double fZruDynamicInit;              // 2
+    double fZruThreshold;                // 3
+    double gyrBiasStdMaxDeg;             // 0.07°
+    double gyrBiasStdMinDeg;             // 0.005°
+    double initialFAccBoostMax;          // 1000
+    double initialFAccBoostMin;          // 300
+    double maxRedefRateDeg;              // 150°
+    int    minNumberOfZruSamples;        // 15
+    double movementRedefThresholdDeg;    // 0.3°
+    double nominalT;                     // 0.008333 s (120 Hz for glove)
+    double omegaRedefMinDeg;             // 5°
+    double omegaRedefTypicalDeg;         // 100°
+    double residualTresholdZru;          // 90
+    double sdHeadingThreshold;           // 5
+    double significantBiasChange;        // 0.005
+    double softClipMaxDeg;               // 0
+    double softClipMinDeg;               // 0
+    bool   startInDominantField;         // B0
+    double staticThresholdFieldLearningDeg; // 10°
+    double tauAcc;                       // 10 s
+    double tauFGyrLpfDynamic;            // 6  s
+    double tauM0AvgFast;                 // 30 s
+    double tauM0AvgMedium;               // 120 s
+    double tauM0AvgSlow;                 // 300 s
+    double tauMagAvg0;                   // 1
+    double tauMagAvgLinear;              // 8
+    double tauMagDistAvgDown;            // 15
+    double tauMagDistAvgUp;              // 500
+    double tauMagSpatMax;                // 30
+    double tauMagVar;                    // 0.05
+    double tauMagVarLinear;              // 0.1
+    double tauRedefineSdHeading;         // 10
+    double tauRedefineTemporal;          // 120
+    double tauVel;                       // 2 s
+    int    updateRateZru;                // 2
+    int    validityCounter;              // 2
+    double zruDetectionRate;             // 10
+    // — hardware caps (§94.1)
+    double clipAcc;                      // 157 m/s²
+    double clipGyrDegS;                  // 2000 °/s
+};
+inline constexpr KfaGloveParams kGloveBase = {
+    .accDivMonTauDecay=0.1, .accDivMonThreshold=0.5,
+    .accDivMonThresholdHighBoost=2.0, .accDivMonTime=2.0,
+    .accDivMonTimeAboveThreshold=0.5, .accDivMonVelThreshold=2.0,
+    .allowRedefineReset=true,
+    .angleDiffFromModelMaxDeg=6.0, .dipDiffFromModelMaxDeg=3.5,
+    .normDiffFromModelMax=0.03, .magResThreshold=0.9,
+    .magResThresholdGyrBiasDeg=0.03, .magResTimeUp=0.6,
+    .magResTimeDown=3.0, .magResWinTime=0.06,
+    .magResWinThreshold=0.5, .magResWinCountDelayTime=0.05,
+    .cMagSpatMin=0.5, .m0defNorm=1.0,
+    .magDistAvgMax=0.002, .magDistAvgMin=0.0003,
+    .magDistMax=1.0, .magDistMin=1e-6, .magDistNormMax=2.0,
+    .magDistThreshold=0.1, .magDistTime=1.0,
+    .magIndicatorGyroClipTimer=2.0, .magNormGyroClipThreshold=0.1,
+    .magRedefEventTime=2.0, .magRedefWindowTime=1.0,
+    .magVarInputClamp=0.04, .magVerticalAngleThresholdDeg=85.0,
+    .normDiffMaxM0Avg=0.5, .pMagSpat=0.1, .sCmagBoost=0.015,
+    .doAccCalib=false, .doAccDivMonHMScenario=true,
+    .doAdaptiveInitAcc=true, .doAdaptiveMagnetometerTau=true,
+    .doDominantFieldLearning=false, .doHeadingRedef=false,
+    .doIcc=false, .doLinearMagnetometerDetection=false,
+    .doLowPassAccUpdate=true, .doM0Update=false,
+    .doMagneticRandomWalk=true, .doMagneticSdi=false,
+    .doMagnetometerOutlierRejections=true, .doMagnetometerUpdate=false,
+    .doProjectMagOnHoriPlane=false, .doRedefBasedOnDomField=false,
+    .doRedefBasedOnState=true, .doRedefineAfterWindow=true,
+    .doRedefineDistortionCheck=true, .doRedefineDominantCheck=true,
+    .doRedefineNotInStatic=true, .doRedefineOnlyInStatic=false,
+    .doRedefineSdHeading=false, .doRedefineSpatial=false,
+    .doRedefineTemporal=false, .doStableHorizon=false, .doZru=true,
+    .sdInitAcc=1.0, .sdInitGyrBiasDeg=0.3, .sdInitMag=0.2,
+    .sdInitMagvar=0.1, .sdInitOrientDeg=3.0,
+    .sQvAccLowPass=0.04, .sQvM0Def=0.014, .sQvMagConverging=0.01,
+    .sQvMagRandomWalk=0.01, .sQwMagSpat=0.03,
+    .dpBoost=10.0, .fAccBoost=1000.0,
+    .fAccBoostDecreaseTime=60.0, .fAccBoostIncreaseTime=5.0,
+    .fAccClip=1.0, .fAccDynamic=0.0, .fAngleDiff=0.04,
+    .fGyrClip=0.5, .fGyrClipSoft=0.05, .fGyrDynamic=4e-8,
+    .fGyrLpfClipBoost=3.0, .fGyrLpfDynamic=4e-8,
+    .fMagDist=300000.0, .fMagGyrBiasStdExp=2.0,
+    .fMagGyrBiasStdMax=1.0, .fMagGyrBiasStdMin=0.15,
+    .fMagMagAvgVarExp=1.5, .fMagMagAvgVarMin=0.5,
+    .fMagVar=500.0, .fStillnessRedefThreshold=20.0,
+    .fTauGyrBiasStdMin=0.9, .fTauMagDistAvgMax=1.6,
+    .fTauMagDistAvgMin=0.9, .fZruDynamicInit=2.0, .fZruThreshold=3.0,
+    .gyrBiasStdMaxDeg=0.07, .gyrBiasStdMinDeg=0.005,
+    .initialFAccBoostMax=1000.0, .initialFAccBoostMin=300.0,
+    .maxRedefRateDeg=150.0, .minNumberOfZruSamples=15,
+    .movementRedefThresholdDeg=0.3, .nominalT=0.008333,
+    .omegaRedefMinDeg=5.0, .omegaRedefTypicalDeg=100.0,
+    .residualTresholdZru=90.0, .sdHeadingThreshold=5.0,
+    .significantBiasChange=0.005, .softClipMaxDeg=0.0,
+    .softClipMinDeg=0.0, .startInDominantField=false,
+    .staticThresholdFieldLearningDeg=10.0, .tauAcc=10.0,
+    .tauFGyrLpfDynamic=6.0, .tauM0AvgFast=30.0,
+    .tauM0AvgMedium=120.0, .tauM0AvgSlow=300.0,
+    .tauMagAvg0=1.0, .tauMagAvgLinear=8.0,
+    .tauMagDistAvgDown=15.0, .tauMagDistAvgUp=500.0,
+    .tauMagSpatMax=30.0, .tauMagVar=0.05, .tauMagVarLinear=0.1,
+    .tauRedefineSdHeading=10.0, .tauRedefineTemporal=120.0,
+    .tauVel=2.0, .updateRateZru=2, .validityCounter=2,
+    .zruDetectionRate=10.0,
+    .clipAcc=157.0, .clipGyrDegS=2000.0,
+};
+// gloveHuman = gloveBase + body-specific overrides (§94.3).
+inline constexpr KfaGloveParams kGloveHuman = []() {
+    KfaGloveParams p = kGloveBase;
+    p.accDivMonThresholdHighBoost = 3.0;
+    p.allowRedefineReset          = false;
+    p.doProjectMagOnHoriPlane     = true;
+    p.doRedefineAfterWindow       = false;
+    p.doRedefineDistortionCheck   = false;
+    p.doRedefineNotInStatic       = false;
+    p.doRedefineTemporal          = true;
+    // Body samples at 240 Hz (or 60 Hz Awinda); leave nominalT to host.
+    return p;
+}();
+// gloveVRU = heading-only, no magnetometer update (§94.4).
+inline constexpr KfaGloveParams kGloveVRU = []() {
+    KfaGloveParams p = kGloveBase;
+    p.doDominantFieldLearning = false;
+    p.doHeadingRedef          = false;
+    p.doM0Update              = true;
+    p.doMagnetometerUpdate    = false;
+    p.doZru                   = false;
+    return p;
+}();
+
 // §92 — Carpus segment geometry: 6 anchor points (origin + 5 CMC joints)
 // in the hand's local frame.  Palm length 0.027 m, finger spread ±0.0274 m.
 // Right hand uses negative Y for the CMC offsets, left hand mirrors (+Y).
