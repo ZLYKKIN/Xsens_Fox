@@ -1470,11 +1470,18 @@ public:
                 const QVector3D r = quat_log(quat_mult(targetLower,
                                                        orient[lowerSeg].conj()).normalized());
                 const int rowL = lowerSeg * 3;
+                const int rowU = upperSeg * 3;
                 for (int k = 0; k < 3; ++k) {
                     JtWJ(rowL + k, rowL + k) += w_lax;
                     JtWr(rowL + k)           -= w_lax *
                         (k == 0 ? r.x() : k == 1 ? r.y() : r.z());
                 }
+                const double thKneeSlope =
+                    fb::kCKnees[2] * std::sin(thKnee) *
+                    fb::kKneeScrewMaxDeg * fb::constants::kDeg2Rad;
+                const double w_couple = w_lax * thKneeSlope;
+                JtWJ(rowL + 2, rowU + 1) -= w_couple;
+                JtWJ(rowU + 1, rowL + 2) -= w_couple;
                 residSum += r.length();
                 ++residN;
             };
