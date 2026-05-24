@@ -661,6 +661,15 @@ public:
         m_accLPBodyValid = true;
     }
 
+    // §89 — world position of the IMU mount for segment `seg` (segment
+    // origin + R(q_seg_world) · r_bs).  Filled by computeKeypoints; valid
+    // once at least one frame has been processed.  Used by external-
+    // position aiding (GPS, optical tracker) and the -test -gloves dump.
+    QVector3D sensorWorldPos(int seg) const {
+        if (seg < 0 || seg >= kXsensSegmentCount) return QVector3D(0, 0, 0);
+        return m_haveLastSensorPos ? m_lastSensorPos[seg] : QVector3D(0, 0, 0);
+    }
+
 private:
     std::string m_pose;
     // 27 entries: 7 spine  +  5 right-arm (w/ scap stub)  +  5 left-arm  +
@@ -688,6 +697,12 @@ private:
     mutable bool                                      m_haveLastSegCenter = false;
     mutable std::array<QVector3D, kXsensSegmentCount> m_accLPBodyHint{};
     mutable bool                                      m_accLPBodyValid = false;
+    // §89 / §39 — world position of each sensor mount = segment origin +
+    // R(q_segment_world) · r_bs.  Cached every frame so GPS / external-
+    // position aiding (and the -test -gloves diagnostic) can read the
+    // sensor location directly instead of repeating the rotation.
+    mutable std::array<QVector3D, kXsensSegmentCount> m_lastSensorPos{};
+    mutable bool                                      m_haveLastSensorPos = false;
 
     void buildTopology();
     void buildDefaultAngles();

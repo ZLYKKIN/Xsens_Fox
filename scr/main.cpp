@@ -2805,6 +2805,55 @@ SkeletonXsens::computeKeypoints(const std::array<Quat, kXsensSegmentCount>& raw,
         if (a < kXsensSegmentCount) m_lastSegCenter[a] = kp[a];
     }
     m_haveLastSegCenter = true;
+
+    // §89 / §39 — cache per-sensor world position p_sensor = p_segment_origin
+    // + R(q_segment_world) · r_bs.  Spec uses this for GPS / external-
+    // position residuals (r = p_sensor_world − p_sensor_meas) and for
+    // attaching IMU-mounted markers to the rendered skeleton.  Only the 17
+    // sensored segments have a valid r_bs; the 6 interpolated segments
+    // (L5, L3, T12, Neck, RToe, LToe) keep r_bs = (0,0,0) so the cache
+    // entry equals the segment origin (a sensible fallback).
+    for (int i = 0; i < kXsensSegmentCount; ++i) {
+        const QVector3D r_bs = fox::body::kSensorToBone[i].r_bs;
+        if (r_bs.lengthSquared() < 1e-12f) {
+            m_lastSensorPos[i] = m_lastSegCenter[i];
+        } else {
+            // global[s] for segment-with-IMU lookup: i is the original 0..22
+            // segment index; the chain entry that owns this segment's world
+            // orientation is the one whose oriented[] equals raw[i] ⊗
+            // m_defAng[i] — same as oriented[i] from step 1 above (the
+            // dummy expansion doesn't change the 23 sensored entries, only
+            // inserts 4 stubs).
+            m_lastSensorPos[i] = m_lastSegCenter[i] + vec_rotate(r_bs, oriented[i]);
+        }
+    }
+    m_haveLastSensorPos = true;
+
+    // One-shot diagnostic dump under -test -gloves: list every sensor's
+    // world position vs its segment-origin keypoint so the operator can
+    // see the per-segment r_bs offset (Pelvis IMU 5.5 cm back, T8 IMU
+    // 14 cm forward of the spine, RUpperLeg IMU 25 cm down the thigh).
+    if (fox::pose_solver::g_testFlag().load(std::memory_order_relaxed) &&
+        fox::pose_solver::g_glovesFlag().load(std::memory_order_relaxed)) {
+        static bool sensorRbsDumped = false;
+        if (!sensorRbsDumped) {
+            sensorRbsDumped = true;
+            std::cout << "[sensor-rbs §89] per-segment IMU mount r_bs (m) — sensor"
+                         " offset on the bone, used for GPS aiding and rendering\n";
+            for (int i = 0; i < kXsensSegmentCount; ++i) {
+                const QVector3D r_bs = fox::body::kSensorToBone[i].r_bs;
+                if (r_bs.lengthSquared() < 1e-12f) continue;
+                std::cout << "[sensor-rbs §89]  seg=" << std::setw(2) << i
+                          << "  r_bs=(" << std::fixed << std::setprecision(5)
+                          << std::setw(9) << r_bs.x() << ","
+                          << std::setw(9) << r_bs.y() << ","
+                          << std::setw(9) << r_bs.z() << ") m"
+                          << "  |r_bs|=" << std::setw(8) << r_bs.length() << " m"
+                          << "\n";
+            }
+            std::cout.flush();
+        }
+    }
     return kp;
 }
 
