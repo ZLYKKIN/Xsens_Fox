@@ -287,8 +287,7 @@ public:
         if (!m_inited) reset();
         double tauEff = fb::kSkin.tauSec;
         if (fb::kSkin.doSkinArtifactBasedOnDynamics && linAccMag > 0.0) {
-
-            const double ref = std::max(1e-6, 10.0);
+            const double ref   = std::max(1e-6, fb::kSkin.linAccRefMps2);
             const double blend = 1.0 - std::exp(-linAccMag / ref);
             tauEff = fb::kSkin.tauSlowSec
                    + blend * (fb::kSkin.tauFastSec - fb::kSkin.tauSlowSec);

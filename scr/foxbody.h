@@ -679,6 +679,7 @@ struct SkinParams {
     double tauFastSec;
     double tauSlowSec;
     double tauMotionRefRad;
+    double linAccRefMps2;
 };
 inline constexpr SkinParams kSkin = {
     .tauSec                       = 0.15,
@@ -693,10 +694,11 @@ inline constexpr SkinParams kSkin = {
     .stdSensorToBodyPosFloor      = 0.004,
     .doGaussMarkov                = true,
     .doChangeTauInCF              = false,
-    .doSkinArtifactBasedOnDynamics= true,
+    .doSkinArtifactBasedOnDynamics= false,
     .tauFastSec                   = 0.05,
     .tauSlowSec                   = 0.30,
     .tauMotionRefRad              = 1.0,
+    .linAccRefMps2                = 1.0,
 };
 
 struct FilterParams {
