@@ -10432,8 +10432,8 @@ static bool writeBvh(const QString& path,
         const auto W = exportWorldOrients(fr, skel);
 
         os << (fr.pelvisPos.x() * 100.0) << " "
-           << (fr.pelvisPos.y() * 100.0) << " "
-           << (fr.pelvisPos.z() * 100.0);
+           << (fr.pelvisPos.z() * 100.0) << " "
+           << (-fr.pelvisPos.y() * 100.0);
 
         for (int idx : dfsOrder) {
             double rz, rx, ry;
