@@ -3634,6 +3634,8 @@ using FnDataPacketFreeAcc         =
     XsVectorBlob*(*)(const XsDataPacketBlob*, XsVectorBlob*);
 using FnDataPacketContainsSampleTimeFine = int (*)(const XsDataPacketBlob*);
 using FnDataPacketSampleTimeFine         = quint32(*)(const XsDataPacketBlob*);
+using FnDataPacketContainsTemperature    = int (*)(const XsDataPacketBlob*);
+using FnDataPacketTemperature            = double (*)(const XsDataPacketBlob*);
 
 struct Api {
     HMODULE xda = nullptr;
@@ -3693,6 +3695,8 @@ struct Api {
     FnDataPacketFreeAcc                   dataPacketFreeAcc        = nullptr;
     FnDataPacketContainsSampleTimeFine    dataPacketContainsSTF    = nullptr;
     FnDataPacketSampleTimeFine            dataPacketSTF            = nullptr;
+    FnDataPacketContainsTemperature       dataPacketContainsTemperature = nullptr;
+    FnDataPacketTemperature               dataPacketTemperature    = nullptr;
 
     struct ContainsProbe {
         const char* name;
@@ -3837,6 +3841,8 @@ static bool loadApi(Api& api, QString& errDetail)
     resolveProc (api.xst, "XsDataPacket_freeAcceleration",          api.dataPacketFreeAcc);
     resolveProc (api.xst, "XsDataPacket_containsSampleTimeFine",    api.dataPacketContainsSTF);
     resolveProc (api.xst, "XsDataPacket_sampleTimeFine",            api.dataPacketSTF);
+    resolveProc (api.xst, "XsDataPacket_containsTemperature",       api.dataPacketContainsTemperature);
+    resolveProc (api.xst, "XsDataPacket_temperature",               api.dataPacketTemperature);
 
     resolveProc (api.xst, "XsDataPacket_containsOrientationIncrement",
                  api.dataPacketContainsOrientationIncrement);
