@@ -1,6 +1,4 @@
-// Fox Mocap — MVN MXTP wire encoders.  Moved from main.cpp; the only behaviour
-// change is the explicit NaN/Inf guard in appendFloatBE (documented in the
-// header).
+
 #include "foxwire.h"
 
 #include <QtEndian>
@@ -28,17 +26,17 @@ QByteArray buildMxtpHeader(const char* msgId2,
     pkt.append(char(dataCount));
     const quint32 ftBE = qToBigEndian<quint32>(frameTimeMs);
     pkt.append(reinterpret_cast<const char*>(&ftBE), 4);
-    pkt.append(char(0));               // avatarId
-    pkt.append(char(segCount));        // bodySegmentCount
-    pkt.append(char(0));               // props
-    pkt.append(char(fingerCount));     // fingerSegmentCount
-    pkt.append(4, '\0');               // padding
+    pkt.append(char(0));
+    pkt.append(char(segCount));
+    pkt.append(char(0));
+    pkt.append(char(fingerCount));
+    pkt.append(4, '\0');
     return pkt;
 }
 
 void appendFloatBE(QByteArray& pkt, float v)
 {
-    if (!std::isfinite(v)) v = 0.0f;   // never emit NaN/Inf on the wire
+    if (!std::isfinite(v)) v = 0.0f;
     quint32 bits;
     std::memcpy(&bits, &v, 4);
     bits = qToBigEndian<quint32>(bits);
@@ -79,14 +77,11 @@ void appendScaleSegment(QByteArray& pkt, const char* name,
 void appendErgoAngleSegment(QByteArray& pkt, qint32 jointId,
                             float abductionDeg, float flexionDeg, float rotationDeg)
 {
-    // 16-byte record matching the ">I3f" template in the receivers' parsers
-    // (see ErgoDatagram.cpp in the Plugins/ tree once the consumer ships).
-    // Big-endian throughout; the float helper coerces NaN/Inf to 0 so the
-    // wire never carries a non-finite value.
+
     appendInt32BE(pkt, jointId);
     appendFloatBE(pkt, abductionDeg);
     appendFloatBE(pkt, flexionDeg);
     appendFloatBE(pkt, rotationDeg);
 }
 
-}  // namespace fox
+}
