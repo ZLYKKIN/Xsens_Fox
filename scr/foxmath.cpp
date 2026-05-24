@@ -1,13 +1,11 @@
-// Fox Mocap — pure rotation math implementations.  Moved verbatim from main.cpp
-// (no logic change) so the same code that drives the live pipeline is what the
-// unit tests exercise.
+
 #include "foxmath.h"
 
 namespace fox {
 
 Quat quat_mult(const Quat& a, const Quat& b)
 {
-    // Hamilton product: matches scipy.spatial.transform.Rotation composition.
+
     return Quat(
         a.w*b.w - a.x*b.x - a.y*b.y - a.z*b.z,
         a.w*b.x + a.x*b.w + a.y*b.z - a.z*b.y,
@@ -17,7 +15,7 @@ Quat quat_mult(const Quat& a, const Quat& b)
 
 QVector3D vec_rotate(const QVector3D& v, const Quat& q)
 {
-    // Efficient formulation: v' = v + 2w(qv × v) + 2(qv × (qv × v))
+
     const QVector3D qv(float(q.x), float(q.y), float(q.z));
     const QVector3D t = 2.0f * QVector3D::crossProduct(qv, v);
     return v + float(q.w) * t + QVector3D::crossProduct(qv, t);
@@ -58,10 +56,7 @@ static Quat axis_quat(char axis, double ang)
 
 Quat euler_to_quat(double a, double b, double c, const char* seq)
 {
-    // Intrinsic rotations (uppercase scipy convention).
-    // "XYZ" means: first rotate by a about local X, then b about new Y,
-    //              then c about newest Z.  As a Hamilton product this is
-    //              Qx(a) * Qy(b) * Qz(c).
+
     const Quat qa = axis_quat(seq[0], a);
     const Quat qb = axis_quat(seq[1], b);
     const Quat qc = axis_quat(seq[2], c);
@@ -71,11 +66,11 @@ Quat euler_to_quat(double a, double b, double c, const char* seq)
 Quat yaw_only_quat(const Quat& q)
 {
     double w = q.w, z = q.z;
-    // Hemisphere fix — берём ветвь с положительным w для непрерывности.
+
     if (w < 0.0) { w = -w; z = -z; }
     const double n2 = w*w + z*z;
     if (n2 < 1e-12) {
-        // Оба компонента нулевые: yaw неопределён, возвращаем identity.
+
         return Quat(1, 0, 0, 0);
     }
     const double n = 1.0 / std::sqrt(n2);
@@ -90,10 +85,7 @@ Quat slerp_quat(const Quat& a, const Quat& b, double t)
         b2 = Quat(-b.w, -b.x, -b.y, -b.z);
         dot = -dot;
     }
-    // Spec §8.1 — small-angle branch is gated on sin(Ω), not on dot itself.
-    // sinT0 < 6.1e-6 implies Ω is small enough that sin(Ω)/Ω ≈ 1 and the
-    // SLERP weights degenerate to plain lerp.  Computing it once up front
-    // (rather than the looser dot > 0.9995 shortcut) matches the engine.
+
     const double theta0 = clamp_acos(dot);
     const double sinT0  = std::sin(theta0);
     if (sinT0 < 6.1e-6) {
@@ -114,30 +106,23 @@ double quat_angle_deg(const Quat& q)
     return 2.0 * std::acos(w) * 180.0 / M_PI;
 }
 
-// ============================================================================
-//  Spec primitives — see header for spec section references.
-// ============================================================================
-
 Quat quat_exp_rotvec(double phix, double phiy, double phiz)
 {
-    // Spec §5.1: θ = ‖φ‖; q.xyz = (φ/θ)·sin(θ/2); q.w = cos(θ/2).  Limit at
-    // θ→0 falls out of the Taylor series sin(θ/2)/θ ≈ 1/2, so the «small-angle»
-    // branch is just the limit value 0.5 with no division.
+
     const double th2 = phix*phix + phiy*phiy + phiz*phiz;
     if (th2 < 1e-24) return Quat(1, 0, 0, 0);
     const double th = std::sqrt(th2);
     const double half = 0.5 * th;
-    const double s = std::sin(half) / th;   // = sin(θ/2) / θ
+    const double s = std::sin(half) / th;
     return Quat(std::cos(half), s * phix, s * phiy, s * phiz);
 }
 
 QVector3D quat_log(const Quat& q)
 {
-    // Spec §5.2: θ = 2·atan2(‖v‖, w), n = v/‖v‖, φ = θ·n.  For q close to
-    // identity ‖v‖ ≈ 0 and the limit is φ = 2·v (Taylor: atan2(x,1) ≈ x).
+
     const double vn2 = q.x*q.x + q.y*q.y + q.z*q.z;
     if (vn2 < 1e-24) {
-        // Small-angle: φ = 2·v (sign of w handled by upstream hemisphere fix).
+
         const double s = (q.w >= 0.0) ? 2.0 : -2.0;
         return QVector3D(float(s*q.x), float(s*q.y), float(s*q.z));
     }
@@ -149,7 +134,7 @@ QVector3D quat_log(const Quat& q)
 
 Matrix3 quat_to_matrix(const Quat& q)
 {
-    // Spec §3.1 / fox_types_engine §34.6 — full Kayley form on the diagonal.
+
     const double w = q.w, x = q.x, y = q.y, z = q.z;
     const double ww=w*w, xx=x*x, yy=y*y, zz=z*z;
     const double xy=x*y, xz=x*z, yz=y*z;
@@ -163,38 +148,35 @@ Matrix3 quat_to_matrix(const Quat& q)
 
 Euler3 matrix_to_euler_A(const Matrix3& R)
 {
-    // Spec §4.3 variant A: middle = asin(-m01), first = atan2(m21,m11), second = atan2(m02,m00).
+
     Euler3 e;
-    e.e0 = std::atan2( R.m[7], R.m[4] );        // atan2(m21, m11)
-    e.e1 = clamp_asin( -R.m[1] );               // asin(-m01)
-    e.e2 = std::atan2( R.m[2], R.m[0] );        // atan2(m02, m00)
+    e.e0 = std::atan2( R.m[7], R.m[4] );
+    e.e1 = clamp_asin( -R.m[1] );
+    e.e2 = std::atan2( R.m[2], R.m[0] );
     return e;
 }
 
 Euler3 matrix_to_euler_B(const Matrix3& R)
 {
-    // Spec §4.3 variant B: middle = asin(m21), first = atan2(-m20,m22), second = atan2(-m01,m11).
+
     Euler3 e;
-    e.e0 = std::atan2( -R.m[6], R.m[8] );       // atan2(-m20, m22)
-    e.e1 = clamp_asin( R.m[7] );                // asin(m21)
-    e.e2 = std::atan2( -R.m[1], R.m[4] );       // atan2(-m01, m11)
+    e.e0 = std::atan2( -R.m[6], R.m[8] );
+    e.e1 = clamp_asin( R.m[7] );
+    e.e2 = std::atan2( -R.m[1], R.m[4] );
     return e;
 }
 
 Quat matrix_to_quat_sheppard(const Matrix3& R)
 {
-    // Spec §3.2 — Shepperd's algorithm with the largest-trace pivot.  The
-    // four candidates t0..t3 equal 4·w², 4·x², 4·y², 4·z² respectively;
-    // picking the largest keeps the divisor 2·√(t_k) far from zero, which
-    // is what the naive form (just w² from the trace) gets wrong when w ≈ 0.
+
     const double m00 = R.m[0], m01 = R.m[1], m02 = R.m[2];
     const double m10 = R.m[3], m11 = R.m[4], m12 = R.m[5];
     const double m20 = R.m[6], m21 = R.m[7], m22 = R.m[8];
 
-    const double t0 = 1.0 + m00 + m11 + m22;   // 4w²
-    const double t1 = 1.0 + m00 - m11 - m22;   // 4x²
-    const double t2 = 1.0 - m00 + m11 - m22;   // 4y²
-    const double t3 = 1.0 - m00 - m11 + m22;   // 4z²
+    const double t0 = 1.0 + m00 + m11 + m22;
+    const double t1 = 1.0 + m00 - m11 - m22;
+    const double t2 = 1.0 - m00 + m11 - m22;
+    const double t3 = 1.0 - m00 - m11 + m22;
 
     Quat q;
     if (t0 >= t1 && t0 >= t2 && t0 >= t3) {
@@ -228,20 +210,14 @@ Quat matrix_to_quat_sheppard(const Matrix3& R)
 
 Quat quat_pow(const Quat& q, double t)
 {
-    // Spec §40 — q^t = exp(t · log(q)).  Identity is the unique fixed point
-    // (any t leaves it unchanged); for non-identity q the small-angle path
-    // in quat_log/quat_exp_rotvec handles the limit.
+
     const QVector3D phi = quat_log(q);
     return quat_exp_rotvec(t * double(phi.x()), t * double(phi.y()), t * double(phi.z()));
 }
 
 QVector3D angular_velocity_from_quat(const Quat& dq, double dtSec)
 {
-    // Spec §12.2: ω = (2·asin(‖v‖) / (‖v‖·Δt)) · v,  v = (dq.x, dq.y, dq.z).
-    // Hemisphere canonicalisation [1.3]: q and −q describe the same rotation,
-    // but only the w≥0 representative gives the shortest-path half-angle
-    // through asin (which is monotone on [0, π/2]).  Without it, rotations
-    // close to ±π flip sign and the velocity vector reverses.
+
     if (dtSec <= 0.0) return QVector3D(0, 0, 0);
     double x = dq.x, y = dq.y, z = dq.z;
     if (dq.w < 0.0) { x = -x; y = -y; z = -z; }
@@ -255,10 +231,6 @@ QVector3D angular_velocity_from_quat(const Quat& dq, double dtSec)
     return QVector3D(float(k*x), float(k*y), float(k*z));
 }
 
-// Spec §174.2 — Jacobi eigendecomposition of 4×4 symmetric.  Cyclic
-// sweeps over off-diagonals; converges in ~6–8 sweeps for the matrix
-// sizes we feed it.  Modifies A in place (eigenvalues on diagonal);
-// U receives the eigenvector columns.
 void jacobiSym4(double A[4][4], double U[4][4])
 {
     for (int i = 0; i < 4; ++i)
@@ -308,7 +280,6 @@ void jacobiSym4(double A[4][4], double U[4][4])
     }
 }
 
-// Spec §174.2 — Markley/Shepard 4-D eigenvector quaternion average.
 Quat quat_avg_markley(const std::vector<Quat>& samples)
 {
     if (samples.empty()) return Quat(1, 0, 0, 0);
@@ -329,4 +300,4 @@ Quat quat_avg_markley(const std::vector<Quat>& samples)
     return q.normalized();
 }
 
-}  // namespace fox
+}
