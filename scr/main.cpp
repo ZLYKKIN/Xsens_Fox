@@ -6718,8 +6718,8 @@ static const Tr kTr[] = {
                            "\xF0\x9F\x94\x8C  COM port — USB / Awinda dongle"},
     {"transport_wifi",     "\xF0\x9F\x93\xA1  WiFi / Ethernet — по сети (Link / Awinda)",
                            "\xF0\x9F\x93\xA1  WiFi / Ethernet — network (Link / Awinda)"},
-    {"suit_awinda",        "\xF0\x9F\x9F\xA0  Xsens Awinda — 60 Гц",
-                           "\xF0\x9F\x9F\xA0  Xsens Awinda — 60 Hz"},
+    {"suit_awinda",        "\xF0\x9F\x9F\xA0  Xsens Awinda — 90 Гц",
+                           "\xF0\x9F\x9F\xA0  Xsens Awinda — 90 Hz"},
     {"suit_link",          "\xF0\x9F\x9F\xA3  Xsens Link — 240 Гц",
                            "\xF0\x9F\x9F\xA3  Xsens Link — 240 Hz"},
 
@@ -13775,7 +13775,7 @@ CliArgs parseCli(int argc, char** argv)
         }
         else if (a == "-h" || a == "--help") {
             std::cout <<
-                "Fox Mocap — MVN-style Xsens client (Link 240 Hz / Awinda 60 Hz)\n"
+                "Fox Mocap — MVN-style Xsens client (Link 240 Hz / Awinda 90 Hz)\n"
                 "Usage:\n"
                 "  fox_mocap [-test] [--gloves] [--link|--awinda]\n"
                 "\n"
@@ -13787,9 +13787,9 @@ CliArgs parseCli(int argc, char** argv)
                 "             when launched from Explorer.\n"
                 "  --gloves   Reserve space in the session for Manus finger data.\n"
                 "  --link     Xsens Link suit — 240 Hz update rate (default for -test).\n"
-                "  --awinda   Xsens Awinda suit — 60 Hz update rate (default).\n"
+                "  --awinda   Xsens Awinda suit — 90 Hz update rate (default).\n"
                 "             --link/--awinda override -test's default in ANY order,\n"
-                "             so `-test -gloves -awinda` runs the 60 Hz Awinda suit.\n"
+                "             so `-test -gloves -awinda` runs the 90 Hz Awinda suit.\n"
                 "  --lang RU|EN  Force UI language without touching the user preference.\n";
             std::exit(0);
         }
@@ -13876,7 +13876,7 @@ int main(int argc, char** argv)
     NewSessionWizard wiz(rx, cli.test);
 
     testLog(std::string("[boot] suit = ")
-            + (cli.suit == SuitType::Link ? "Xsens Link (240 Hz)" : "Xsens Awinda (60 Hz)"),
+            + (cli.suit == SuitType::Link ? "Xsens Link (240 Hz)" : "Xsens Awinda (90 Hz)"),
             cli.test);
     wiz.preselectSuit(cli.suit);
     if (cli.gloves) {

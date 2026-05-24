@@ -42,10 +42,10 @@ inline constexpr AnthroProportions kAnthroMale = {
     .upperArmRatio       = 0.186,
     .shoulderWidthRatio  = 0.259,
     .hipWidthRatio       = 0.190,
-    .hipHeightRatio      = 0.510,
-    .kneeHeightRatio     = 0.293,
+    .hipHeightRatio      = 0.530,
+    .kneeHeightRatio     = 0.285,
     .ankleHeightRatio    = 0.039,
-    .footRatio           = 0.144,
+    .footRatio           = 0.152,
 };
 
 inline constexpr AnthroProportions kAnthroFemale = {
@@ -57,8 +57,8 @@ inline constexpr AnthroProportions kAnthroFemale = {
     .upperArmRatio       = 0.182,
     .shoulderWidthRatio  = 0.234,
     .hipWidthRatio       = 0.225,
-    .hipHeightRatio      = 0.505,
-    .kneeHeightRatio     = 0.290,
+    .hipHeightRatio      = 0.530,
+    .kneeHeightRatio     = 0.285,
     .ankleHeightRatio    = 0.039,
     .footRatio           = 0.149,
 };
@@ -158,7 +158,7 @@ inline constexpr std::array<double, kSegmentCount> kWinterProxToComRatio = {
     0.500,
 };
 
-inline constexpr double kDefaultBodyMassKg = 70.0;
+inline constexpr double kDefaultBodyMassKg = 75.0;
 
 struct SensorToBone {
     Quat       q_bs;
