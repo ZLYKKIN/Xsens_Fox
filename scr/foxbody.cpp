@@ -1,8 +1,4 @@
-// Fox Mocap — biomechanical model implementation.
-//
-// Concrete data here is reproduced verbatim from the reverse-engineered
-// fox_definitions.xsb (Xsens FOX_KFA Motion Engine spec, section 24 and
-// appendix E).  The four-decimal precision is exactly what the spec ships.
+
 #include "foxbody.h"
 
 #include <cstring>
@@ -13,10 +9,6 @@ namespace fox::body {
 
 namespace {
 
-// Convenience: build a unit quaternion from an angle θ (radians) around an
-// axis aligned with one of (X, Y, Z) — same convention as foxmath::euler_to_quat
-// for a single-axis rotation (cos(θ/2), sin(θ/2)·axis).  Used to encode the
-// small posture quaternions from the .xsa reference files.
 constexpr double cos_half(double th) { return std::cos(0.5 * th); }
 constexpr double sin_half(double th) { return std::sin(0.5 * th); }
 
@@ -24,137 +16,100 @@ Quat axisX(double thRad) { return Quat(cos_half(thRad), sin_half(thRad), 0, 0); 
 Quat axisY(double thRad) { return Quat(cos_half(thRad), 0, sin_half(thRad), 0); }
 Quat axisZ(double thRad) { return Quat(cos_half(thRad), 0, 0, sin_half(thRad)); }
 
-constexpr double kDeg = 0.017453292519943295;   // π/180
+constexpr double kDeg = 0.017453292519943295;
 
-// ---------------------------------------------------------------------------
-//  Spec §24.1 — Legacy T-pose spine + legs (shared with §24.2 N-pose).
-//  Numbers are the verbatim 4-decimal kratny taken from the .xsa file:
-//    seg1 Pelvis = (0.9984697627340179, 0, 0.05530038793601835, 0)  → 6.34° +Y
-//    seg3 L3     = (0.9987077, 0, −0.05082252,                    0)  → 5.83° −Y
-//    seg4 T12    = (0.9987051, 0, −0.05087403,                    0)  → 5.83° −Y
-//    seg6 Neck   = (0.9939512, 0,  0.1098229,                     0)  → 12.61° +Y
-//    seg7 Head   = (0.9995685, 0,  0.02937369,                    0)  → 3.37° +Y
-//    legs: seg16 RUpperLeg (…, 0.02401766,…) → 2.75° +Y;
-//          seg17 RLowerLeg (…, 0.04063974,…) → 4.66° +Y
-//  All other spine/leg segments in legacy = identity.
-// ---------------------------------------------------------------------------
 constexpr Quat kIdent = Quat(1, 0, 0, 0);
 
 inline Quat legacySpine(int seg) {
     switch (seg) {
-        case 0:  return Quat(0.9984697627340179, 0, 0.05530038793601835, 0);   // Pelvis
-        case 1:  return kIdent;                                                // L5
-        case 2:  return Quat(0.9987077007098614, 0, -0.05082252003612363, 0);  // L3
-        case 3:  return Quat(0.9987050781810652, 0, -0.05087402888854364, 0);  // T12
-        case 4:  return kIdent;                                                // T8
-        case 5:  return Quat(0.9939511715005132, 0,  0.1098228968510563,  0);  // Neck
-        case 6:  return Quat(0.999568500071736,  0,  0.02937369000210807, 0);  // Head
+        case 0:  return Quat(0.9984697627340179, 0, 0.05530038793601835, 0);
+        case 1:  return kIdent;
+        case 2:  return Quat(0.9987077007098614, 0, -0.05082252003612363, 0);
+        case 3:  return Quat(0.9987050781810652, 0, -0.05087402888854364, 0);
+        case 4:  return kIdent;
+        case 5:  return Quat(0.9939511715005132, 0,  0.1098228968510563,  0);
+        case 6:  return Quat(0.999568500071736,  0,  0.02937369000210807, 0);
         default: return kIdent;
     }
 }
 
 inline Quat legacyLeg(int seg) {
-    // §24.1: same for legacy/male/female.  Identical for left/right (16,20 and 17,21).
+
     switch (seg) {
-        case 15:  // RUpperLeg
-        case 19:  // LUpperLeg
-            return Quat(0.9997115343780182, 0, 0.02401766082591783, 0);  // 2.75° +Y
-        case 16:  // RLowerLeg
-        case 20:  // LLowerLeg
-            return Quat(0.999173864575052,  0, 0.04063973855914903, 0);  // 4.66° +Y
-        case 17:  // RFoot
-        case 18:  // RToe
-        case 21:  // LFoot
-        case 22:  // LToe
+        case 15:
+        case 19:
+            return Quat(0.9997115343780182, 0, 0.02401766082591783, 0);
+        case 16:
+        case 20:
+            return Quat(0.999173864575052,  0, 0.04063973855914903, 0);
+        case 17:
+        case 18:
+        case 21:
+        case 22:
             return kIdent;
         default:
             return kIdent;
     }
 }
 
-// ---------------------------------------------------------------------------
-//  Spec §24.3 — Male spine offsets (different from legacy: 9°, 8.94°, 4.6°,
-//  5.07°, 4.3° around ±Y; head & neck = identity).
-// ---------------------------------------------------------------------------
 inline Quat maleSpine(int seg) {
     switch (seg) {
-        case 0:  return Quat(0.99691733, 0,  0.0784591,   0);   // Pelvis 9.00° +Y
-        case 1:  return Quat(0.99695624, 0,  0.0779632,   0);   // L5     8.94° +Y
-        case 2:  return Quat(0.99919194, 0, -0.04019283,  0);   // L3     4.61° −Y
-        case 3:  return Quat(0.99902228, 0, -0.04420961,  0);   // T12    5.07° −Y
-        case 4:  return Quat(0.99929604, 0,  0.03751577,  0);   // T8     4.30° +Y
-        case 5:  return kIdent;                                  // Neck identity
-        case 6:  return kIdent;                                  // Head identity
-        default: return kIdent;
-    }
-}
-
-// ---------------------------------------------------------------------------
-//  Spec §24.4 — Female spine offsets (greater anterior tilt: 12°, 11.25°,
-//  5.80°, 6.38°, 4.45°; neck & head identity).
-// ---------------------------------------------------------------------------
-inline Quat femaleSpine(int seg) {
-    switch (seg) {
-        case 0:  return Quat(0.9945219,  0,  0.10452846,  0);   // Pelvis 12.00° +Y
-        case 1:  return Quat(0.99518216, 0,  0.09804319,  0);   // L5     11.25° +Y
-        case 2:  return Quat(0.99872068, 0, -0.05056679,  0);   // L3     5.80° −Y
-        case 3:  return Quat(0.99845209, 0, -0.05561849,  0);   // T12    6.38° −Y
-        case 4:  return Quat(0.99924607, 0,  0.03882382,  0);   // T8     4.45° +Y
+        case 0:  return Quat(0.99691733, 0,  0.0784591,   0);
+        case 1:  return Quat(0.99695624, 0,  0.0779632,   0);
+        case 2:  return Quat(0.99919194, 0, -0.04019283,  0);
+        case 3:  return Quat(0.99902228, 0, -0.04420961,  0);
+        case 4:  return Quat(0.99929604, 0,  0.03751577,  0);
         case 5:  return kIdent;
         case 6:  return kIdent;
         default: return kIdent;
     }
 }
 
-// ---------------------------------------------------------------------------
-//  Spec §24.1 — Legacy T-pose: arms are identity (extended laterally).
-//  Spec §24.2 — Legacy N-pose: arms are rotated ±90° around X with a small
-//  ±10° shoulder offset.  Used by both legacy and male/female (§24.2 says
-//  «руки в N-позе — те же ±10°/±90°»).
-// ---------------------------------------------------------------------------
+inline Quat femaleSpine(int seg) {
+    switch (seg) {
+        case 0:  return Quat(0.9945219,  0,  0.10452846,  0);
+        case 1:  return Quat(0.99518216, 0,  0.09804319,  0);
+        case 2:  return Quat(0.99872068, 0, -0.05056679,  0);
+        case 3:  return Quat(0.99845209, 0, -0.05561849,  0);
+        case 4:  return Quat(0.99924607, 0,  0.03882382,  0);
+        case 5:  return kIdent;
+        case 6:  return kIdent;
+        default: return kIdent;
+    }
+}
+
 inline Quat armT(int seg) {
-    // All arm segments in T-pose are identity (q_α = 1,0,0,0) per spec §24.1.
+
     (void)seg;
     return kIdent;
 }
 
 inline Quat armN(int seg) {
-    // Spec §24.2:
-    //   seg8  RShoulder = (cos 5°,  sin 5°, 0, 0)  → 10° around +X
-    //   seg9..11 RUpperArm/Forearm/Hand = (cos 45°,  sin 45°, 0, 0)  → 90° around +X
-    //   seg12 LShoulder = (cos 5°, −sin 5°, 0, 0)  → 10° around −X
-    //   seg13..15 LUpperArm/Forearm/Hand = (cos 45°, −sin 45°, 0, 0) → 90° around −X
+
     switch (seg) {
-        case 7:  return Quat(kCos5,    kSin5,   0, 0);   // RShoulder
-        case 8:                                          // RUpperArm
-        case 9:                                          // RForearm
-        case 10: return Quat(kSqrt2H,  kSqrt2H, 0, 0);   // RHand
-        case 11: return Quat(kCos5,   -kSin5,   0, 0);   // LShoulder
-        case 12:                                         // LUpperArm
-        case 13:                                         // LForearm
-        case 14: return Quat(kSqrt2H, -kSqrt2H, 0, 0);   // LHand
+        case 7:  return Quat(kCos5,    kSin5,   0, 0);
+        case 8:
+        case 9:
+        case 10: return Quat(kSqrt2H,  kSqrt2H, 0, 0);
+        case 11: return Quat(kCos5,   -kSin5,   0, 0);
+        case 12:
+        case 13:
+        case 14: return Quat(kSqrt2H, -kSqrt2H, 0, 0);
         default: return kIdent;
     }
 }
 
-// Male T-pose has a subtle forearm pronation ±Z (spec §24.3):
-//   seg10 RForeArm = (0.9997969880959272, 0, 0,  0.02014900976009601)  → 2.31° +Z
-//   seg14 LForeArm = same with −Z
 inline Quat maleArmTOverride(int seg) {
     if (seg == 9)  return Quat(0.9997969880959272, 0, 0,  0.02014900976009601);
     if (seg == 13) return Quat(0.9997969880959272, 0, 0, -0.02014900976009601);
     return armT(seg);
 }
 
-}  // anonymous namespace
+}
 
-// ---------------------------------------------------------------------------
-//  Public API.
-// ---------------------------------------------------------------------------
 Quat referenceQuat(int seg, Pose pose, Gender gender) {
     if (seg < 0 || seg >= kSegmentCount) return kIdent;
 
-    // Spine segments 0..6 — by gender.
     if (seg <= 6) {
         switch (gender) {
             case GenderMale:   return maleSpine(seg);
@@ -163,30 +118,19 @@ Quat referenceQuat(int seg, Pose pose, Gender gender) {
             default:           return legacySpine(seg);
         }
     }
-    // Arm segments 7..14 — by pose (with male T-pose pronation override).
+
     if (seg >= 7 && seg <= 14) {
         if (pose == PoseT) {
             return (gender == GenderMale) ? maleArmTOverride(seg) : armT(seg);
         }
-        return armN(seg);  // N-pose arms are identical across genders
+        return armN(seg);
     }
-    // Leg segments 15..22 — identical across pose/gender (spec §24.1 line «ноги одинаковы в T и N»).
+
     return legacyLeg(seg);
 }
 
-
-// ===========================================================================
-//  §1699-1722 — FoxSPC feature definitions.
-//
-//  Order of kFeatureNames matches the SVM input vector layout (the order skl2onnx
-//  produces — lexicographic by feature name, see §1707-1716 in the spec).
-//  Each name parses into an SpcFeatureSpec (epoch × signal × axis × band × stat),
-//  and from that we derive per-feature min/max suitable for the §1705 MinMaxScaler
-//  preprocessor (the exact training-time table is NOT embedded in the .onnx).
-// ===========================================================================
 namespace {
 
-// Match a literal at offset `i` and advance `i` past it if it matches.
 bool eat(const std::string& s, std::size_t& i, const char* token) {
     const std::size_t n = std::strlen(token);
     if (s.compare(i, n, token) != 0) return false;
@@ -224,7 +168,7 @@ SpcBand parseBand(const std::string& s, std::size_t& i) {
     return SpcBand::None;
 }
 SpcStat parseStat(const std::string& s, std::size_t& i) {
-    // Longest matches first (kurtosis before kurt, sameAxis* before sum, etc).
+
     if (eat(s, i, "sameAxisInterSensorCorrAbsMax")) return SpcStat::SameAxisInterSensorCorrAbsMax;
     if (eat(s, i, "sameAxisInterSensorCorrAbsSum")) return SpcStat::SameAxisInterSensorCorrAbsSum;
     if (eat(s, i, "sameAxisInterSensorCorrMax"))    return SpcStat::SameAxisInterSensorCorrMax;
@@ -259,12 +203,6 @@ SpcFeatureSpec parseFeatureName(const char* name) {
     return out;
 }
 
-// §1705 — per-feature min/max derived from the channel and statistic type.
-// Spec text: "typical Acc 0–4 g, Gyr 0–8 рад/с для arm raise; correlations
-// в [−1, 1]; freq-band statistics в [0, ~50] для Acc / [0, ~25] для Gyr".
-// These bounds are not the model's exact training-time MinMaxScaler table
-// (that's not extractable from the .onnx — §1705 confirms it), but they
-// match the spec's stated ranges and keep the SVM input bounded as required.
 std::pair<float, float> deriveRange(const SpcFeatureSpec& f) {
     const bool isCorr = f.stat == SpcStat::SameAxisInterSensorCorrMax
                      || f.stat == SpcStat::SameAxisInterSensorCorrAbsMax
@@ -275,7 +213,7 @@ std::pair<float, float> deriveRange(const SpcFeatureSpec& f) {
                      || f.stat == SpcStat::SameSensorInterAxisCorrSum
                      || f.stat == SpcStat::SameSensorInterAxisCorrAbsSum;
     if (isCorr) {
-        // Cross-sensor 16-neighbour sum vs single pearson value (§1704).
+
         const bool isSum = f.stat == SpcStat::SameAxisInterSensorCorrSum
                         || f.stat == SpcStat::SameAxisInterSensorCorrAbsSum;
         const bool isAbsSum  = f.stat == SpcStat::SameAxisInterSensorCorrAbsSum;
@@ -288,7 +226,7 @@ std::pair<float, float> deriveRange(const SpcFeatureSpec& f) {
         return isAbsMax ? std::pair{0.0f, 1.0f} : std::pair{-1.0f, 1.0f};
     }
     if (f.stat == SpcStat::MaxIdx) {
-        // Normalised bin index (or sample-index), §1703.7.
+
         return {0.0f, 1.0f};
     }
     if (f.stat == SpcStat::Skew) {
@@ -297,21 +235,20 @@ std::pair<float, float> deriveRange(const SpcFeatureSpec& f) {
     if (f.stat == SpcStat::Kurtosis) {
         return {-3.0f, 30.0f};
     }
-    // Magnitude statistics: Mean / Sum / Std / Var / Rms / Max — depend on
-    // signal × axis.  Bounds chosen from §1705 typical ranges.
+
     const bool isGyr     = (f.signal == SpcSignal::Gyr);
     const bool isNorm    = (f.axis   == SpcAxis::Normxyz);
     const bool isAbs     = (f.axis   == SpcAxis::XAbs || f.axis == SpcAxis::YAbs
                                                      || f.axis == SpcAxis::ZAbs);
     const bool isSigned  = !isNorm && !isAbs;
     const bool isFreq    = (f.band != SpcBand::None);
-    // Window length cap for SUM bound — ~300 samples (5 s @ 60 Hz, §1761).
+
     constexpr float kWin = 300.0f;
     float scalarMax = 0.0f;
     if (isGyr) {
-        scalarMax = isFreq ? 25.0f : 15.0f;     // rad/s
+        scalarMax = isFreq ? 25.0f : 15.0f;
     } else {
-        scalarMax = isFreq ? 50.0f : 40.0f;     // m/s²
+        scalarMax = isFreq ? 50.0f : 40.0f;
         if (f.stat == SpcStat::Max && isNorm) scalarMax = 80.0f;
     }
     float lo = isSigned ? -scalarMax : 0.0f;
@@ -326,7 +263,6 @@ std::pair<float, float> deriveRange(const SpcFeatureSpec& f) {
     return {lo, hi};
 }
 
-// Build the parsed-spec table from kFeatureNames once at static init.
 std::array<SpcFeatureSpec, kSpcFeatureCount> buildSpecs() {
     std::array<SpcFeatureSpec, kSpcFeatureCount> out{};
     extern const std::array<const char*, kSpcFeatureCount> kFeatureNames;
@@ -352,7 +288,7 @@ std::array<float, kSpcFeatureCount> buildRangeHi() {
     return out;
 }
 
-}  // anonymous namespace
+}
 
 const std::array<const char*, kSpcFeatureCount> kFeatureNames = {{
     "calibrationAcc_Normxyz_freqBand4.5To10.0mean",
@@ -676,5 +612,4 @@ const std::array<SpcFeatureSpec, kSpcFeatureCount> kFeatureSpecs = buildSpecs();
 const std::array<float,          kSpcFeatureCount> kFeatureMin   = buildRangeLo();
 const std::array<float,          kSpcFeatureCount> kFeatureMax   = buildRangeHi();
 
-
-}  // namespace fox::body
+}

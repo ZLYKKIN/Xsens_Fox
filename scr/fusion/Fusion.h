@@ -1,14 +1,6 @@
-/**
- * @file Fusion.h
- * @author Seb Madgwick
- * @brief Main header file for the Fusion library.
- */
 
 #ifndef FUSION_H
 #define FUSION_H
-
-//------------------------------------------------------------------------------
-// Includes
 
 #ifdef __cplusplus
 extern "C" {
@@ -26,6 +18,3 @@ extern "C" {
 #endif
 
 #endif
-
-//------------------------------------------------------------------------------
-// End of file
