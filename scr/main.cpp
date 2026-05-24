@@ -9248,7 +9248,9 @@ void MocapViewport::mouseMoveEvent (QMouseEvent* e)
     const QPoint d = e->pos() - m_lastMouse;
     m_lastMouse = e->pos();
     if (e->buttons() & Qt::LeftButton) {
-        m_yaw   += d.x() * 0.4f;
+        m_yaw    = std::fmod(m_yaw + d.x() * 0.4f, 360.0f);
+        if (m_yaw <    0.0f) m_yaw += 360.0f;
+        if (m_yaw >= 360.0f) m_yaw -= 360.0f;
         m_pitch  = std::max(-85.0f, std::min(85.0f, m_pitch + d.y() * 0.3f));
         update();
     }
