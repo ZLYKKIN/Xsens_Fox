@@ -1522,7 +1522,10 @@ public:
             for (int retry = 0; retry < kMaxLambdaRetries; ++retry) {
 
                 Eigen::MatrixXd JtWJ_damped = JtWJ;
-                for (int k = 0; k < DOF; ++k) JtWJ_damped(k, k) += m_lambda;
+                for (int k = 0; k < DOF; ++k) {
+                    const double dKK = std::max(1e-12, JtWJ(k, k));
+                    JtWJ_damped(k, k) += m_lambda * dKK;
+                }
 
                 Eigen::LDLT<Eigen::MatrixXd> ldlt(JtWJ_damped);
                 if (ldlt.info() != Eigen::Success) {
@@ -1574,7 +1577,10 @@ public:
 
         {
             Eigen::MatrixXd A = JtWJ;
-            for (int k = 0; k < DOF; ++k) A(k, k) += m_lambda;
+            for (int k = 0; k < DOF; ++k) {
+                const double dKK = std::max(1e-12, JtWJ(k, k));
+                A(k, k) += m_lambda * dKK;
+            }
             Eigen::LDLT<Eigen::MatrixXd> ldlt(A);
             if (ldlt.info() == Eigen::Success) {
 
