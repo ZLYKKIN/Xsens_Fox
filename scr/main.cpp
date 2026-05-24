@@ -1110,6 +1110,26 @@ public:
             };
             evalToe(17, 18);  // R foot/toe
             evalToe(21, 22);  // L foot/toe
+            // (L) Bi-articular leg coupling (§47.1 / c_legs = [0.9, 0.95]).
+            // Mirror the Jacobian-build branch for the LM accept/reject
+            // residual so the step is scored against the same target.
+            auto evalLegBi = [&](int upperLeg, int foot) {
+                const QVector3D phiHip = quat_log(
+                    quat_mult(o[upperLeg], o[0].conj()).normalized());
+                const double targetDorsiY =
+                    fb::kCLegs[0] * fb::kCLegs[1] * double(phiHip.y());
+                const QVector3D phiFoot = quat_log(
+                    quat_mult(o[foot], o[upperLeg].conj()).normalized());
+                const Quat dqTarget = quat_exp_rotvec(double(phiFoot.x()),
+                                                      targetDorsiY,
+                                                      double(phiFoot.z()));
+                const Quat targetFoot = quat_mult(dqTarget, o[upperLeg]).normalized();
+                const QVector3D r = quat_log(
+                    quat_mult(targetFoot, o[foot].conj()).normalized());
+                sum += r.length();
+            };
+            evalLegBi(15, 17);
+            evalLegBi(19, 21);
             return sum;
         };
 
@@ -1631,6 +1651,47 @@ public:
             };
             applyAnkle(16, 17, true);
             applyAnkle(20, 21, false);
+            // (L) Bi-articular leg coupling (§47.1 / §1006, c_legs = [0.9, 0.95]):
+            // the gastrocnemius / hamstring system means hip flexion and ankle
+            // dorsi-/plantarflexion are not independent — a deep hip flex
+            // forces a fraction of ankle dorsiflexion (and vice-versa).
+            // Spec form: target_ankle_dorsi = c_legs[0] · c_legs[1] · hip_flex_Y,
+            // applied as a soft constraint on the foot's Y-axis residual.
+            auto applyLegBi = [&](int upperLeg, int foot, bool isRight) {
+                // Hip flex = orientation of upper leg relative to pelvis,
+                // Y component.  Ankle dorsi = foot orientation relative to
+                // upper leg, projected to Y.
+                const QVector3D phiHip = quat_log(
+                    quat_mult(orient[upperLeg], orient[0].conj()).normalized());
+                const double hipFlexY = double(phiHip.y());
+                const double targetDorsiY = fb::kCLegs[0] * fb::kCLegs[1] * hipFlexY;
+                // Build a target foot quaternion that has Y component =
+                // targetDorsiY relative to its parent upper leg (X, Z kept
+                // from the current foot orientation).
+                const QVector3D phiFoot = quat_log(
+                    quat_mult(orient[foot], orient[upperLeg].conj()).normalized());
+                const Quat dqTarget = quat_exp_rotvec(double(phiFoot.x()),
+                                                      targetDorsiY,
+                                                      double(phiFoot.z()));
+                const Quat targetFoot = quat_mult(dqTarget, orient[upperLeg]).normalized();
+                const QVector3D r = quat_log(
+                    quat_mult(targetFoot, orient[foot].conj()).normalized());
+                // Lax weight — c_legs is a soft anatomical hint, not a hard
+                // constraint; sd ≈ 0.05 rad (~3°) gives w_leg ≈ 400.
+                const double sdLegBi = 0.05;
+                const double w_leg = 1.0 / (sdLegBi * sdLegBi);
+                const int rowF = foot * 3;
+                for (int k = 0; k < 3; ++k) {
+                    JtWJ(rowF + k, rowF + k) += w_leg;
+                    JtWr(rowF + k)           -= w_leg *
+                        (k == 0 ? r.x() : k == 1 ? r.y() : r.z());
+                }
+                residSum += r.length();
+                ++residN;
+                (void)isRight;
+            };
+            applyLegBi(15, 17, true);  // R upper leg / R foot
+            applyLegBi(19, 21, false); // L upper leg / L foot
             // (K) Toe MTP rocker (§28.4 / §48.2, c_toes).
             auto applyToe = [&](int footSeg, int toeSeg, bool isRight) {
                 const QVector3D phiT = quat_log(quat_mult(orient[toeSeg],
@@ -2309,6 +2370,12 @@ void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
            << "° w=" << d.toeWeightR
            << "   L: mtp=" << d.toeMtpLDeg
            << "° w=" << d.toeWeightL << "\n";
+        // §47.1 — bi-articular leg coupling (hip flex ↔ ankle dorsi via
+        // c_legs[0]·c_legs[1] = 0.9 × 0.95 = 0.855 transmission).
+        ss << "[coupling-wls leg-bi] c_legs=["
+           << fb::kCLegs[0] << ", " << fb::kCLegs[1]
+           << "]  effective gain=" << (fb::kCLegs[0] * fb::kCLegs[1])
+           << " (hipFlexY · gain → target ankle dorsi Y)\n";
         ss << std::setprecision(4);
     }
 
