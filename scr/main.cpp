@@ -2134,12 +2134,15 @@ void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
             std::cout << "[bio §45.1] c_spine=["
                       << fb::kCSpine[0] << ", " << fb::kCSpine[1] << ", "
                       << fb::kCSpine[2] << ", " << fb::kCSpine[3] << ", "
-                      << fb::kCSpine[4] << " (axial), "
+                      << fb::kCSpine[4] << " (spineNeck.cNeck), "
                       << fb::kCSpine[5] << ", " << fb::kCSpine[6] << ", "
                       << fb::kCSpine[7] << ", " << fb::kCSpine[8]
                       << "]  (Pelvis→T8 distribution + cervical chain)\n";
             std::cout << "[bio §45.3] c_pelvis=[" << fb::kCPelvis[0]
-                      << " (frac), " << fb::kCPelvis[1] << "° (ramp scale)]\n";
+                      << " (frac), " << fb::kCPelvis[1] << "° (ramp scale), "
+                      << fb::kCPelvis[2] << " (lat tilt penalty)]\n";
+            std::cout << "[bio §316.6] c_femoropelvic=" << fb::kCFemoropelvic
+                      << " (anti-pelvic-tilt on hip flexion)\n";
             std::cout << "[bio §46.1] c_arms=[" << fb::kCArms[0]
                       << " (X), " << fb::kCArms[1] << " (Y), "
                       << fb::kCArms[2]
