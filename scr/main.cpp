@@ -6471,12 +6471,13 @@ struct PlacementClassifier {
 };
 
 struct PlacementReport {
-    bool        haveModel = false;
-    bool        haveData  = false;
-    int         verified  = 0;
-    int         total     = 0;
+    bool        haveModel            = false;
+    bool        haveData             = false;
+    int         verified             = 0;
+    int         total                = 0;
     QStringList mismatches;
-    float       avgMaxP   = 0.0f;
+    float       avgMaxP              = 0.0f;
+    bool        suitUncertaintyAlarm = false;
 };
 
 static PlacementReport analyzePlacement(
@@ -6507,10 +6508,17 @@ static PlacementReport analyzePlacement(
 
     std::array<std::array<float, fox::body::kSpcClassCount>,
                fox::body::kSpcClassCount> cost{};
-    for (int r = 0; r < row; ++r) {
-        for (int c = 0; c < fox::body::kSpcClassCount; ++c) {
-            const float p = std::max(probs[r][c], 1e-6f);
-            cost[r][c] = -std::log(p);
+    constexpr float kPhantomCost = 1.0e6f;
+    for (int r = 0; r < int(fox::body::kSpcClassCount); ++r) {
+        if (r < row) {
+            for (int c = 0; c < fox::body::kSpcClassCount; ++c) {
+                const float p = std::max(probs[r][c], 1e-6f);
+                cost[r][c] = -std::log(p);
+            }
+        } else {
+            for (int c = 0; c < fox::body::kSpcClassCount; ++c) {
+                cost[r][c] = kPhantomCost;
+            }
         }
     }
     auto assign = hungarian17(cost);
@@ -6534,7 +6542,7 @@ static PlacementReport analyzePlacement(
 
         if (assignedClass == expectedClass) {
             ++rep.verified;
-        } else if (maxP > 0.4f) {
+        } else if (maxP >= 0.5f) {
             rep.mismatches << QString("%1→%2 (p=%3)")
                                 .arg(QString::fromUtf8(kSegmentNames[seg]))
                                 .arg(QString::fromUtf8(
@@ -6544,6 +6552,14 @@ static PlacementReport analyzePlacement(
         ++rep.total;
     }
     rep.avgMaxP = (row > 0) ? sumMax / float(row) : 0.0f;
+
+    float suitUncertainty = 0.0f;
+    for (int r = 0; r < row; ++r) {
+        const float maxP = *std::max_element(probs[r].begin(), probs[r].end());
+        suitUncertainty += (1.0f - maxP);
+    }
+    rep.suitUncertaintyAlarm = suitUncertainty > 4.0f;
+
     return rep;
 }
 
