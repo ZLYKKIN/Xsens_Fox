@@ -490,9 +490,11 @@ public:
             const double aLowThresh =
                 fb::constants::kGravityMs2 + fb::kContact.impactTh / 8.0;
             const double f_lowFreq   = (aNorm < aLowThresh) ? 1.0 : 0.0;
+            constexpr double kZuptStillOmegaRad = 0.3 * fb::constants::kDeg2Rad;
             const double f_lowOmega  = (std::abs(double(w.x())) +
                                         std::abs(double(w.y())) +
-                                        std::abs(double(w.z())) < 1.0) ? 1.0 : 0.0;
+                                        std::abs(double(w.z()))
+                                        < kZuptStillOmegaRad) ? 1.0 : 0.0;
 
             const double vNorm = std::sqrt(double(v_world.x()) * double(v_world.x()) +
                                            double(v_world.y()) * double(v_world.y()) +
