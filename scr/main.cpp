@@ -5298,6 +5298,14 @@ bool MocapReceiver::saveCalibration(const QString& path) const
         out << "[" << q.w << "," << q.x << "," << q.y << "," << q.z << "]";
         if (i + 1 < kXsensSegmentCount) out << ",";
     }
+    out << "],\n";
+    out << "  \"segGainActive\": "
+        << (m_impl->segGainActive ? "true" : "false") << ",\n";
+    out << "  \"segGain\": [";
+    for (int i = 0; i < kXsensSegmentCount; ++i) {
+        out << m_impl->segGain[i];
+        if (i + 1 < kXsensSegmentCount) out << ",";
+    }
     out << "]\n";
     out << "}\n";
     return file.error() == QFile::NoError;
@@ -5366,6 +5374,15 @@ bool MocapReceiver::loadCalibration(const QString& path)
     setMagNormalisation(magMagn);
     setGyroBias(gyrBias);
     setS2sAlignment(s2s);
+    if (root.contains("segGain") && root.value("segGainActive").toBool(true)) {
+        const QJsonArray a = root["segGain"].toArray();
+        if (a.size() == kXsensSegmentCount) {
+            std::array<float, kXsensSegmentCount> sg{};
+            for (int i = 0; i < kXsensSegmentCount; ++i)
+                sg[i] = float(a[i].toDouble(1.0));
+            setSegmentGain(sg);
+        }
+    }
     return true;
 }
 
