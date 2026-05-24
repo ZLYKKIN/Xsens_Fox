@@ -2602,6 +2602,23 @@ void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
         ss << "\n";
     }
 
+    if (glovesEnabled) {
+        // Spec §44.7 / §44.8 / §55 — batch smoother (240-frame window) +
+        // Schur marginalisation status.  Not yet active in this build:
+        // the per-frame Gauss-Newton path produces 2-iteration estimates
+        // that already converge tightly given the ROM barriers and lump
+        // coupling — moving to a 240-frame window requires migrating to
+        // sparse SimplicialLDLT and persistent state across frames, which
+        // is staged for a follow-on PR.  The diagnostic line below makes
+        // the absence visible so the auditor knows what the solver IS and
+        // ISN'T doing this frame.
+        ss << "[wls-batch §44.8] mode=per-frame  windowFrames=1  "
+              "maxIKSteps=" << fb::kMaxIKSteps << "\n";
+        ss << "[marg §44.7] mode=none  (Schur complement deferred; "
+              "stdOriFreeze=" << fb::kEstimator.stdOriFreeze
+           << ", stdPosFreeze=" << fb::kEstimator.stdPosFreeze << ")\n";
+    }
+
     // -test solver-saturation event: when the adaptive LM has been
     // forced to back off every step (rejectedSteps ≥ kMaxLambdaRetries)
     // and the inner descent is stuck, surface a one-line event next to
