@@ -1884,9 +1884,9 @@ public:
 
             int updatedSegs = 0;
             for (const auto& ac : cr.active) {
-                if (ac.probability < 0.5) continue;
+                if (ac.probability < fb::kZuptTh.th3) continue;
                 if (ac.seg < 0 || ac.seg >= fb::kSegmentCount) continue;
-                const double dz = ctx.floorLevelZ - double(ac.p_world.z());
+                const double dz = ac.z_floor - double(ac.p_world.z());
                 if (std::abs(dz) < 1e-5) continue;
 
                 const double sdH = fb::stdHeightMeasFor(ac.seg);
@@ -1901,9 +1901,9 @@ public:
         if (ctx.segCenter) {
             bool rContact = false, lContact = false;
             for (const auto& ac : cr.active) {
-                if (ac.probability < 0.5) continue;
-                if (ac.seg == 17) rContact = true;
-                if (ac.seg == 21) lContact = true;
+                if (ac.probability < fb::kZuptTh.th3) continue;
+                if (ac.seg == fb::kSEG_RFoot || ac.seg == fb::kSEG_RToe) rContact = true;
+                if (ac.seg == fb::kSEG_LFoot || ac.seg == fb::kSEG_LToe) lContact = true;
             }
             const QVector3D pelvis = (*ctx.segCenter)[0];
             const double pelvisSpeed = m_havePrev
