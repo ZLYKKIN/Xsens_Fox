@@ -368,6 +368,7 @@ struct ActiveContact {
     QVector3D v_world;
     double    probability;
     double    sd_height;
+    double    z_floor;
 };
 
 class ContactDetector {
@@ -553,6 +554,17 @@ public:
             cands[nCand].v_world      = v_world;
             cands[nCand].probability  = P;
             cands[nCand].sd_height    = fb::stdHeightMeasFor(seg);
+
+            double zFloorSeg = in.floorLevelZ;
+            if (seg == fb::kSEG_RFoot || seg == fb::kSEG_RToe ||
+                seg == fb::kSEG_RLowerLeg) {
+                zFloorSeg = floorLevelRight();
+            } else if (seg == fb::kSEG_LFoot || seg == fb::kSEG_LToe ||
+                       seg == fb::kSEG_LLowerLeg) {
+                zFloorSeg = floorLevelLeft();
+            }
+            cands[nCand].z_floor      = zFloorSeg;
+
             probs[nCand]              = P;
             ++nCand;
         };
@@ -1248,7 +1260,7 @@ public:
                 if (ac.sd_height > 0.0) {
                     const double sigmaZ = std::max(1e-4, ac.sd_height);
                     const double w_h    = ac.probability / (sigmaZ * sigmaZ);
-                    const double r_z    = double(ac.p_world.z());
+                    const double r_z    = double(ac.p_world.z()) - ac.z_floor;
                     JtWJ(row + 2, row + 2) += w_h;
                     JtWr(row + 2)          += w_h * r_z;
                     residSum += std::abs(r_z);
