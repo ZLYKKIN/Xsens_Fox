@@ -1274,8 +1274,9 @@ public:
                                          fb::kJointLaxitySolver);
 
             {
-                const double frac  = fb::kCPelvis[0];
-                const double scale = fb::kCPelvis[1];
+                const double frac     = fb::kCPelvis[0];
+                const double scale    = fb::kCPelvis[1];
+                const double latPen   = fb::kCPelvis[2];
                 if (std::abs(frac) > 1e-6) {
                     const QVector3D phiPel = quat_log(orient[0]);
                     const double tiltDeg = std::abs(double(phiPel.y())) *
@@ -1284,7 +1285,8 @@ public:
                         ? std::min(1.0, tiltDeg / scale) : 1.0;
                     const double frac_eff = frac * ramp;
                     if (std::abs(frac_eff) > 1e-9) {
-                        const Quat dq = quat_exp_rotvec(0.0,
+                        const double latPel = double(phiPel.x());
+                        const Quat dq = quat_exp_rotvec(latPen * latPel,
                                                         frac_eff * double(phiPel.y()),
                                                         0.0);
                         const Quat targetL5 = quat_mult(dq, orient[0]).normalized();

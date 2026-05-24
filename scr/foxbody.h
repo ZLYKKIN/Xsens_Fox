@@ -343,7 +343,7 @@ inline constexpr std::array<double, 9> kCSpine = {
 
 inline constexpr double kCFemoropelvic = 0.12;
 
-inline constexpr std::array<double, 2> kCPelvis = { 0.35, 25.0 };
+inline constexpr std::array<double, 3> kCPelvis = { 0.35, 25.0, 0.30 };
 
 inline constexpr std::array<double, 3> kCArms = { 0.95, 0.95, 0.99 };
 
