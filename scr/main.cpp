@@ -2105,6 +2105,15 @@ public:
                                           rFootPitchZ, lFootPitchZ,
                                           rFootVelZ, lFootVelZ, dt);
 
+            const QVector3D rHeelW = (*ctx.segCenter)[fb::kSEG_RFoot]
+                + vec_rotate(QVector3D(-0.036f, 0.0f, -0.080f),
+                              orient[fb::kSEG_RFoot]);
+            const QVector3D lHeelW = (*ctx.segCenter)[fb::kSEG_LFoot]
+                + vec_rotate(QVector3D(-0.036f, 0.0f, -0.080f),
+                              orient[fb::kSEG_LFoot]);
+            const QVector3D comNow = fb::centerOfMass(*ctx.segCenter, nullptr);
+            m_locomotion.updateStepMetrics(rHeelW, lHeelW, comNow, dt);
+
             if (g_testFlag().load(std::memory_order_relaxed) &&
                 g_glovesFlag().load(std::memory_order_relaxed)) {
                 static int phaseTick = 0;
@@ -2116,10 +2125,12 @@ public:
                               << "s  L="
                               << LocomotionClassifier::gaitPhaseName(m_locomotion.gaitPhaseL())
                               << " durL=" << m_locomotion.gaitDurL() << "s  "
-                              << "rPitchZ=" << rFootPitchZ
-                              << " lPitchZ=" << lFootPitchZ
-                              << " rVz="     << rFootVelZ
-                              << " lVz="     << lFootVelZ << "\n";
+                              << "stepR=" << m_locomotion.lastStepLengthR()
+                              << "m hR=" << m_locomotion.lastStepHeightR() << "m "
+                              << "stepL=" << m_locomotion.lastStepLengthL()
+                              << "m hL=" << m_locomotion.lastStepHeightL() << "m "
+                              << "vertOsc=" << m_locomotion.vertCoMOscillationM() << "m"
+                              << "\n";
                     std::cout.flush();
                 }
             }
