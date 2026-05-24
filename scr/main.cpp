@@ -4326,7 +4326,7 @@ static void parseErgoHand(const float* degs20, bool isLeft,
     dg.baselineApplied = (effectivePtr == effective);
     for (int i = 0; i < 20; ++i) { dg.raw[i] = degs20[i]; dg.effective[i] = effectivePtr[i]; }
 
-    const Quat thumbPreRot(1.0, 0.0, 0.0, 0.0);
+    constexpr Quat kThumbBaseRot(1.0, 0.0, 0.0, 0.0);
 
     for (int f = 0; f < 5; ++f) {
         const float* d = effectivePtr + f * 4;
@@ -4341,12 +4341,11 @@ static void parseErgoHand(const float* degs20, bool isLeft,
         const double a1c     = std::clamp(a1, Lm[0].flexMin, Lm[0].flexMax);
         const double a2c     = std::clamp(a2, Lm[1].flexMin, Lm[1].flexMax);
         double a3c           = std::clamp(a3, Lm[2].flexMin, Lm[2].flexMax);
+        (void)a3;
 
         if (f > 0) {
             const double a3Linked = (2.0 / 3.0) * a2c;
-            const double linkedC  = std::clamp(a3Linked, Lm[2].flexMin, Lm[2].flexMax);
-            a3c = std::min(a3c, linkedC) > 0.0 ? std::max(a3c, linkedC) : a3c;
-            a3c = linkedC;
+            a3c = std::clamp(a3Linked, Lm[2].flexMin, Lm[2].flexMax);
         }
 
         {
@@ -4370,7 +4369,7 @@ static void parseErgoHand(const float* degs20, bool isLeft,
         Quat q1 = axisAngleQuat(flexAxis, a2c);
         Quat q2 = axisAngleQuat(flexAxis, a3c);
 
-        Quat worldQ = (f == 0) ? thumbPreRot : Quat(1, 0, 0, 0);
+        Quat worldQ = (f == 0) ? kThumbBaseRot : Quat(1, 0, 0, 0);
         QVector3D p = kFingerBaseOffset[f];
         const int baseIdx = f * 4;
 
