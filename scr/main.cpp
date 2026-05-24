@@ -1865,17 +1865,43 @@ public:
     double          flightFracSec() const { return m_flightSec; }
     double          contactFracSec() const { return m_contactSec; }
     double          pelvisTiltDeg() const { return m_pelvisTiltDeg; }
+    double          t8TiltDeg()     const { return m_t8TiltDeg; }
+    // §42.2 — combined pelvis/T8 posture enum, exposed for diagnostics.
+    enum class BodyPosture : std::uint8_t {
+        Vertical = 0,   // both pelvis and T8 vertical (standing / walking)
+        TiltedForward,  // pelvis vertical, T8 tilted (lifting / reaching)
+        Bent,           // pelvis tilted, T8 tilted same direction (deep bend)
+        Sitting,        // pelvis tilted, T8 vertical (sitting upright)
+        Inverted        // T8 inverted (acrobatic / handstand)
+    };
+    BodyPosture posture() const { return m_posture; }
+
+    static const char* postureName(BodyPosture p) {
+        switch (p) {
+            case BodyPosture::Vertical:       return "vertical";
+            case BodyPosture::TiltedForward:  return "tiltedFwd";
+            case BodyPosture::Bent:           return "bent";
+            case BodyPosture::Sitting:        return "sitting";
+            case BodyPosture::Inverted:       return "inverted";
+        }
+        return "?";
+    }
 
     // Spec §28.2 / §29.2 — pose classifier driven by the body-mounted
     // angle thresholds the engine actually ships:
     //   inclTh_pelvis = [40°, 140°] (kContact.secondaryPelvisT8RejMinDeg /
     //   MaxDeg) splits the pelvis-vertical-vs-up angle into vertical
-    //   (< 40°), tilted (40°..140°) and inverted (> 140°) bands.  Combined
-    //   with the foot-contact pattern this gives the five pose classes
-    //   (Standing / Walking / Running / Sitting / Acrobatic).
+    //   (< 40°), tilted (40°..140°) and inverted (> 140°) bands.
+    //   inclTh_t8     = [40°, 140°] — same thresholds applied to the T8
+    //   tilt independently (§42.2).  Combined with the foot-contact
+    //   pattern this gives the five pose classes plus a body-posture
+    //   enum exposed via posture() that disambiguates "lifting forward"
+    //   (pelvis vertical, T8 bent) from "sitting upright" (pelvis tilted,
+    //   T8 still vertical).
     LocomotionPhase update(double pelvisZ, double pelvisSpeed,
                             bool rFootContact, bool lFootContact,
                             double pelvisTiltDeg,
+                            double t8TiltDeg,
                             double sitHeightM,
                             double dt) {
         // Accumulate flight (no foot contact) vs contact time.
@@ -1902,12 +1928,21 @@ public:
             m_altSec += dt;
         }
         m_pelvisTiltDeg = pelvisTiltDeg;
+        m_t8TiltDeg     = t8TiltDeg;
 
-        // §28.2 inclTh_pelvis band thresholds (40° / 140°).
+        // §28.2 / §42.2 — band thresholds (40° / 140°) for BOTH pelvis and T8.
         const double inclMin = fox::body::kContact.secondaryPelvisT8RejMinDeg;
         const double inclMax = fox::body::kContact.secondaryPelvisT8RejMaxDeg;
-        const bool tiltVertical = (pelvisTiltDeg < inclMin);          // upright
-        const bool tiltInverted = (pelvisTiltDeg > inclMax);          // upside-down
+        const bool pelvisVertical = (pelvisTiltDeg < inclMin);
+        const bool t8Vertical     = (t8TiltDeg     < inclMin);
+        const bool t8Inverted     = (t8TiltDeg     > inclMax);
+
+        // §42.2 — body-posture enum derived from independent pelvis/T8 tilts.
+        if (t8Inverted)                       m_posture = BodyPosture::Inverted;
+        else if (pelvisVertical && t8Vertical) m_posture = BodyPosture::Vertical;
+        else if (pelvisVertical && !t8Vertical) m_posture = BodyPosture::TiltedForward;
+        else if (!pelvisVertical && t8Vertical) m_posture = BodyPosture::Sitting;
+        else                                    m_posture = BodyPosture::Bent;
 
         // §28.2 sittingZ — pelvis below pelvisSitHeightM means thighs
         // roughly horizontal (typical sitting / squatting).  The reference
@@ -1917,17 +1952,20 @@ public:
         const bool   lowPelvis = pelvisZ < sittingZ;
 
         // §29.2 branch order: clear discriminators first (inverted /
-        // running / sitting), then walking vs standing.
-        if (tiltInverted)                         m_phase = LocomotionPhase::Acrobatic;
+        // running / sitting), then walking vs standing.  T8 inverted now
+        // also flips Acrobatic.
+        if (t8Inverted)                            m_phase = LocomotionPhase::Acrobatic;
         else if (m_flightSec > 0.12 && pelvisSpeed > 2.0)
                                                    m_phase = LocomotionPhase::Running;
-        else if (!tiltVertical && lowPelvis)      m_phase = LocomotionPhase::Sitting;
-        else if (rFootContact && lFootContact && pelvisSpeed < 0.3 && tiltVertical)
+        else if (m_posture == BodyPosture::Sitting && lowPelvis)
+                                                   m_phase = LocomotionPhase::Sitting;
+        else if (!pelvisVertical && lowPelvis)     m_phase = LocomotionPhase::Sitting;
+        else if (rFootContact && lFootContact && pelvisSpeed < 0.3 && pelvisVertical)
                                                    m_phase = LocomotionPhase::Standing;
         else if (anyContact && (rFootContact != lFootContact) &&
                  m_altSec < fox::body::kContact.firstWinWidth)
                                                    m_phase = LocomotionPhase::Walking;
-        else if (!anyContact && pelvisTiltDeg > 90.0)
+        else if (!anyContact && (pelvisTiltDeg > 90.0 || t8TiltDeg > 90.0))
                                                    m_phase = LocomotionPhase::Acrobatic;
         // Otherwise keep the previous phase (transient).
         return m_phase;
@@ -1940,6 +1978,8 @@ private:
     double          m_altSec          = 0.0;
     int             m_lastContactSide = 0;
     double          m_pelvisTiltDeg   = 0.0;
+    double          m_t8TiltDeg       = 0.0;
+    BodyPosture     m_posture         = BodyPosture::Vertical;
 };
 
 // ----------------------------------------------------------------------------
@@ -2089,13 +2129,19 @@ public:
             const double pelvisTiltDeg =
                 std::acos(std::clamp(double(pelvisZAxisWorld.z()), -1.0, 1.0)) *
                 fb::constants::kRad2Deg;
+            // §42.2 — independent T8 tilt for sit/lift disambiguation.
+            const QVector3D t8ZAxisWorld = vec_rotate(QVector3D(0, 0, 1), orient[4]);
+            const double t8TiltDeg =
+                std::acos(std::clamp(double(t8ZAxisWorld.z()), -1.0, 1.0)) *
+                fb::constants::kRad2Deg;
             // Reference sit height = pelvis-sit for 1.75 m subject; any
             // per-actor scaling is handled by ContactDetector's floor
             // estimate and the WLS.  Sit height ≈ ankle + shin (thigh
             // horizontal in the spec §28.2 sitting model).
             const double sitH = fb::pelvisSitHeightM(1.75);
             m_locomotion.update(double(pelvis.z()), pelvisSpeed,
-                                rContact, lContact, pelvisTiltDeg,
+                                rContact, lContact,
+                                pelvisTiltDeg, t8TiltDeg,
                                 sitH, dt);
         }
 
@@ -2286,13 +2332,9 @@ void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
     ss << "[loco] phase=" << locomotionPhaseName(loco.phase())
        << "  flight=" << std::setprecision(2) << loco.flightFracSec() << "s"
        << "  contact=" << loco.contactFracSec() << "s"
-       << "  tilt=" << std::setprecision(1) << loco.pelvisTiltDeg() << "°"
-       << " (band: " << (loco.pelvisTiltDeg() < fb::kContact.secondaryPelvisT8RejMinDeg
-                            ? "vertical"
-                            : loco.pelvisTiltDeg() > fb::kContact.secondaryPelvisT8RejMaxDeg
-                                ? "inverted"
-                                : "tilted")
-       << ")"
+       << "  pelvis_tilt=" << std::setprecision(1) << loco.pelvisTiltDeg() << "°"
+       << "  t8_tilt=" << loco.t8TiltDeg() << "°"
+       << "  posture=" << LocomotionClassifier::postureName(loco.posture())
        << std::setprecision(4) << "\n";
 
     // §1127 / §12.1 — body centre of mass.  Only useful when segCenters
