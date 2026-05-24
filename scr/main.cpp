@@ -239,6 +239,9 @@ namespace fb = fox::body;
 constexpr double kR2D = fb::constants::kRad2Deg;
 constexpr double kD2R = fb::constants::kDeg2Rad;
 
+inline std::atomic<bool>& g_testFlag();
+inline std::atomic<bool>& g_glovesFlag();
+
 inline double sigmoid(double x) {
     if (x >  40.0) return 1.0;
     if (x < -40.0) return 0.0;
@@ -576,14 +579,98 @@ public:
 
         if (!out.active.empty()) {
             double zMean = 0.0;
-            for (const auto& c : out.active) zMean += double(c.p_world.z());
+            double zR = 1e9, zL = 1e9;
+            bool   haveR = false, haveL = false;
+            for (const auto& c : out.active) {
+                zMean += double(c.p_world.z());
+                if (c.seg == fb::kSEG_RFoot || c.seg == fb::kSEG_RToe) {
+                    if (double(c.p_world.z()) < zR) { zR = double(c.p_world.z()); haveR = true; }
+                }
+                if (c.seg == fb::kSEG_LFoot || c.seg == fb::kSEG_LToe) {
+                    if (double(c.p_world.z()) < zL) { zL = double(c.p_world.z()); haveL = true; }
+                }
+            }
             zMean /= double(out.active.size());
+
+            const double newest = zMean;
+            m_zRing[m_zRingHead] = newest;
+            m_zRingHead = (m_zRingHead + 1) % kZRingCap;
+            if (m_zRingCount < kZRingCap) ++m_zRingCount;
+
+            const double bin = std::max(1e-4, fb::kEstimator.multiLevelZhcClipVert);
+            std::array<int, 16>     binCnt{};
+            std::array<double, 16>  binSum{};
+            int nBins = 0;
+            for (int i = 0; i < m_zRingCount; ++i) {
+                const double z = m_zRing[i];
+                int idx = -1;
+                for (int b = 0; b < nBins; ++b) {
+                    if (std::abs(binSum[b] / std::max(1, binCnt[b]) - z) < bin) { idx = b; break; }
+                }
+                if (idx < 0 && nBins < 16) { idx = nBins++; binCnt[idx] = 0; binSum[idx] = 0.0; }
+                if (idx >= 0) { binCnt[idx]++; binSum[idx] += z; }
+            }
+            std::array<double, 4> top4{};
+            std::array<int,    4> top4Cnt{};
+            int kept = 0;
+            for (int b = 0; b < nBins; ++b) {
+                if (kept < 4 || binCnt[b] > top4Cnt[0]) {
+                    int slot = kept < 4 ? kept : 0;
+                    int minS = 0;
+                    if (kept >= 4) {
+                        for (int s = 1; s < 4; ++s) if (top4Cnt[s] < top4Cnt[minS]) minS = s;
+                        slot = minS;
+                    }
+                    top4[slot]    = binSum[b] / std::max(1, binCnt[b]);
+                    top4Cnt[slot] = binCnt[b];
+                    if (kept < 4) ++kept;
+                }
+            }
+
+            auto pickLevel = [&](double zMeas) -> double {
+                if (kept == 0) return zMeas;
+                double best = top4[0];
+                double bestD = std::abs(zMeas - top4[0]);
+                for (int s = 1; s < kept; ++s) {
+                    const double d = std::abs(zMeas - top4[s]);
+                    if (d < bestD) { bestD = d; best = top4[s]; }
+                }
+                return best;
+            };
+
+            const double aMix = std::exp(-in.dt / 1.0);
+            if (haveR) {
+                const double zRl = pickLevel(zR);
+                if (m_floorRInited) m_floorR = aMix * m_floorR + (1.0 - aMix) * zRl;
+                else { m_floorR = zRl; m_floorRInited = true; }
+            }
+            if (haveL) {
+                const double zLl = pickLevel(zL);
+                if (m_floorLInited) m_floorL = aMix * m_floorL + (1.0 - aMix) * zLl;
+                else { m_floorL = zLl; m_floorLInited = true; }
+            }
+
             if (!m_floorInited) {
-                m_floorEstimate = zMean;
+                m_floorEstimate = pickLevel(zMean);
                 m_floorInited = true;
             } else {
-                const double a = std::exp(-in.dt / 1.0);
-                m_floorEstimate = a * m_floorEstimate + (1.0 - a) * zMean;
+                m_floorEstimate = aMix * m_floorEstimate + (1.0 - aMix) * pickLevel(zMean);
+            }
+
+            if (g_testFlag().load(std::memory_order_relaxed) &&
+                g_glovesFlag().load(std::memory_order_relaxed)) {
+                static int floorTick = 0;
+                if ((++floorTick % 60) == 0) {
+                    std::cout << std::fixed << std::setprecision(4);
+                    std::cout << "[floor] mean=" << m_floorEstimate
+                              << " R=" << (m_floorRInited ? m_floorR : 0.0)
+                              << " L=" << (m_floorLInited ? m_floorL : 0.0)
+                              << " levels=" << kept << " {";
+                    for (int s = 0; s < kept; ++s)
+                        std::cout << (s ? ", " : "") << top4[s] << "/" << top4Cnt[s];
+                    std::cout << "}\n";
+                    std::cout.flush();
+                }
             }
         }
         return out;
@@ -591,13 +678,24 @@ public:
 
     QVector3D centerOfPressure() const { return m_lastCoP; }
     double    floorLevel() const { return m_floorInited ? m_floorEstimate : 0.0; }
+    double    floorLevelRight() const { return m_floorRInited ? m_floorR : floorLevel(); }
+    double    floorLevelLeft()  const { return m_floorLInited ? m_floorL : floorLevel(); }
 
 private:
+    static constexpr int kZRingCap = 240;
     std::deque<double> m_accPeakWindow;
     double             m_prevAccNorm   = 0.0;
     double             m_floorEstimate = 0.0;
     bool               m_floorInited   = false;
     QVector3D          m_lastCoP       = {0, 0, 0};
+
+    std::array<double, kZRingCap> m_zRing{};
+    int                m_zRingHead    = 0;
+    int                m_zRingCount   = 0;
+    double             m_floorR       = 0.0;
+    double             m_floorL       = 0.0;
+    bool               m_floorRInited = false;
+    bool               m_floorLInited = false;
 };
 
 class BodyPoseSolver {
@@ -1497,11 +1595,44 @@ inline const char* locomotionPhaseName(LocomotionPhase p) {
 
 class LocomotionClassifier {
 public:
+    enum class GaitPhase : std::uint8_t {
+        NA = 0,
+        HS,
+        FF,
+        MS,
+        HO,
+        TO,
+        SW
+    };
+    static const char* gaitPhaseName(GaitPhase p) {
+        switch (p) {
+            case GaitPhase::HS: return "HS";
+            case GaitPhase::FF: return "FF";
+            case GaitPhase::MS: return "MS";
+            case GaitPhase::HO: return "HO";
+            case GaitPhase::TO: return "TO";
+            case GaitPhase::SW: return "SW";
+            default:            return "NA";
+        }
+    }
+    GaitPhase gaitPhaseR() const { return m_phaseR; }
+    GaitPhase gaitPhaseL() const { return m_phaseL; }
+    double    gaitDurR()   const { return m_durR; }
+    double    gaitDurL()   const { return m_durL; }
+
     LocomotionPhase phase() const { return m_phase; }
     double          flightFracSec() const { return m_flightSec; }
     double          contactFracSec() const { return m_contactSec; }
     double          pelvisTiltDeg() const { return m_pelvisTiltDeg; }
     double          t8TiltDeg()     const { return m_t8TiltDeg; }
+
+    void updateGaitPhases(bool rContact, bool lContact,
+                          double rFootPitchZ, double lFootPitchZ,
+                          double rFootVelZ,   double lFootVelZ,
+                          double dt) {
+        m_phaseR = classifyLeg(m_phaseR, rContact, rFootPitchZ, rFootVelZ, dt, m_durR);
+        m_phaseL = classifyLeg(m_phaseL, lContact, lFootPitchZ, lFootVelZ, dt, m_durL);
+    }
 
     enum class BodyPosture : std::uint8_t {
         Vertical = 0,
@@ -1584,6 +1715,29 @@ public:
     }
 
 private:
+    static GaitPhase classifyLeg(GaitPhase cur, bool contact,
+                                 double pitchZ, double footVelZ,
+                                 double dt, double& dur)
+    {
+        constexpr double kPitchHeel  = -0.10;
+        constexpr double kPitchToe   = +0.10;
+        constexpr double kVelGround  = 0.05;
+        constexpr double kVelFlight  = 0.30;
+        constexpr double kFfHold     = 0.05;
+        constexpr double kMsHold     = 0.15;
+        dur += dt;
+        const double absV = std::abs(footVelZ);
+        if (!contact && absV > kVelFlight) { dur = 0.0; return GaitPhase::SW; }
+        if (contact && pitchZ < kPitchHeel && absV < kVelGround) { dur = 0.0; return GaitPhase::HS; }
+        if (contact && std::abs(pitchZ) < kPitchToe && absV < kVelGround && dur > kMsHold)
+            return GaitPhase::MS;
+        if (contact && std::abs(pitchZ) < kPitchToe && absV < kVelGround && dur > kFfHold)
+            return GaitPhase::FF;
+        if (contact && pitchZ > kPitchToe) return GaitPhase::HO;
+        if (!contact && cur == GaitPhase::HO) { dur = 0.0; return GaitPhase::TO; }
+        return cur;
+    }
+
     LocomotionPhase m_phase           = LocomotionPhase::Unknown;
     double          m_flightSec       = 0.0;
     double          m_contactSec      = 0.0;
@@ -1592,6 +1746,11 @@ private:
     double          m_pelvisTiltDeg   = 0.0;
     double          m_t8TiltDeg       = 0.0;
     BodyPosture     m_posture         = BodyPosture::Vertical;
+
+    GaitPhase       m_phaseR          = GaitPhase::NA;
+    GaitPhase       m_phaseL          = GaitPhase::NA;
+    double          m_durR            = 0.0;
+    double          m_durL            = 0.0;
 };
 
 class PoseRefiner {
@@ -1603,6 +1762,11 @@ public:
         m_prevSegCenter.fill(QVector3D(0, 0, 0));
         m_havePrev = false;
         m_lastT    = 0.0;
+        m_lastCoM       = QVector3D(0, 0, 0);
+        m_prevCoM       = QVector3D(0, 0, 0);
+        m_lastCoMVel    = QVector3D(0, 0, 0);
+        m_lastBodyMass  = 0.0;
+        m_haveCoMPrev   = false;
     }
 
     void predictSkin(int seg, double dt) { m_skin.predict(seg, dt); }
@@ -1712,6 +1876,68 @@ public:
                                 rContact, lContact,
                                 pelvisTiltDeg, t8TiltDeg,
                                 sitH, dt);
+
+            const QVector3D rFootZAxisWorld =
+                vec_rotate(QVector3D(0, 0, 1), orient[fb::kSEG_RFoot]);
+            const QVector3D lFootZAxisWorld =
+                vec_rotate(QVector3D(0, 0, 1), orient[fb::kSEG_LFoot]);
+            const double rFootPitchZ = double(rFootZAxisWorld.z());
+            const double lFootPitchZ = double(lFootZAxisWorld.z());
+            const double rFootVelZ = m_havePrev
+                ? double(velocity[fb::kSEG_RFoot].z()) : 0.0;
+            const double lFootVelZ = m_havePrev
+                ? double(velocity[fb::kSEG_LFoot].z()) : 0.0;
+            m_locomotion.updateGaitPhases(rContact, lContact,
+                                          rFootPitchZ, lFootPitchZ,
+                                          rFootVelZ, lFootVelZ, dt);
+
+            if (g_testFlag().load(std::memory_order_relaxed) &&
+                g_glovesFlag().load(std::memory_order_relaxed)) {
+                static int phaseTick = 0;
+                if ((++phaseTick % 30) == 0) {
+                    std::cout << "[phase] R="
+                              << LocomotionClassifier::gaitPhaseName(m_locomotion.gaitPhaseR())
+                              << " durR=" << std::fixed << std::setprecision(3)
+                              << m_locomotion.gaitDurR()
+                              << "s  L="
+                              << LocomotionClassifier::gaitPhaseName(m_locomotion.gaitPhaseL())
+                              << " durL=" << m_locomotion.gaitDurL() << "s  "
+                              << "rPitchZ=" << rFootPitchZ
+                              << " lPitchZ=" << lFootPitchZ
+                              << " rVz="     << rFootVelZ
+                              << " lVz="     << lFootVelZ << "\n";
+                    std::cout.flush();
+                }
+            }
+
+            double bodyMass = 0.0;
+            const QVector3D com = fb::centerOfMass(*ctx.segCenter, &bodyMass);
+            if (m_haveCoMPrev) {
+                m_lastCoMVel = (com - m_prevCoM) / float(std::max(1e-4, dt));
+            } else {
+                m_lastCoMVel = QVector3D(0, 0, 0);
+            }
+            m_prevCoM      = com;
+            m_lastCoM      = com;
+            m_lastBodyMass = bodyMass;
+            m_haveCoMPrev  = true;
+
+            if (g_testFlag().load(std::memory_order_relaxed) &&
+                g_glovesFlag().load(std::memory_order_relaxed)) {
+                static int comTick = 0;
+                if ((++comTick % 60) == 0) {
+                    std::cout << std::fixed << std::setprecision(4);
+                    std::cout << "[com] pos=(" << m_lastCoM.x() << ","
+                              << m_lastCoM.y() << "," << m_lastCoM.z()
+                              << ") m  vel=(" << m_lastCoMVel.x() << ","
+                              << m_lastCoMVel.y() << "," << m_lastCoMVel.z()
+                              << ") m/s  M_norm=" << m_lastBodyMass
+                              << "  contactR=" << (rContact ? 1 : 0)
+                              << "  contactL=" << (lContact ? 1 : 0)
+                              << "\n";
+                    std::cout.flush();
+                }
+            }
         }
 
         if (ctx.segCenter) {
@@ -1726,6 +1952,9 @@ public:
     const ContactDetector&      contacts() const { return m_contacts; }
     const LocomotionClassifier& locomotion() const { return m_locomotion; }
     int                         lastSkinPosUpdates() const { return m_lastSkinPosUpdates; }
+    QVector3D                   lastCoM()     const { return m_lastCoM; }
+    QVector3D                   lastCoMVel()  const { return m_lastCoMVel; }
+    double                      lastBodyMass() const { return m_lastBodyMass; }
 
 private:
     SkinArtifactState     m_skin;
@@ -1737,7 +1966,12 @@ private:
     bool   m_havePrev = false;
     double m_lastT    = 0.0;
 
-    int    m_lastSkinPosUpdates = 0;
+    int       m_lastSkinPosUpdates = 0;
+    QVector3D m_lastCoM       {0, 0, 0};
+    QVector3D m_prevCoM       {0, 0, 0};
+    QVector3D m_lastCoMVel    {0, 0, 0};
+    double    m_lastBodyMass  = 0.0;
+    bool      m_haveCoMPrev   = false;
 };
 
 inline PoseRefiner&  g_refiner() {
@@ -2124,6 +2358,28 @@ void SkeletonXsens::buildDefaultAngles()
             E(0,  P/2, 0), E(0,  P/2, 0), E(0, 0, 0), E(0, 0, 0),
         };
     }
+
+    if (fox::pose_solver::g_testFlag().load(std::memory_order_relaxed) &&
+        fox::pose_solver::g_glovesFlag().load(std::memory_order_relaxed)) {
+        namespace fb = fox::body;
+        const auto& ref = (m_pose == "tpose") ? fb::kRefQuatT : fb::kRefQuatN;
+        std::cout << "[def-ang] pose=" << m_pose
+                  << "  per-segment coord transform vs anatomic reference\n";
+        for (int s = 0; s < kXsensSegmentCount; ++s) {
+            const Quat& qC = m_defAng[s];
+            const Quat& qR = ref[s];
+            std::cout << "  s=" << std::setw(2) << s
+                      << " " << std::left << std::setw(14) << kSegmentNames[s] << std::right
+                      << std::fixed << std::setprecision(4)
+                      << "  defAng=(" << qC.w << "," << qC.x << ","
+                                       << qC.y << "," << qC.z << ")"
+                      << "  ref=("    << qR.w << "," << qR.x << ","
+                                       << qR.y << "," << qR.z << ")"
+                      << "  refAngle=" << std::setprecision(2)
+                      << quat_angle_deg(qR) << "°\n";
+        }
+        std::cout.flush();
+    }
 }
 
 void SkeletonXsens::buildLengths(const ActorConfig& actor)
@@ -2301,14 +2557,48 @@ void SkeletonXsens::buildLengths(const ActorConfig& actor)
 std::array<Quat, kXsensSegmentCountWithDummies>
 SkeletonXsens::addDummySegments(const std::array<Quat, kXsensSegmentCount>& s) const
 {
+    namespace fb = fox::body;
 
     const double P = M_PI;
     const Quat t8yaw     = yaw_only_quat(s[SEG_T8]);
     const Quat pelvisYaw = yaw_only_quat(s[SEG_Pelvis]);
-    const Quat rScap = quat_mult(t8yaw,     euler_to_quat(0, -P/2, -P/2, "XYZ"));
-    const Quat lScap = quat_mult(t8yaw,     euler_to_quat(0, -P/2,  P/2, "XYZ"));
-    const Quat rHip  = quat_mult(pelvisYaw, euler_to_quat(0,  0,   -P/2, "XYZ"));
-    const Quat lHip  = quat_mult(pelvisYaw, euler_to_quat(0,  0,    P/2, "XYZ"));
+    const Quat rScapBase = quat_mult(t8yaw,     euler_to_quat(0, -P/2, -P/2, "XYZ"));
+    const Quat lScapBase = quat_mult(t8yaw,     euler_to_quat(0, -P/2,  P/2, "XYZ"));
+    const Quat rHipBase  = quat_mult(pelvisYaw, euler_to_quat(0,  0,   -P/2, "XYZ"));
+    const Quat lHipBase  = quat_mult(pelvisYaw, euler_to_quat(0,  0,    P/2, "XYZ"));
+
+    auto canon = [](const Quat& q) {
+        return (q.w < 0.0) ? Quat(-q.w, -q.x, -q.y, -q.z) : q;
+    };
+    auto scapHumOffset = [&](const Quat& qUpperArm) -> Quat {
+        const Quat qRel = canon(quat_mult(qUpperArm, s[SEG_T8].conj()).normalized());
+        const QVector3D phi = quat_log(qRel);
+        constexpr double kR2D = fb::constants::kRad2Deg;
+        auto ramp = [](double aDeg, double cLow) {
+            const double lo = fb::kScapHumThetaLowDeg;
+            const double hi = fb::kScapHumThetaHighDeg;
+            const double a = std::abs(aDeg);
+            if (a <= lo) return cLow;
+            if (a >= hi) return fb::kCArms[2];
+            return cLow + (a - lo) / (hi - lo) * (fb::kCArms[2] - cLow);
+        };
+        const double cX = ramp(double(phi.x()) * kR2D, fb::kCArms[0]);
+        const double cY = ramp(double(phi.y()) * kR2D, fb::kCArms[1]);
+        return quat_exp_rotvec(cX * double(phi.x()),
+                               cY * double(phi.y()), 0.0);
+    };
+    auto femoropelvicOffset = [&](const Quat& qUpperLeg) -> Quat {
+        const Quat qRel = canon(quat_mult(qUpperLeg, s[SEG_Pelvis].conj()).normalized());
+        const QVector3D phi = quat_log(qRel);
+        const double cR = fb::kCSpine[4];
+        return quat_exp_rotvec(cR * double(phi.x()),
+                               cR * double(phi.y()), 0.0);
+    };
+
+    const Quat rScap = quat_mult(scapHumOffset(s[SEG_RUpperArm]), rScapBase).normalized();
+    const Quat lScap = quat_mult(scapHumOffset(s[SEG_LUpperArm]), lScapBase).normalized();
+    const Quat rHip  = quat_mult(femoropelvicOffset(s[SEG_RUpperLeg]), rHipBase).normalized();
+    const Quat lHip  = quat_mult(femoropelvicOffset(s[SEG_LUpperLeg]), lHipBase).normalized();
 
     std::array<Quat, kXsensSegmentCountWithDummies> out{};
     int k = 0;
@@ -2321,6 +2611,23 @@ SkeletonXsens::addDummySegments(const std::array<Quat, kXsensSegmentCount>& s) c
     for (int i = 15; i < 19; ++i) out[k++] = s[i];
     out[k++] = lHip;
     for (int i = 19; i < 23; ++i) out[k++] = s[i];
+
+    if (fox::pose_solver::g_testFlag().load(std::memory_order_relaxed) &&
+        fox::pose_solver::g_glovesFlag().load(std::memory_order_relaxed)) {
+        static int dummyTick = 0;
+        if ((++dummyTick % 120) == 0) {
+            std::cout << std::fixed << std::setprecision(2);
+            std::cout << "[dummy-seg] rScap_off="
+                      << quat_angle_deg(quat_mult(rScap, rScapBase.conj()))
+                      << "°  lScap_off="
+                      << quat_angle_deg(quat_mult(lScap, lScapBase.conj()))
+                      << "°  rHip_off="
+                      << quat_angle_deg(quat_mult(rHip,  rHipBase.conj()))
+                      << "°  lHip_off="
+                      << quat_angle_deg(quat_mult(lHip,  lHipBase.conj())) << "°\n";
+            std::cout.flush();
+        }
+    }
     return out;
 }
 
@@ -2633,17 +2940,10 @@ QVector3D LocomotionSolver::update(const Quat& qR,
 
         double rawYawRate = 0.0;
         if (m_haveLast) {
-            const Quat qDP = quat_mult(qPelvis, m_prevPelvisQ.inv()).normalized();
-            const double twN2 = qDP.w*qDP.w + qDP.z*qDP.z;
-            if (twN2 > 1e-12) {
-                const double twN = std::sqrt(twN2);
-                const double tw_w = qDP.w / twN;
-                const double tw_z = qDP.z / twN;
-                const double sw   = std::min(1.0, std::abs(tw_w));
-                const double sgn  = (tw_z >= 0.0) ? 1.0 : -1.0;
-                const double yawDelta = 2.0 * sgn * std::acos(sw);
-                rawYawRate = yawDelta / dt;
-            }
+            const Quat qDP    = quat_mult(qPelvis, m_prevPelvisQ.inv()).normalized();
+            const Quat dqYaw  = fox::yaw_only_quat(qDP);
+            const double yawDelta = 2.0 * std::atan2(dqYaw.z, dqYaw.w);
+            rawYawRate = yawDelta / dt;
         }
 
         const double kAlpha = a030;
@@ -3536,6 +3836,14 @@ struct MocapReceiver::Impl {
 
     std::array<float, kXsensSegmentCount> segGain{};
     bool                                  segGainActive = false;
+
+    std::array<QVector3D, kXsensSegmentCount> segLinAccBody{};
+    std::array<QVector3D, kXsensSegmentCount> segLinVelWorld{};
+
+    std::array<float, kXsensSegmentCount> segAccErrEma{};
+    std::array<float, kXsensSegmentCount> segMagErrEma{};
+    std::array<float, kXsensSegmentCount> segAccErrPeak{};
+    double                                 segAccDumpAccumSec = 0.0;
 
     std::atomic<uint32_t> calGen{0};
 
@@ -4926,13 +5234,22 @@ void MocapReceiver::run()
                     FusionAhrsUpdateNoMagnetometer(&ahrs, g, a, float(dt));
                 }
 
-                if (I.test) {
-
+                {
                     const FusionAhrsInternalStates st = FusionAhrsGetInternalStates(&ahrs);
-                    I.dbgDynAccRej[targetSeg] = st.accelerationRecoveryTrigger * 90.0f;
-                    I.dbgDynMagRej[targetSeg] = st.magneticError;
-                    I.dbgAccErr[targetSeg]    = st.accelerationError;
-                    I.dbgGyrFused[targetSeg]  = QVector3D(g.axis.x, g.axis.y, g.axis.z);
+                    if (I.test) {
+                        I.dbgDynAccRej[targetSeg] = st.accelerationRecoveryTrigger * 90.0f;
+                        I.dbgDynMagRej[targetSeg] = st.magneticError;
+                        I.dbgAccErr[targetSeg]    = st.accelerationError;
+                        I.dbgGyrFused[targetSeg]  = QVector3D(g.axis.x, g.axis.y, g.axis.z);
+                    }
+                    const float dtF = float(dt);
+                    const float aEma = float(1.0 - std::exp(-double(dtF) / 5.0));
+                    I.segAccErrEma[targetSeg] = (1.0f - aEma) * I.segAccErrEma[targetSeg]
+                                              + aEma * st.accelerationError;
+                    I.segMagErrEma[targetSeg] = (1.0f - aEma) * I.segMagErrEma[targetSeg]
+                                              + aEma * st.magneticError;
+                    if (st.accelerationError > I.segAccErrPeak[targetSeg])
+                        I.segAccErrPeak[targetSeg] = st.accelerationError;
                 }
 
                 const FusionQuaternion fq = FusionAhrsGetQuaternion(&ahrs);
@@ -4946,6 +5263,23 @@ void MocapReceiver::run()
 
                     I.fusionReady[targetSeg] = false;
                 }
+
+                if (haveFused) {
+                    const FusionVector linG = FusionAhrsGetLinearAcceleration(&ahrs);
+                    const QVector3D linBody(linG.axis.x * 9.812687f,
+                                             linG.axis.y * 9.812687f,
+                                             linG.axis.z * 9.812687f);
+                    const QVector3D linWorld = vec_rotate(linBody, fusedQuat);
+                    I.segLinAccBody[targetSeg] = linBody;
+                    if (ahrs.zruActiveThisFrame) {
+                        I.segLinVelWorld[targetSeg] = QVector3D(0, 0, 0);
+                    } else {
+                        const double decay = std::exp(-dt / 2.0);
+                        I.segLinVelWorld[targetSeg] =
+                            I.segLinVelWorld[targetSeg] * float(decay)
+                            + linWorld * float(dt);
+                    }
+                }
             }
 
             if (targetSeg >= 0 && targetSeg < kXsensSegmentCount) {
@@ -4954,6 +5288,8 @@ void MocapReceiver::run()
                 else if (haveQuat)  staging.quat[targetSeg] = qo;
                 staging.segValid[targetSeg] = haveFused || haveQuat;
                 staging.segLastT[targetSeg] = monotonicSec();
+                staging.linAccBody[targetSeg]  = I.segLinAccBody[targetSeg];
+                staging.linVelWorld[targetSeg] = I.segLinVelWorld[targetSeg];
                 if (api.dataPacketContainsPacketCounter &&
                     api.dataPacketPacketCounter &&
                     api.dataPacketContainsPacketCounter(pkt))
@@ -5084,6 +5420,25 @@ void MocapReceiver::run()
                    << "\n";
                 std::cout << ss.str() << std::flush;
                 I.lastAhrsDump = now;
+            }
+
+            if (fox::pose_solver::g_testFlag().load(std::memory_order_relaxed) &&
+                fox::pose_solver::g_glovesFlag().load(std::memory_order_relaxed) &&
+                (now - I.segAccDumpAccumSec) > 2.0) {
+                I.segAccDumpAccumSec = now;
+                std::ostringstream ss;
+                ss << std::fixed << std::setprecision(3);
+                ss << "[acc-seg] per-segment KF residual (EMA τ=5s)\n";
+                for (int s = 0; s < kXsensSegmentCount; ++s) {
+                    if (!fox::body::kSensorPresent[s]) continue;
+                    ss << "  s=" << std::setw(2) << s
+                       << " " << std::left << std::setw(14) << kSegmentNames[s] << std::right
+                       << "  accErr=" << std::setw(6) << I.segAccErrEma[s] << " m/s²"
+                       << "  peak="   << std::setw(6) << I.segAccErrPeak[s] << " m/s²"
+                       << "  magErr=" << std::setw(6) << I.segMagErrEma[s] << " (norm)\n";
+                    I.segAccErrPeak[s] = 0.0f;
+                }
+                std::cout << ss.str() << std::flush;
             }
 
             if (I.test && (now - I.lastDump) > 1.5) {

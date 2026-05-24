@@ -105,6 +105,9 @@ struct SuitPose {
     std::array<QVector3D, kXsensSegmentCount> gyrSensor{};
     std::array<QVector3D, kXsensSegmentCount> magSensor{};
 
+    std::array<QVector3D, kXsensSegmentCount> linAccBody{};
+    std::array<QVector3D, kXsensSegmentCount> linVelWorld{};
+
     QVector3D pelvisPos{0, 0, 0};
 
     std::array<double, kXsensSegmentCount> segLastT{};
