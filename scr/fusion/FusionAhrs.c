@@ -342,12 +342,15 @@ static void Predict(FusionAhrs *ahrs, FusionVector gyroDegS, float dt) {
             ahrs->P[i * N15 + j] = s;
         }
 
-    const float qO = ahrs->sigmaGyr * ahrs->sigmaGyr;
+    const float fs = (ahrs->settings.sampleRateHz > 1.0f)
+                      ? ahrs->settings.sampleRateHz : 240.0f;
+    const float n_gyr_psd = ahrs->sigmaGyr / sqrtf(fs);
+    const float qO = n_gyr_psd * n_gyr_psd;
     const float qG = ahrs->sBg * ahrs->sBg;
     const float qA = KFA_S_QV_ACC_LP * KFA_S_QV_ACC_LP;
     const float qM = KFA_S_QV_MAG_RW * KFA_S_QV_MAG_RW;
     const float qV = KFA_S_QV_ACC_LP * KFA_S_QV_ACC_LP;
-    for (int i = 0; i < 3; ++i) ahrs->P[(0  + i) * N15 + (0  + i)] += qO * dt * dt;
+    for (int i = 0; i < 3; ++i) ahrs->P[(0  + i) * N15 + (0  + i)] += qO * dt;
     for (int i = 0; i < 3; ++i) ahrs->P[(3  + i) * N15 + (3  + i)] += qG * dt;
     for (int i = 0; i < 3; ++i) ahrs->P[(6  + i) * N15 + (6  + i)] += qA * dt;
     for (int i = 0; i < 3; ++i) ahrs->P[(9  + i) * N15 + (9  + i)] += qM * dt;
