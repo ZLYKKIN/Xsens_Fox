@@ -1294,6 +1294,7 @@ struct CliArgs {
     bool gloves = false;
     bool wristConstraint = false;
     SuitType suit = SuitType::Awinda;
+    QString language;
 };
 CliArgs parseCli(int argc, char** argv);
 

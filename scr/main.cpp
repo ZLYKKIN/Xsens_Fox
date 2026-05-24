@@ -13436,6 +13436,9 @@ CliArgs parseCli(int argc, char** argv)
         else if (a == "--wrist-constraint")         out.wristConstraint = true;
         else if (a == "--link"   || a == "-link")   { out.suit = SuitType::Link;   suitExplicit = true; }
         else if (a == "--awinda" || a == "-awinda") { out.suit = SuitType::Awinda; suitExplicit = true; }
+        else if ((a == "--lang" || a == "--language") && i + 1 < argc) {
+            out.language = QString::fromUtf8(argv[++i]).toLower();
+        }
         else if (a == "-h" || a == "--help") {
             std::cout <<
                 "Fox Mocap — MVN-style Xsens client (Link 240 Hz / Awinda 60 Hz)\n"
@@ -13452,7 +13455,8 @@ CliArgs parseCli(int argc, char** argv)
                 "  --link     Xsens Link suit — 240 Hz update rate (default for -test).\n"
                 "  --awinda   Xsens Awinda suit — 60 Hz update rate (default).\n"
                 "             --link/--awinda override -test's default in ANY order,\n"
-                "             so `-test -gloves -awinda` runs the 60 Hz Awinda suit.\n";
+                "             so `-test -gloves -awinda` runs the 60 Hz Awinda suit.\n"
+                "  --lang RU|EN  Force UI language without touching the user preference.\n";
             std::exit(0);
         }
     }
@@ -13500,6 +13504,9 @@ int main(int argc, char** argv)
     const CliArgs cli = parseCli(argc, argv);
     fox::pose_solver::g_testFlag().store(cli.test);
     fox::pose_solver::g_glovesFlag().store(cli.gloves);
+
+    if (cli.language == "ru") Lang::instance().setLanguage(Lang::RU);
+    else if (cli.language == "en") Lang::instance().setLanguage(Lang::EN);
     if (cli.test) {
         attachTestOutput();
 
