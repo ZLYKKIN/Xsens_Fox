@@ -5281,6 +5281,13 @@ void MocapReceiver::run()
                 stf = api.dataPacketSTF(pkt); haveStf = true;
             }
 
+            double sensorTempC = std::numeric_limits<double>::quiet_NaN();
+            if (api.dataPacketContainsTemperature && api.dataPacketTemperature &&
+                api.dataPacketContainsTemperature(pkt)) {
+                sensorTempC = api.dataPacketTemperature(pkt);
+            }
+            (void)sensorTempC;
+
             double dt = 1.0 / I.freqHz;
             if (haveStf && targetSeg >= 0 && targetSeg < kXsensSegmentCount) {
                 if (I.haveLastStf[targetSeg]) {
