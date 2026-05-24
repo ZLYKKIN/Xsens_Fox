@@ -487,7 +487,9 @@ public:
 
             const double lowZ        = std::max(0.0,
                 fb::kDLevelDefault - (double(p_world.z()) - in.floorLevelZ));
-            const double f_lowFreq   = (aNorm < 12.0) ? 1.0 : 0.0;
+            const double aLowThresh =
+                fb::constants::kGravityMs2 + fb::kContact.impactTh / 8.0;
+            const double f_lowFreq   = (aNorm < aLowThresh) ? 1.0 : 0.0;
             const double f_lowOmega  = (std::abs(double(w.x())) +
                                         std::abs(double(w.y())) +
                                         std::abs(double(w.z())) < 1.0) ? 1.0 : 0.0;
