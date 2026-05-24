@@ -138,6 +138,12 @@ struct ActorConfig {
     double shoulderWidthCm = 0.0;
     double trunkLengthCm   = 0.0;
 
+    double upperArmCm      = 0.0;
+    double forearmCm       = 0.0;
+    double handCm          = 0.0;
+    double thighCm         = 0.0;
+    double shankCm         = 0.0;
+
     fox::body::Gender gender = fox::body::GenderMale;
 
     bool   useGloves       = false;
@@ -445,6 +451,12 @@ public:
     const std::array<int, kXsensSegmentCountWithDummies>& endPts()   const { return m_end; }
     const std::array<float, kXsensSegmentCountWithDummies>& lengths() const { return m_len; }
 
+    // Default per-limb bone lengths in cm for the given gender/height, computed with
+    // the same arm/leg scaling buildLengths() uses. Order: {upperArm, forearm, hand,
+    // thigh, shank}. Single source of truth for UI pre-fill so an unedited field
+    // reproduces the default skeleton exactly.
+    static std::array<double, 5> defaultLimbCm(fox::body::Gender gender, double heightCm);
+
     const std::array<QVector3D, kXsensSegmentCountWithDummies>& localOffsets() const { return m_localOffset; }
     const std::array<Quat,  kXsensSegmentCount>& defaultSegAngles() const { return m_defAng; }
 
@@ -692,19 +704,27 @@ private:
     class QLabel*          m_dimsTitle = nullptr;
     class QLabel*          m_lblHeight = nullptr;
     class QLabel*          m_lblFoot   = nullptr;
-    class QLabel*          m_lblArm    = nullptr;
-    class QLabel*          m_lblLeg    = nullptr;
 
     class QLabel*          m_lblHip    = nullptr;
     class QLabel*          m_lblShoulder = nullptr;
     class QLabel*          m_lblTrunk  = nullptr;
     class QDoubleSpinBox*  m_height = nullptr;
     class QDoubleSpinBox*  m_foot   = nullptr;
-    class QDoubleSpinBox*  m_arm    = nullptr;
-    class QDoubleSpinBox*  m_leg    = nullptr;
     class QDoubleSpinBox*  m_hip      = nullptr;
     class QDoubleSpinBox*  m_shoulder = nullptr;
     class QDoubleSpinBox*  m_trunk    = nullptr;
+    class QComboBox*       m_gender   = nullptr;
+    class QLabel*          m_lblGender = nullptr;
+    class QDoubleSpinBox*  m_upperArm = nullptr;
+    class QDoubleSpinBox*  m_forearm  = nullptr;
+    class QDoubleSpinBox*  m_hand     = nullptr;
+    class QDoubleSpinBox*  m_thigh    = nullptr;
+    class QDoubleSpinBox*  m_shank    = nullptr;
+    class QLabel*          m_lblUpperArm = nullptr;
+    class QLabel*          m_lblForearm  = nullptr;
+    class QLabel*          m_lblHand     = nullptr;
+    class QLabel*          m_lblThigh    = nullptr;
+    class QLabel*          m_lblShank    = nullptr;
     class QLabel*          m_dimsHint  = nullptr;
 
     class QLabel*        m_calibTitle = nullptr;
