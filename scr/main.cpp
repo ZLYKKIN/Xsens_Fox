@@ -2400,10 +2400,8 @@ void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
                       << " (anti-pelvic-tilt on hip flexion)\n";
             std::cout << "[bio §46.1] c_arms=[" << fb::kCArms[0]
                       << " (X), " << fb::kCArms[1] << " (Y), "
-                      << fb::kCArms[2] << " (max), "
-                      << fb::kCArms[3] << ", " << fb::kCArms[4]
-                      << ", " << fb::kCArms[5]
-                      << "]  scapulo-humeral piecewise-linear\n";
+                      << fb::kCArms[2] << " (max)]"
+                      << "  scapulo-humeral piecewise-linear\n";
             std::cout << "[bio §47.1] c_knees=[" << fb::kCKnees[0]
                       << ", " << fb::kCKnees[1] << "]"
                       << "  screw-home max " << fb::kKneeScrewMaxDeg << "°\n";
