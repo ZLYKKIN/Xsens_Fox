@@ -4049,49 +4049,48 @@ struct FingerBaselineState {
 static FingerBaselineState g_fingerBaseline;
 
 static const double kFingerBoneLen[5][4] = {
-    { 0.045, 0.030, 0.025, 0.020 },
-    { 0.045, 0.040, 0.025, 0.020 },
-    { 0.045, 0.045, 0.028, 0.022 },
-    { 0.045, 0.040, 0.027, 0.022 },
-    { 0.045, 0.033, 0.021, 0.019 },
+    { 0.046, 0.031, 0.0,    0.025 },
+    { 0.068, 0.039, 0.022,  0.0156 },
+    { 0.064, 0.045, 0.026,  0.0166 },
+    { 0.058, 0.040, 0.025,  0.0156 },
+    { 0.053, 0.032, 0.018,  0.0124 },
 };
 
 static const QVector3D kFingerBaseOffset[5] = {
-    QVector3D(0.035f,  0.030f,  0.015f),
-    QVector3D(0.080f,  0.020f,  0.000f),
-    QVector3D(0.083f,  0.005f,  0.000f),
-    QVector3D(0.080f, -0.010f,  0.000f),
-    QVector3D(0.075f, -0.025f,  0.000f),
+    QVector3D(0.027f,  0.0274f,  0.000f),
+    QVector3D(0.080f,  0.0121f,  0.000f),
+    QVector3D(0.083f,  0.000f,   0.000f),
+    QVector3D(0.080f, -0.0121f,  0.000f),
+    QVector3D(0.075f, -0.0274f,  0.000f),
 };
 
-static const double kSpreadSign[5] = { +1.0, +0.5, 0.0, -0.5, -1.0 };
+static const double kSpreadSign[5] = { +1.0, +1.0, +1.0, +1.0, +1.0 };
 
 const FingerJointLimit kFingerLimits[5][3] = {
     {
-
-        { -M_PI * 0.40,  M_PI * 0.60,  -M_PI / 5.0,    M_PI * 0.65 },
-        { -M_PI / 10.0,  M_PI / 10.0,  -M_PI / 24.0,   M_PI * 0.60 },
-        {  0.0,          0.0,          -M_PI / 24.0,   M_PI * 0.40 }
+        { -M_PI / 18.0,  M_PI / 3.0,   -M_PI / 9.0,    M_PI * 5.0/18.0 },
+        { -M_PI / 36.0,  M_PI / 36.0,   0.0,           M_PI * 4.0/9.0  },
+        {  0.0,          0.0,           0.0,           M_PI * 0.50     }
     },
     {
-        { -M_PI / 9.0,   M_PI / 9.0,   -M_PI / 12.0,  M_PI * 0.50 },
-        {  0.0,          0.0,           0.0,          M_PI * 0.65 },
-        {  0.0,          0.0,           0.0,          M_PI / 3.0  }
+        { -M_PI / 9.0,   M_PI / 9.0,    0.0,           M_PI * 0.50 },
+        {  0.0,          0.0,           0.0,           M_PI * 11.0/18.0 },
+        {  0.0,          0.0,           0.0,           M_PI * 4.0/9.0   }
     },
     {
-        { -M_PI / 18.0,  M_PI / 18.0,  -M_PI / 12.0,  M_PI * 0.50 },
-        {  0.0,          0.0,           0.0,          M_PI * 0.65 },
-        {  0.0,          0.0,           0.0,          M_PI / 3.0  }
+        { -M_PI / 9.0,   M_PI / 9.0,    0.0,           M_PI * 0.50 },
+        {  0.0,          0.0,           0.0,           M_PI * 11.0/18.0 },
+        {  0.0,          0.0,           0.0,           M_PI * 4.0/9.0   }
     },
     {
-        { -M_PI / 9.0,   M_PI / 9.0,   -M_PI / 12.0,  M_PI * 0.50 },
-        {  0.0,          0.0,           0.0,          M_PI * 0.65 },
-        {  0.0,          0.0,           0.0,          M_PI / 3.0  }
+        { -M_PI / 9.0,   M_PI / 9.0,    0.0,           M_PI * 0.50 },
+        {  0.0,          0.0,           0.0,           M_PI * 11.0/18.0 },
+        {  0.0,          0.0,           0.0,           M_PI * 4.0/9.0   }
     },
     {
-        { -M_PI / 8.0,   M_PI / 8.0,   -M_PI / 12.0,  M_PI * 0.50 },
-        {  0.0,          0.0,           0.0,          M_PI * 0.65 },
-        {  0.0,          0.0,           0.0,          M_PI / 3.0  }
+        { -M_PI / 9.0,   M_PI / 9.0,    0.0,           M_PI * 0.50 },
+        {  0.0,          0.0,           0.0,           M_PI * 11.0/18.0 },
+        {  0.0,          0.0,           0.0,           M_PI * 4.0/9.0   }
     }
 };
 
@@ -4164,12 +4163,18 @@ static void parseErgoHand(const float* degs20, bool isLeft,
         const double a3     = d[3] * M_PI / 180.0;
 
         const auto& Lm = kFingerLimits[f];
-        (void)sideSign;
-        const double spreadEff = spread * kSpreadSign[f];
+        const double spreadEff = spread * sideSign * kSpreadSign[f];
         const double spreadC = std::clamp(spreadEff, Lm[0].spreadMin, Lm[0].spreadMax);
         const double a1c     = std::clamp(a1, Lm[0].flexMin, Lm[0].flexMax);
         const double a2c     = std::clamp(a2, Lm[1].flexMin, Lm[1].flexMax);
-        const double a3c     = std::clamp(a3, Lm[2].flexMin, Lm[2].flexMax);
+        double a3c           = std::clamp(a3, Lm[2].flexMin, Lm[2].flexMax);
+
+        if (f > 0) {
+            const double a3Linked = (2.0 / 3.0) * a2c;
+            const double linkedC  = std::clamp(a3Linked, Lm[2].flexMin, Lm[2].flexMax);
+            a3c = std::min(a3c, linkedC) > 0.0 ? std::max(a3c, linkedC) : a3c;
+            a3c = linkedC;
+        }
 
         {
             const double Kdeg = 180.0 / M_PI;
