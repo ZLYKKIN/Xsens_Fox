@@ -586,7 +586,7 @@ public:
         const int K = std::min(fb::kContact.maxDetectedContacts, int(nCand));
         for (int i = 0; i < K; ++i) {
             const ActiveContact& c = cands[order[size_t(i)]];
-            if (c.probability < 0.05) break;
+            if (c.probability < fb::kZuptTh.th1) break;
             out.active.push_back(c);
         }
 
@@ -1208,16 +1208,21 @@ public:
 
             d.zuptActiveRows = 0;
             for (const auto& ac : activeContacts) {
-                if (ac.probability <= 0.5) continue;
+                if (ac.probability < fb::kZuptTh.th3) continue;
                 if (ac.seg < 0 || ac.seg >= N) continue;
+
+                const double weightFactor =
+                    (ac.probability >= fb::kZuptTh.th4)
+                        ? fb::kZuptTh.weightTh4
+                        : fb::kZuptTh.weightTh3;
 
                 const QVector3D bias = m_aidingBias[ac.seg];
 
                 const double sigmaVxy = fb::kStdSamePosMeasXY;
-                const double sigmaVz  = fb::kStdSamePosMeasZ3d;
-                const double w_xy = ac.probability /
+                const double sigmaVz  = fb::kStdSamePosMeasXY;
+                const double w_xy = (weightFactor * ac.probability) /
                                     (sigmaVxy * sigmaVxy + 1e-12);
-                const double w_z  = ac.probability /
+                const double w_z  = (weightFactor * ac.probability) /
                                     (sigmaVz  * sigmaVz  + 1e-12);
                 const double r_v[3] = { double(ac.v_world.x()) - double(bias.x()),
                                         double(ac.v_world.y()) - double(bias.y()),

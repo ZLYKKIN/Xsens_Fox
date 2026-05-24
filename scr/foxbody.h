@@ -558,6 +558,29 @@ inline constexpr ContactParams kContact = {
     .secondWinWidthAfter       = 0.01,
 };
 
+struct ZuptThresholds {
+    double th1;
+    double th2;
+    double th3;
+    double th4;
+    double th2Toe;
+    double th3Toe;
+    double th1Knee;
+    double weightTh3;
+    double weightTh4;
+};
+inline constexpr ZuptThresholds kZuptTh = {
+    .th1       = 0.05,
+    .th2       = 0.25,
+    .th3       = 0.25,
+    .th4       = 0.40,
+    .th2Toe    = 0.20,
+    .th3Toe    = 0.20,
+    .th1Knee   = 0.08,
+    .weightTh3 = 0.7,
+    .weightTh4 = 1.0,
+};
+
 struct MagnetParams {
     double declinationDeg;
     double inclinationDeg;
