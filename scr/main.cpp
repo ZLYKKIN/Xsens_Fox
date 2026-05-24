@@ -10275,7 +10275,11 @@ RecordHud::RecordHud(QWidget* parent) : QWidget(parent)
 
 void RecordHud::updateStats(qint64 frames, double elapsedSec)
 {
-    m_lblFrames->setText(QString::number(frames) + "  " + Lang::t("rec_frames"));
+    const double fpsActual = (elapsedSec > 0.05)
+        ? double(frames) / elapsedSec
+        : 0.0;
+    m_lblFrames->setText(QString::number(frames) + "  " + Lang::t("rec_frames")
+                         + "  " + QString::asprintf("%.1f Hz", fpsActual));
     const int mm = int(elapsedSec) / 60;
     const int ss = int(elapsedSec) % 60;
     const int ds = int(elapsedSec * 10) % 10;
