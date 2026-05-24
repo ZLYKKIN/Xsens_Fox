@@ -850,6 +850,9 @@ public:
         double     toeMtpLDeg          = 0.0;
         double     toeWeightR          = 0.0;  // w_toe in {0..1} (heel→ball)
         double     toeWeightL          = 0.0;
+        // §18.5 / §61 — Takahashi-derived orientation uncertainty.
+        double     covMaxOriRad        = 0.0;  // largest per-segment σ_ori (rad)
+        int        covMaxOriSeg        = -1;   // which segment carries it
     };
 
     // Adaptive Levenberg-Marquardt damping bounds.  The lower bound matches
@@ -1110,6 +1113,26 @@ public:
             };
             evalToe(17, 18);  // R foot/toe
             evalToe(21, 22);  // L foot/toe
+            // (L) Bi-articular leg coupling (§47.1 / c_legs = [0.9, 0.95]).
+            // Mirror the Jacobian-build branch for the LM accept/reject
+            // residual so the step is scored against the same target.
+            auto evalLegBi = [&](int upperLeg, int foot) {
+                const QVector3D phiHip = quat_log(
+                    quat_mult(o[upperLeg], o[0].conj()).normalized());
+                const double targetDorsiY =
+                    fb::kCLegs[0] * fb::kCLegs[1] * double(phiHip.y());
+                const QVector3D phiFoot = quat_log(
+                    quat_mult(o[foot], o[upperLeg].conj()).normalized());
+                const Quat dqTarget = quat_exp_rotvec(double(phiFoot.x()),
+                                                      targetDorsiY,
+                                                      double(phiFoot.z()));
+                const Quat targetFoot = quat_mult(dqTarget, o[upperLeg]).normalized();
+                const QVector3D r = quat_log(
+                    quat_mult(targetFoot, o[foot].conj()).normalized());
+                sum += r.length();
+            };
+            evalLegBi(15, 17);
+            evalLegBi(19, 21);
             return sum;
         };
 
@@ -1631,6 +1654,47 @@ public:
             };
             applyAnkle(16, 17, true);
             applyAnkle(20, 21, false);
+            // (L) Bi-articular leg coupling (§47.1 / §1006, c_legs = [0.9, 0.95]):
+            // the gastrocnemius / hamstring system means hip flexion and ankle
+            // dorsi-/plantarflexion are not independent — a deep hip flex
+            // forces a fraction of ankle dorsiflexion (and vice-versa).
+            // Spec form: target_ankle_dorsi = c_legs[0] · c_legs[1] · hip_flex_Y,
+            // applied as a soft constraint on the foot's Y-axis residual.
+            auto applyLegBi = [&](int upperLeg, int foot, bool isRight) {
+                // Hip flex = orientation of upper leg relative to pelvis,
+                // Y component.  Ankle dorsi = foot orientation relative to
+                // upper leg, projected to Y.
+                const QVector3D phiHip = quat_log(
+                    quat_mult(orient[upperLeg], orient[0].conj()).normalized());
+                const double hipFlexY = double(phiHip.y());
+                const double targetDorsiY = fb::kCLegs[0] * fb::kCLegs[1] * hipFlexY;
+                // Build a target foot quaternion that has Y component =
+                // targetDorsiY relative to its parent upper leg (X, Z kept
+                // from the current foot orientation).
+                const QVector3D phiFoot = quat_log(
+                    quat_mult(orient[foot], orient[upperLeg].conj()).normalized());
+                const Quat dqTarget = quat_exp_rotvec(double(phiFoot.x()),
+                                                      targetDorsiY,
+                                                      double(phiFoot.z()));
+                const Quat targetFoot = quat_mult(dqTarget, orient[upperLeg]).normalized();
+                const QVector3D r = quat_log(
+                    quat_mult(targetFoot, orient[foot].conj()).normalized());
+                // Lax weight — c_legs is a soft anatomical hint, not a hard
+                // constraint; sd ≈ 0.05 rad (~3°) gives w_leg ≈ 400.
+                const double sdLegBi = 0.05;
+                const double w_leg = 1.0 / (sdLegBi * sdLegBi);
+                const int rowF = foot * 3;
+                for (int k = 0; k < 3; ++k) {
+                    JtWJ(rowF + k, rowF + k) += w_leg;
+                    JtWr(rowF + k)           -= w_leg *
+                        (k == 0 ? r.x() : k == 1 ? r.y() : r.z());
+                }
+                residSum += r.length();
+                ++residN;
+                (void)isRight;
+            };
+            applyLegBi(15, 17, true);  // R upper leg / R foot
+            applyLegBi(19, 21, false); // L upper leg / L foot
             // (K) Toe MTP rocker (§28.4 / §48.2, c_toes).
             auto applyToe = [&](int footSeg, int toeSeg, bool isRight) {
                 const QVector3D phiT = quat_log(quat_mult(orient[toeSeg],
@@ -1739,6 +1803,54 @@ public:
             ? (initialResidSum / double(initialResidN)) : 0.0;
         d.poseQualityBand = fb::poseQualityFromResidual(d.residualMeanPostRad);
         d.lambda          = m_lambda;
+
+        // Spec §18.5 / §61 — Takahashi-style diagonal of the covariance
+        // Σ = (JᵀWJ + λI)⁻¹.  For dense LDLT we compute it via N solves
+        // against the identity columns: Σ_ii = (LDLᵀ)⁻¹ e_i · e_i.  At
+        // N = 69 (23 segments × 3 DOF) this is sub-millisecond and far
+        // cheaper than the full inverse, while still exposing the per-
+        // segment uncertainty the spec uses for poseQuality and the
+        // [wls] cov_max diag line.
+        {
+            Eigen::MatrixXd A = JtWJ;
+            for (int k = 0; k < DOF; ++k) A(k, k) += m_lambda;
+            Eigen::LDLT<Eigen::MatrixXd> ldlt(A);
+            if (ldlt.info() == Eigen::Success) {
+                // Per-segment σ_ori² = trace of the 3×3 block for that segment.
+                double maxCov = 0.0;
+                int    maxSeg = -1;
+                Eigen::VectorXd ei = Eigen::VectorXd::Zero(DOF);
+                for (int i = 0; i < N; ++i) {
+                    double segCov = 0.0;
+                    for (int k = 0; k < 3; ++k) {
+                        ei.setZero();
+                        ei[i * 3 + k] = 1.0;
+                        Eigen::VectorXd sigCol = ldlt.solve(ei);
+                        segCov += sigCol[i * 3 + k];  // Σ_jj on the diagonal
+                    }
+                    // segCov = sum of 3 variance terms → mean σ²-per-axis.
+                    const double sigmaRad = std::sqrt(std::max(0.0, segCov / 3.0));
+                    if (sigmaRad > maxCov) { maxCov = sigmaRad; maxSeg = i; }
+                }
+                d.covMaxOriRad = maxCov;
+                d.covMaxOriSeg = maxSeg;
+                // Refine poseQualityBand by combining residual + Takahashi
+                // σ.  The residual-based band is the spec §44.12 fallback;
+                // when σ is meaningful (< 1 rad, i.e. solver converged) we
+                // use the tighter of the two thresholds so a quiet residual
+                // with high uncertainty correctly reads "poor" rather than
+                // "excellent".
+                if (maxCov > 0.0 && maxCov < 1.0) {
+                    const int sigmaBand =
+                        (maxCov < 0.005) ? fb::PoseQualityExcellent :
+                        (maxCov < 0.02 ) ? fb::PoseQualityGood      :
+                        (maxCov < 0.05 ) ? fb::PoseQualityAdequate  :
+                        (maxCov < 0.1  ) ? fb::PoseQualityPoor      :
+                                            fb::PoseQualityInvalid;
+                    d.poseQualityBand = std::min(d.poseQualityBand, sigmaBand);
+                }
+            }
+        }
         return d;
     }
 
@@ -1804,17 +1916,43 @@ public:
     double          flightFracSec() const { return m_flightSec; }
     double          contactFracSec() const { return m_contactSec; }
     double          pelvisTiltDeg() const { return m_pelvisTiltDeg; }
+    double          t8TiltDeg()     const { return m_t8TiltDeg; }
+    // §42.2 — combined pelvis/T8 posture enum, exposed for diagnostics.
+    enum class BodyPosture : std::uint8_t {
+        Vertical = 0,   // both pelvis and T8 vertical (standing / walking)
+        TiltedForward,  // pelvis vertical, T8 tilted (lifting / reaching)
+        Bent,           // pelvis tilted, T8 tilted same direction (deep bend)
+        Sitting,        // pelvis tilted, T8 vertical (sitting upright)
+        Inverted        // T8 inverted (acrobatic / handstand)
+    };
+    BodyPosture posture() const { return m_posture; }
+
+    static const char* postureName(BodyPosture p) {
+        switch (p) {
+            case BodyPosture::Vertical:       return "vertical";
+            case BodyPosture::TiltedForward:  return "tiltedFwd";
+            case BodyPosture::Bent:           return "bent";
+            case BodyPosture::Sitting:        return "sitting";
+            case BodyPosture::Inverted:       return "inverted";
+        }
+        return "?";
+    }
 
     // Spec §28.2 / §29.2 — pose classifier driven by the body-mounted
     // angle thresholds the engine actually ships:
     //   inclTh_pelvis = [40°, 140°] (kContact.secondaryPelvisT8RejMinDeg /
     //   MaxDeg) splits the pelvis-vertical-vs-up angle into vertical
-    //   (< 40°), tilted (40°..140°) and inverted (> 140°) bands.  Combined
-    //   with the foot-contact pattern this gives the five pose classes
-    //   (Standing / Walking / Running / Sitting / Acrobatic).
+    //   (< 40°), tilted (40°..140°) and inverted (> 140°) bands.
+    //   inclTh_t8     = [40°, 140°] — same thresholds applied to the T8
+    //   tilt independently (§42.2).  Combined with the foot-contact
+    //   pattern this gives the five pose classes plus a body-posture
+    //   enum exposed via posture() that disambiguates "lifting forward"
+    //   (pelvis vertical, T8 bent) from "sitting upright" (pelvis tilted,
+    //   T8 still vertical).
     LocomotionPhase update(double pelvisZ, double pelvisSpeed,
                             bool rFootContact, bool lFootContact,
                             double pelvisTiltDeg,
+                            double t8TiltDeg,
                             double sitHeightM,
                             double dt) {
         // Accumulate flight (no foot contact) vs contact time.
@@ -1841,12 +1979,21 @@ public:
             m_altSec += dt;
         }
         m_pelvisTiltDeg = pelvisTiltDeg;
+        m_t8TiltDeg     = t8TiltDeg;
 
-        // §28.2 inclTh_pelvis band thresholds (40° / 140°).
+        // §28.2 / §42.2 — band thresholds (40° / 140°) for BOTH pelvis and T8.
         const double inclMin = fox::body::kContact.secondaryPelvisT8RejMinDeg;
         const double inclMax = fox::body::kContact.secondaryPelvisT8RejMaxDeg;
-        const bool tiltVertical = (pelvisTiltDeg < inclMin);          // upright
-        const bool tiltInverted = (pelvisTiltDeg > inclMax);          // upside-down
+        const bool pelvisVertical = (pelvisTiltDeg < inclMin);
+        const bool t8Vertical     = (t8TiltDeg     < inclMin);
+        const bool t8Inverted     = (t8TiltDeg     > inclMax);
+
+        // §42.2 — body-posture enum derived from independent pelvis/T8 tilts.
+        if (t8Inverted)                       m_posture = BodyPosture::Inverted;
+        else if (pelvisVertical && t8Vertical) m_posture = BodyPosture::Vertical;
+        else if (pelvisVertical && !t8Vertical) m_posture = BodyPosture::TiltedForward;
+        else if (!pelvisVertical && t8Vertical) m_posture = BodyPosture::Sitting;
+        else                                    m_posture = BodyPosture::Bent;
 
         // §28.2 sittingZ — pelvis below pelvisSitHeightM means thighs
         // roughly horizontal (typical sitting / squatting).  The reference
@@ -1856,17 +2003,20 @@ public:
         const bool   lowPelvis = pelvisZ < sittingZ;
 
         // §29.2 branch order: clear discriminators first (inverted /
-        // running / sitting), then walking vs standing.
-        if (tiltInverted)                         m_phase = LocomotionPhase::Acrobatic;
+        // running / sitting), then walking vs standing.  T8 inverted now
+        // also flips Acrobatic.
+        if (t8Inverted)                            m_phase = LocomotionPhase::Acrobatic;
         else if (m_flightSec > 0.12 && pelvisSpeed > 2.0)
                                                    m_phase = LocomotionPhase::Running;
-        else if (!tiltVertical && lowPelvis)      m_phase = LocomotionPhase::Sitting;
-        else if (rFootContact && lFootContact && pelvisSpeed < 0.3 && tiltVertical)
+        else if (m_posture == BodyPosture::Sitting && lowPelvis)
+                                                   m_phase = LocomotionPhase::Sitting;
+        else if (!pelvisVertical && lowPelvis)     m_phase = LocomotionPhase::Sitting;
+        else if (rFootContact && lFootContact && pelvisSpeed < 0.3 && pelvisVertical)
                                                    m_phase = LocomotionPhase::Standing;
         else if (anyContact && (rFootContact != lFootContact) &&
                  m_altSec < fox::body::kContact.firstWinWidth)
                                                    m_phase = LocomotionPhase::Walking;
-        else if (!anyContact && pelvisTiltDeg > 90.0)
+        else if (!anyContact && (pelvisTiltDeg > 90.0 || t8TiltDeg > 90.0))
                                                    m_phase = LocomotionPhase::Acrobatic;
         // Otherwise keep the previous phase (transient).
         return m_phase;
@@ -1879,6 +2029,8 @@ private:
     double          m_altSec          = 0.0;
     int             m_lastContactSide = 0;
     double          m_pelvisTiltDeg   = 0.0;
+    double          m_t8TiltDeg       = 0.0;
+    BodyPosture     m_posture         = BodyPosture::Vertical;
 };
 
 // ----------------------------------------------------------------------------
@@ -1978,6 +2130,31 @@ public:
                 }
                 m_skin.predictPos(i, dt, accMag);
             }
+
+            // §50.5 / §50.6 — for every active contact with high probability
+            // the spec says the contact point should be ZUPT-clamped to the
+            // floor.  Any remaining vertical drift between the FK-derived
+            // contact-point Z and the floor estimate is interpreted as
+            // soft-tissue play: feed it into the per-segment GM position
+            // state via updatePos() so the rendered chain absorbs the slow
+            // drift rather than fighting it every frame.  Only contacts
+            // with probability > 0.5 contribute (avoids pumping noise from
+            // swing-phase candidates that briefly cross the floor plane).
+            int updatedSegs = 0;
+            for (const auto& ac : cr.active) {
+                if (ac.probability < 0.5) continue;
+                if (ac.seg < 0 || ac.seg >= fb::kSegmentCount) continue;
+                const double dz = ctx.floorLevelZ - double(ac.p_world.z());
+                if (std::abs(dz) < 1e-5) continue;
+                // R_pos = stdHeightMeas² (m²) — same weight the WLS row
+                // uses for the floor-z constraint.
+                const double sdH = fb::stdHeightMeasFor(ac.seg);
+                const double R_pos = sdH * sdH + 1e-9;
+                m_skin.updatePos(ac.seg,
+                                 QVector3D(0.0f, 0.0f, float(dz)), R_pos);
+                ++updatedSegs;
+            }
+            m_lastSkinPosUpdates = updatedSegs;
         }
 
         // §29.2 — drive the locomotion-phase classifier off the contact
@@ -2003,13 +2180,19 @@ public:
             const double pelvisTiltDeg =
                 std::acos(std::clamp(double(pelvisZAxisWorld.z()), -1.0, 1.0)) *
                 fb::constants::kRad2Deg;
+            // §42.2 — independent T8 tilt for sit/lift disambiguation.
+            const QVector3D t8ZAxisWorld = vec_rotate(QVector3D(0, 0, 1), orient[4]);
+            const double t8TiltDeg =
+                std::acos(std::clamp(double(t8ZAxisWorld.z()), -1.0, 1.0)) *
+                fb::constants::kRad2Deg;
             // Reference sit height = pelvis-sit for 1.75 m subject; any
             // per-actor scaling is handled by ContactDetector's floor
             // estimate and the WLS.  Sit height ≈ ankle + shin (thigh
             // horizontal in the spec §28.2 sitting model).
             const double sitH = fb::pelvisSitHeightM(1.75);
             m_locomotion.update(double(pelvis.z()), pelvisSpeed,
-                                rContact, lContact, pelvisTiltDeg,
+                                rContact, lContact,
+                                pelvisTiltDeg, t8TiltDeg,
                                 sitH, dt);
         }
 
@@ -2024,6 +2207,7 @@ public:
     const SkinArtifactState&    skin()     const { return m_skin; }
     const ContactDetector&      contacts() const { return m_contacts; }
     const LocomotionClassifier& locomotion() const { return m_locomotion; }
+    int                         lastSkinPosUpdates() const { return m_lastSkinPosUpdates; }
 
 private:
     SkinArtifactState     m_skin;
@@ -2034,6 +2218,9 @@ private:
     std::array<QVector3D, fb::kSegmentCount> m_prevSegCenter{};
     bool   m_havePrev = false;
     double m_lastT    = 0.0;
+    // §50.5 — number of segments that received an updatePos() call this
+    // frame (driven by the active contact set).  Visible in -test -gloves.
+    int    m_lastSkinPosUpdates = 0;
 };
 
 // Process-wide refiner instance shared between the network thread (skin
@@ -2156,6 +2343,86 @@ void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
                       << " s slow=" << fb::kSkin.tauSlowSec
                       << " s  σ_ori=" << fb::kSkin.sigmaOriDeg
                       << "° σ_pos=" << fb::kSkin.sigmaPosM << " m\n";
+            // Spec §13.2(д) — minimax rational form for stable direction
+            // normalisation in the Gauss-Newton inner loop (helper available
+            // via fox::solverRationalRatio / solverDirection).
+            std::cout << "[solver §13.2д] C₁=" << fox::kSolverC1
+                      << "  C₂=" << fox::kSolverC2
+                      << "  (C₂−C₁)=" << (fox::kSolverC2 - fox::kSolverC1)
+                      << "  (rational direction helper)\n";
+            // Spec §91/§92 — 19-joint hand model with per-joint anatomical
+            // type and ROM.  The glove pipeline today drives a simplified
+            // 5×4 chain; this dump documents the full spec model so the
+            // operator can audit which joint receives which clamp.
+            std::cout << "[finger-fk §91] 19-joint hand model (per joint: "
+                      "type, flex range, abd range):\n";
+            for (int j = 0; j < int(fb::kFingerRom.size()); ++j) {
+                const auto& r = fb::kFingerRom[j];
+                std::cout << "[finger-fk §91]  j=" << std::setw(2) << j
+                          << "  " << std::left << std::setw(10) << r.label
+                          << std::right
+                          << "  " << std::left << std::setw(18)
+                          << fb::fingerJointTypeName(fb::kFingerJointTypes[j])
+                          << std::right
+                          << "  flex=[" << std::setw(6) << std::fixed
+                          << std::setprecision(1) << r.flxMin << "°,"
+                          << std::setw(6) << r.flxMax << "°]"
+                          << "  abd=[" << std::setw(6) << r.abdMin << "°,"
+                          << std::setw(6) << r.abdMax << "°]"
+                          << "\n";
+            }
+            // Spec §92.1 — Carpus geometry (palm length 0.027 m, fingertip
+            // spread ±0.0274 m).  Left hand mirrors Y.
+            std::cout << "[finger-fk §92.1] Right Carpus 6 anchor points "
+                      "(m, hand-local):\n";
+            for (const auto& cp : fb::kRightCarpusPoints) {
+                std::cout << "[finger-fk §92.1]  " << std::left << std::setw(14)
+                          << cp.label << std::right << "  ("
+                          << std::setw(7) << std::fixed << std::setprecision(4)
+                          << cp.x << "," << std::setw(8) << cp.y << ","
+                          << std::setw(8) << cp.z << ")\n";
+            }
+            // Spec §94 — KfaGloveParams (full 80+ literal set per scenario).
+            // The FusionAhrs body filter currently shares its KFA_* defines
+            // across glove and body sensors; the structs below publish the
+            // exact spec scenario tables so a future per-channel selection
+            // can plug them through FusionAhrsSettings.
+            std::cout << "[glove-kfa §94.2] gloveBase   (per glove sensor):"
+                      "  nominalT=" << fb::kGloveBase.nominalT << " s"
+                      "  σ_init_ori=" << fb::kGloveBase.sdInitOrientDeg << "°"
+                      "  σ_init_gyrBias=" << fb::kGloveBase.sdInitGyrBiasDeg << "°"
+                      "  gyrBiasStd=[" << fb::kGloveBase.gyrBiasStdMinDeg
+                      << "°, " << fb::kGloveBase.gyrBiasStdMaxDeg << "°]"
+                      "  magResThr=" << fb::kGloveBase.magResThreshold
+                      << "  magResWin=" << fb::kGloveBase.magResWinTime << " s\n";
+            std::cout << "[glove-kfa §94.2]  accDivMon: th=" << fb::kGloveBase.accDivMonThreshold
+                      << " velTh=" << fb::kGloveBase.accDivMonVelThreshold
+                      << " time=" << fb::kGloveBase.accDivMonTime << " s"
+                      << " decay=" << fb::kGloveBase.accDivMonTauDecay
+                      << " highBoost=" << fb::kGloveBase.accDivMonThresholdHighBoost
+                      << "\n";
+            std::cout << "[glove-kfa §94.2]  fAccBoost: max=" << fb::kGloveBase.fAccBoost
+                      << " inc=" << fb::kGloveBase.fAccBoostIncreaseTime << " s"
+                      << " dec=" << fb::kGloveBase.fAccBoostDecreaseTime << " s\n";
+            std::cout << "[glove-kfa §94.2]  τ_M0: fast=" << fb::kGloveBase.tauM0AvgFast
+                      << " med=" << fb::kGloveBase.tauM0AvgMedium
+                      << " slow=" << fb::kGloveBase.tauM0AvgSlow << " s"
+                      << "  Q_acc_lp=" << fb::kGloveBase.sQvAccLowPass
+                      << "  Q_mag_rw=" << fb::kGloveBase.sQvMagRandomWalk << "\n";
+            std::cout << "[glove-kfa §94.3] gloveHuman overrides:"
+                      "  accDivMonHighBoost=" << fb::kGloveHuman.accDivMonThresholdHighBoost
+                      << "  doProjectMagOnHoriPlane="
+                      << (fb::kGloveHuman.doProjectMagOnHoriPlane ? "true" : "false")
+                      << "  doRedefineTemporal="
+                      << (fb::kGloveHuman.doRedefineTemporal ? "true" : "false")
+                      << "\n";
+            std::cout << "[glove-kfa §94.4] gloveVRU overrides:"
+                      "  doMagnetometerUpdate="
+                      << (fb::kGloveVRU.doMagnetometerUpdate ? "true" : "false")
+                      << "  doM0Update="
+                      << (fb::kGloveVRU.doM0Update ? "true" : "false")
+                      << "  doZru=" << (fb::kGloveVRU.doZru ? "true" : "false")
+                      << "\n";
             std::cout << std::setprecision(4);
             std::cout.flush();
         }
@@ -2173,6 +2440,9 @@ void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
        << "  lambda=" << std::scientific << std::setprecision(2) << d.lambda
        << std::fixed << std::setprecision(4)
        << "  rej=" << d.rejectedSteps
+       << "  σ_ori_max=" << std::setprecision(3) << (d.covMaxOriRad * 180.0 / M_PI) << "°"
+       << "  σ_seg=" << d.covMaxOriSeg
+       << std::setprecision(4)
        << "  poseQ=" << d.poseQualityBand
        << " (" << (d.poseQualityBand == fb::PoseQualityExcellent ? "excellent"
                   : d.poseQualityBand == fb::PoseQualityGood      ? "good"
@@ -2196,13 +2466,9 @@ void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
     ss << "[loco] phase=" << locomotionPhaseName(loco.phase())
        << "  flight=" << std::setprecision(2) << loco.flightFracSec() << "s"
        << "  contact=" << loco.contactFracSec() << "s"
-       << "  tilt=" << std::setprecision(1) << loco.pelvisTiltDeg() << "°"
-       << " (band: " << (loco.pelvisTiltDeg() < fb::kContact.secondaryPelvisT8RejMinDeg
-                            ? "vertical"
-                            : loco.pelvisTiltDeg() > fb::kContact.secondaryPelvisT8RejMaxDeg
-                                ? "inverted"
-                                : "tilted")
-       << ")"
+       << "  pelvis_tilt=" << std::setprecision(1) << loco.pelvisTiltDeg() << "°"
+       << "  t8_tilt=" << loco.t8TiltDeg() << "°"
+       << "  posture=" << LocomotionClassifier::postureName(loco.posture())
        << std::setprecision(4) << "\n";
 
     // §1127 / §12.1 — body centre of mass.  Only useful when segCenters
@@ -2280,6 +2546,12 @@ void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
            << "° w=" << d.toeWeightR
            << "   L: mtp=" << d.toeMtpLDeg
            << "° w=" << d.toeWeightL << "\n";
+        // §47.1 — bi-articular leg coupling (hip flex ↔ ankle dorsi via
+        // c_legs[0]·c_legs[1] = 0.9 × 0.95 = 0.855 transmission).
+        ss << "[coupling-wls leg-bi] c_legs=["
+           << fb::kCLegs[0] << ", " << fb::kCLegs[1]
+           << "]  effective gain=" << (fb::kCLegs[0] * fb::kCLegs[1])
+           << " (hipFlexY · gain → target ankle dorsi Y)\n";
         ss << std::setprecision(4);
     }
 
@@ -2324,7 +2596,27 @@ void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
             }
         }
         if (!any) ss << " (all <0.5 mm)";
+        // §50.5 — number of segments whose position skin-state was updated
+        // this frame by ZUPT residuals (active contacts with high prob).
+        ss << "  updatedSegs=" << pose_solver::g_refiner().lastSkinPosUpdates();
         ss << "\n";
+    }
+
+    if (glovesEnabled) {
+        // Spec §44.7 / §44.8 / §55 — batch smoother (240-frame window) +
+        // Schur marginalisation status.  Not yet active in this build:
+        // the per-frame Gauss-Newton path produces 2-iteration estimates
+        // that already converge tightly given the ROM barriers and lump
+        // coupling — moving to a 240-frame window requires migrating to
+        // sparse SimplicialLDLT and persistent state across frames, which
+        // is staged for a follow-on PR.  The diagnostic line below makes
+        // the absence visible so the auditor knows what the solver IS and
+        // ISN'T doing this frame.
+        ss << "[wls-batch §44.8] mode=per-frame  windowFrames=1  "
+              "maxIKSteps=" << fb::kMaxIKSteps << "\n";
+        ss << "[marg §44.7] mode=none  (Schur complement deferred; "
+              "stdOriFreeze=" << fb::kEstimator.stdOriFreeze
+           << ", stdPosFreeze=" << fb::kEstimator.stdPosFreeze << ")\n";
     }
 
     // -test solver-saturation event: when the adaptive LM has been
@@ -2530,6 +2822,100 @@ void SkeletonXsens::buildLengths(const ActorConfig& actor)
         float(ballToTipM),
     };
     m_len = L;
+
+    // ------------------------------------------------------------------
+    //  §11.2 / §25.3 / §39 — build the full 3D bone vectors L_bone in the
+    //  parent's local frame for every chain entry.  For each SENSORED
+    //  segment s the chain orientation is `oriented[s] = raw[parent] ⊗
+    //  m_defAng[parent]` (parent = the segment that owns this bone), so
+    //
+    //      vec_rotate(L_bone_local, raw[parent])
+    //          = vec_rotate(L_bone_local, oriented[s] ⊗ conj(m_defAng[parent]))
+    //          = vec_rotate(vec_rotate(L_bone_local, conj(m_defAng[parent])),
+    //                       oriented[s])
+    //
+    //  So storing  m_localOffset[s] = vec_rotate(L_bone_local · scale,
+    //  conj(m_defAng[parent]))  lets the FK loop in computeKeypoints
+    //  reuse the same `boneVec = vec_rotate(m_localOffset, global)` step
+    //  while delivering the spec-correct  R(q_parent) · L_bone_local  even
+    //  for bones with non-trivial X / Y components.  The dummy stubs (7,
+    //  12, 17, 22) keep the legacy scalar form because their dummy quat is
+    //  built inline in addDummySegments() with the rotation baked in.
+    auto localFor = [&](int chainIdx, int origSeg, double scale) -> QVector3D {
+        const QVector3D Lspec = fb::kSensorToBone[origSeg].L_bone * float(scale);
+        return vec_rotate(Lspec, m_defAng[origSeg].conj());
+    };
+    // Special foot/toe per-region scale: spec L_bone with user-overridden
+    // length.  scale_foot/toe match the scalar m_len[20] / m_len[21] derived
+    // above (heelToBallM / ballToTipM) so the rendered bone has the right
+    // magnitude and the spec direction (forward-down for RFoot, forward for
+    // RToe).
+    const double specFoot_m = specLen(fb::kSEG_RFoot);
+    const double specToe_m  = specLen(18);
+    const double footScaleR = (specFoot_m > 1e-6) ? heelToBallM / specFoot_m : heightScale;
+    const double toeScaleR  = (specToe_m  > 1e-6) ? ballToTipM  / specToe_m  : heightScale;
+
+    m_localOffset = {{
+        // ----- spine + head -----
+        localFor(0, 0, trunkScale),  localFor(1, 1, trunkScale),
+        localFor(2, 2, trunkScale),  localFor(3, 3, trunkScale),
+        localFor(4, 4, trunkScale),  localFor(5, 5, trunkScale),
+        localFor(6, 6, trunkScale),
+        // [7] scap stub R — dummy quat in addDummySegments rotates X → bone
+        QVector3D(float(scapHalfM), 0.0f, 0.0f),
+        // [8..11] right arm
+        localFor(8,  7,  armScale),  localFor(9,  8,  armScale),
+        localFor(10, 9,  armScale),  localFor(11, 10, armScale),
+        // [12] scap stub L
+        QVector3D(float(scapHalfM), 0.0f, 0.0f),
+        // [13..16] left arm
+        localFor(13, 11, armScale),  localFor(14, 12, armScale),
+        localFor(15, 13, armScale),  localFor(16, 14, armScale),
+        // [17] pelvis stub R
+        QVector3D(float(pelvisHalfM), 0.0f, 0.0f),
+        // [18..21] right leg
+        localFor(18, 15, legScale),  localFor(19, 16, legScale),
+        localFor(20, 17, footScaleR), localFor(21, 18, toeScaleR),
+        // [22] pelvis stub L
+        QVector3D(float(pelvisHalfM), 0.0f, 0.0f),
+        // [23..26] left leg
+        localFor(23, 19, legScale),  localFor(24, 20, legScale),
+        localFor(25, 21, footScaleR), localFor(26, 22, toeScaleR),
+    }};
+
+    // Spec §11.2 / §39 — under -test -gloves: print the full 23 bone-vector
+    // table that FK will use so the reader can see what spec-direction was
+    // applied vs the legacy scalar length.  One-shot per construction.
+    if (fox::pose_solver::g_testFlag().load(std::memory_order_relaxed) &&
+        fox::pose_solver::g_glovesFlag().load(std::memory_order_relaxed)) {
+        std::cout << "[fk-3d §39] actor h=" << h << " m  scales: trunk=" << trunkScale
+                  << "  arm=" << armScale << "  leg=" << legScale
+                  << "  foot=" << footScaleR << "\n";
+        static const char* names[] = {
+            "Pelvis→L5", "L5→L3", "L3→T12", "T12→T8", "T8→Neck", "Neck→Head",
+            "Head→top", "[dummy R-scap]", "R-acromion→up", "RUpperArm→elbow",
+            "RForeArm→wrist", "RHand→tip", "[dummy L-scap]", "L-acromion→up",
+            "LUpperArm→elbow", "LForeArm→wrist", "LHand→tip", "[dummy R-hip]",
+            "RUpperLeg→knee", "RLowerLeg→ankle", "RFoot→ball", "RToe→tip",
+            "[dummy L-hip]", "LUpperLeg→knee", "LLowerLeg→ankle",
+            "LFoot→ball", "LToe→tip" };
+        for (int s = 0; s < kXsensSegmentCountWithDummies; ++s) {
+            // Δ vs scalar — what the legacy (m_len, 0, 0) approach put at +X.
+            const QVector3D scalarVec(m_len[s], 0.0f, 0.0f);
+            const QVector3D delta = m_localOffset[s] - scalarVec;
+            std::cout << "[fk-3d §39]  s=" << std::setw(2) << s
+                      << "  " << std::left << std::setw(18) << names[s] << std::right
+                      << "  L_local=(" << std::fixed << std::setprecision(4)
+                      << std::setw(8) << m_localOffset[s].x() << ","
+                      << std::setw(8) << m_localOffset[s].y() << ","
+                      << std::setw(8) << m_localOffset[s].z()
+                      << ")  |L|=" << std::setw(7) << m_len[s] << " m"
+                      << "  Δ_vs_scalar=(" << std::setw(8) << delta.x()
+                      << "," << std::setw(8) << delta.y()
+                      << "," << std::setw(8) << delta.z() << ")\n";
+        }
+        std::cout.flush();
+    }
 }
 
 std::array<Quat, kXsensSegmentCountWithDummies>
@@ -2663,11 +3049,16 @@ SkeletonXsens::computeKeypoints(const std::array<Quat, kXsensSegmentCount>& raw,
     // Step 2: expand to 27 (add dummy stubs).
     const auto global = addDummySegments(oriented);
 
-    // Step 3: rotate each segment's [L, 0, 0] bone vector into world.
+    // Step 3: rotate each segment's full 3D L_bone offset into world.
+    // §11.2 / §39 — m_localOffset[s] carries the per-bone vector in the
+    // parent's local frame, pre-rotated by inv(m_defAng[parent]) so the
+    // multiplication below reduces to R(raw[parent]) · L_bone_local — the
+    // spec FK propagation.  Replaces the legacy (m_len[s], 0, 0) which
+    // collapsed Pelvis→L5 to (0, 0, 0.0976) instead of (-0.011, 0, 0.097),
+    // RFoot→ball to (0.161, 0, 0) instead of (0.147, 0, -0.065), etc.
     std::array<QVector3D, kXsensSegmentCountWithDummies> boneVec{};
     for (int s = 0; s < kXsensSegmentCountWithDummies; ++s) {
-        const QVector3D local(m_len[s], 0.0f, 0.0f);
-        boneVec[s] = vec_rotate(local, global[s]);
+        boneVec[s] = vec_rotate(m_localOffset[s], global[s]);
     }
 
     // Step 4: walk kinematic chain from root (pelvis, index 0).
@@ -2706,6 +3097,55 @@ SkeletonXsens::computeKeypoints(const std::array<Quat, kXsensSegmentCount>& raw,
         if (a < kXsensSegmentCount) m_lastSegCenter[a] = kp[a];
     }
     m_haveLastSegCenter = true;
+
+    // §89 / §39 — cache per-sensor world position p_sensor = p_segment_origin
+    // + R(q_segment_world) · r_bs.  Spec uses this for GPS / external-
+    // position residuals (r = p_sensor_world − p_sensor_meas) and for
+    // attaching IMU-mounted markers to the rendered skeleton.  Only the 17
+    // sensored segments have a valid r_bs; the 6 interpolated segments
+    // (L5, L3, T12, Neck, RToe, LToe) keep r_bs = (0,0,0) so the cache
+    // entry equals the segment origin (a sensible fallback).
+    for (int i = 0; i < kXsensSegmentCount; ++i) {
+        const QVector3D r_bs = fox::body::kSensorToBone[i].r_bs;
+        if (r_bs.lengthSquared() < 1e-12f) {
+            m_lastSensorPos[i] = m_lastSegCenter[i];
+        } else {
+            // global[s] for segment-with-IMU lookup: i is the original 0..22
+            // segment index; the chain entry that owns this segment's world
+            // orientation is the one whose oriented[] equals raw[i] ⊗
+            // m_defAng[i] — same as oriented[i] from step 1 above (the
+            // dummy expansion doesn't change the 23 sensored entries, only
+            // inserts 4 stubs).
+            m_lastSensorPos[i] = m_lastSegCenter[i] + vec_rotate(r_bs, oriented[i]);
+        }
+    }
+    m_haveLastSensorPos = true;
+
+    // One-shot diagnostic dump under -test -gloves: list every sensor's
+    // world position vs its segment-origin keypoint so the operator can
+    // see the per-segment r_bs offset (Pelvis IMU 5.5 cm back, T8 IMU
+    // 14 cm forward of the spine, RUpperLeg IMU 25 cm down the thigh).
+    if (fox::pose_solver::g_testFlag().load(std::memory_order_relaxed) &&
+        fox::pose_solver::g_glovesFlag().load(std::memory_order_relaxed)) {
+        static bool sensorRbsDumped = false;
+        if (!sensorRbsDumped) {
+            sensorRbsDumped = true;
+            std::cout << "[sensor-rbs §89] per-segment IMU mount r_bs (m) — sensor"
+                         " offset on the bone, used for GPS aiding and rendering\n";
+            for (int i = 0; i < kXsensSegmentCount; ++i) {
+                const QVector3D r_bs = fox::body::kSensorToBone[i].r_bs;
+                if (r_bs.lengthSquared() < 1e-12f) continue;
+                std::cout << "[sensor-rbs §89]  seg=" << std::setw(2) << i
+                          << "  r_bs=(" << std::fixed << std::setprecision(5)
+                          << std::setw(9) << r_bs.x() << ","
+                          << std::setw(9) << r_bs.y() << ","
+                          << std::setw(9) << r_bs.z() << ") m"
+                          << "  |r_bs|=" << std::setw(8) << r_bs.length() << " m"
+                          << "\n";
+            }
+            std::cout.flush();
+        }
+    }
     return kp;
 }
 

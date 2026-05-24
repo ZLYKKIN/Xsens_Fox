@@ -633,6 +633,13 @@ public:
     const std::array<int, kXsensSegmentCountWithDummies>& startPts() const { return m_start; }
     const std::array<int, kXsensSegmentCountWithDummies>& endPts()   const { return m_end; }
     const std::array<float, kXsensSegmentCountWithDummies>& lengths() const { return m_len; }
+    // §11.2 / §25.3 / §39 — full 3D bone offset in the parent segment's local
+    // frame (pre-rotated by inv(m_defAng[parent]) so vec_rotate(m_localOffset,
+    // oriented) reduces to R(q_parent_raw) · L_bone_in_parent_local — the spec
+    // formula).  Replaces the scalar (m_len, 0, 0) approach which lost the
+    // X/Y components of the bone (e.g. Pelvis→L5 (-0.011, 0, 0.097) was
+    // collapsing to (0, 0, 0.0976)).
+    const std::array<QVector3D, kXsensSegmentCountWithDummies>& localOffsets() const { return m_localOffset; }
     const std::array<Quat,  kXsensSegmentCount>& defaultSegAngles() const { return m_defAng; }
 
     const std::string& poseKind() const { return m_pose; }
@@ -654,6 +661,15 @@ public:
         m_accLPBodyValid = true;
     }
 
+    // §89 — world position of the IMU mount for segment `seg` (segment
+    // origin + R(q_seg_world) · r_bs).  Filled by computeKeypoints; valid
+    // once at least one frame has been processed.  Used by external-
+    // position aiding (GPS, optical tracker) and the -test -gloves dump.
+    QVector3D sensorWorldPos(int seg) const {
+        if (seg < 0 || seg >= kXsensSegmentCount) return QVector3D(0, 0, 0);
+        return m_haveLastSensorPos ? m_lastSensorPos[seg] : QVector3D(0, 0, 0);
+    }
+
 private:
     std::string m_pose;
     // 27 entries: 7 spine  +  5 right-arm (w/ scap stub)  +  5 left-arm  +
@@ -661,6 +677,14 @@ private:
     std::array<int,   kXsensSegmentCountWithDummies> m_start{};
     std::array<int,   kXsensSegmentCountWithDummies> m_end{};
     std::array<float, kXsensSegmentCountWithDummies> m_len{};
+    // §11.2 / §39 — full 3D bone offsets.  m_localOffset[s] is the bone
+    // vector in the local frame of the segment that owns this chain entry,
+    // pre-rotated by inv(m_defAng[parent]) so vec_rotate(m_localOffset[s],
+    // oriented[s]) yields R(raw[parent]) · L_bone_in_parent_local, matching
+    // the spec FK formula even for bones with non-trivial X / Y components
+    // (Pelvis → L5 has X = -0.011 m back; RFoot → toe has X = +0.147 m,
+    // Z = -0.065 m — both lost by the old scalar (L, 0, 0) approach).
+    std::array<QVector3D, kXsensSegmentCountWithDummies> m_localOffset{};
     // 23 entries: the canonical default angles that align passed-in quats
     // with the T/N-pose reference.
     std::array<Quat,  kXsensSegmentCount> m_defAng{};
@@ -673,6 +697,12 @@ private:
     mutable bool                                      m_haveLastSegCenter = false;
     mutable std::array<QVector3D, kXsensSegmentCount> m_accLPBodyHint{};
     mutable bool                                      m_accLPBodyValid = false;
+    // §89 / §39 — world position of each sensor mount = segment origin +
+    // R(q_segment_world) · r_bs.  Cached every frame so GPS / external-
+    // position aiding (and the -test -gloves diagnostic) can read the
+    // sensor location directly instead of repeating the rotation.
+    mutable std::array<QVector3D, kXsensSegmentCount> m_lastSensorPos{};
+    mutable bool                                      m_haveLastSensorPos = false;
 
     void buildTopology();
     void buildDefaultAngles();
