@@ -863,6 +863,47 @@ inline float magNoiseScaleForChip(ImuChipType c) {
     }
 }
 
+struct ImuChipNoise {
+    float sigmaAccMs2;
+    float sigmaGyrDegS;
+    float dynRangeAccMs2;
+    float dynRangeGyrDegS;
+    float gainErrorAcc;
+    float gainErrorGyr;
+};
+inline constexpr ImuChipNoise kImuChipNoiseW2 = {
+    .sigmaAccMs2     = 0.0232f,
+    .sigmaGyrDegS    = 0.20f,
+    .dynRangeAccMs2  = 157.0f,
+    .dynRangeGyrDegS = 2000.0f,
+    .gainErrorAcc    = 0.004f,
+    .gainErrorGyr    = 0.004f,
+};
+inline constexpr ImuChipNoise kImuChipNoiseX2 = {
+    .sigmaAccMs2     = 0.0232f,
+    .sigmaGyrDegS    = 0.20f,
+    .dynRangeAccMs2  = 157.0f,
+    .dynRangeGyrDegS = 2000.0f,
+    .gainErrorAcc    = 0.004f,
+    .gainErrorGyr    = 0.004f,
+};
+inline constexpr ImuChipNoise kImuChipNoiseX3 = {
+    .sigmaAccMs2     = 0.00899f,
+    .sigmaGyrDegS    = 0.075f,
+    .dynRangeAccMs2  = 157.0f,
+    .dynRangeGyrDegS = 2000.0f,
+    .gainErrorAcc    = 0.004f,
+    .gainErrorGyr    = 0.004f,
+};
+inline constexpr const ImuChipNoise& chipNoiseFor(ImuChipType c) {
+    switch (c) {
+        case ImuChipType::X3: return kImuChipNoiseX3;
+        case ImuChipType::X2: return kImuChipNoiseX2;
+        case ImuChipType::W2:
+        default:              return kImuChipNoiseW2;
+    }
+}
+
 struct SkinParams {
     double tauSec;
     double sigmaOriDeg;
