@@ -7728,6 +7728,12 @@ void NewSessionWizard::abortCalibration()
         m_accumCountN[i]  = 0;
     }
 
+    for (int j = 0; j < 20; ++j) {
+        m_fingerAccumR[j] = 0.0;
+        m_fingerAccumL[j] = 0.0;
+    }
+    m_fingerAccumCount = 0;
+
     m_phase = CalibPhase::Idle;
     logCalibPhaseTransition("aborted");
     refreshPoseImage();
