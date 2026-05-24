@@ -320,6 +320,11 @@ void FusionAhrsSetNoise(FusionAhrs *ahrs,
     if (sigmaMagNorm > 0.0f) ahrs->sigmaMag = sigmaMagNorm;
 }
 
+void FusionAhrsSetSampleRate(FusionAhrs *ahrs, float sampleRateHz)
+{
+    if (sampleRateHz > 1.0f) ahrs->settings.sampleRateHz = sampleRateHz;
+}
+
 static void Predict(FusionAhrs *ahrs, FusionVector gyroDegS, float dt) {
     FusionVector omega = {{
         DegToRad(gyroDegS.axis.x) - ahrs->b_g.axis.x,

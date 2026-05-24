@@ -5748,6 +5748,9 @@ void MocapReceiver::run()
                 const FusionVector a = {{ float(accForFilter.x()),
                                           float(accForFilter.y()),
                                           float(accForFilter.z()) }};
+                if (dt > 1e-4) {
+                    FusionAhrsSetSampleRate(&ahrs, float(1.0 / dt));
+                }
                 if (haveMag && mag.length() > 1e-6) {
                     const FusionVector m = {{ float(mag.x()),
                                               float(mag.y()),

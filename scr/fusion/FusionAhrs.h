@@ -99,6 +99,8 @@ void FusionAhrsSetNoise(FusionAhrs *ahrs,
                         float sigmaGyrDegS,
                         float sigmaMagNorm);
 
+void FusionAhrsSetSampleRate(FusionAhrs *ahrs, float sampleRateHz);
+
 void FusionAhrsUpdate(FusionAhrs *ahrs,
                       FusionVector gyroscope,
                       FusionVector accelerometer,
