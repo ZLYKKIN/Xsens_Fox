@@ -4790,8 +4790,17 @@ bool MocapReceiver::connectGloves()
     } else {
 
         auto noop = [](const void*) {};
-        if (regSkel) { int r = 0; sehCall([&]() { r = regSkel(noop); });
-                       testLog("[manus] RegSkeletonStream rc=" + std::to_string(r), I.test); }
+        if (regSkel) {
+            auto skelCb = [](const void* msg) {
+                if (!msg) return;
+                static std::atomic<int> s_skelLogTick{0};
+                if (s_skelLogTick.fetch_add(1) % 240 == 0) {
+                    std::cerr << "[manus-skeleton] frame received (using ergonomics stream as primary)\n";
+                }
+            };
+            int r = 0; sehCall([&]() { r = regSkel(skelCb); });
+            testLog("[manus] RegSkeletonStream rc=" + std::to_string(r), I.test);
+        }
 
         { int r = 0; sehCall([&]() { r = regErgo(&foxManusErgonomicsCb); });
           testLog("[manus] RegErgonomicsStream rc=" + std::to_string(r), I.test); }
