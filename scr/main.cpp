@@ -469,7 +469,8 @@ public:
 
             const double f_acc = fb::kAccProb[0] +
                                  (fb::kAccProb[2] - fb::kAccProb[0]) *
-                                 sigmoid((aNorm - 0.3) / std::max(1e-6, fb::kAccProb[3]));
+                                 sigmoid((aNorm - fb::kAccProb[1]) /
+                                         std::max(1e-6, fb::kAccProb[3]));
 
             const double f_vel = fb::kVelProb[2] -
                                  (fb::kVelProb[2] - fb::kVelProb[0]) *
