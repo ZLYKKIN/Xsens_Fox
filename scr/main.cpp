@@ -2530,6 +2530,100 @@ void SkeletonXsens::buildLengths(const ActorConfig& actor)
         float(ballToTipM),
     };
     m_len = L;
+
+    // ------------------------------------------------------------------
+    //  §11.2 / §25.3 / §39 — build the full 3D bone vectors L_bone in the
+    //  parent's local frame for every chain entry.  For each SENSORED
+    //  segment s the chain orientation is `oriented[s] = raw[parent] ⊗
+    //  m_defAng[parent]` (parent = the segment that owns this bone), so
+    //
+    //      vec_rotate(L_bone_local, raw[parent])
+    //          = vec_rotate(L_bone_local, oriented[s] ⊗ conj(m_defAng[parent]))
+    //          = vec_rotate(vec_rotate(L_bone_local, conj(m_defAng[parent])),
+    //                       oriented[s])
+    //
+    //  So storing  m_localOffset[s] = vec_rotate(L_bone_local · scale,
+    //  conj(m_defAng[parent]))  lets the FK loop in computeKeypoints
+    //  reuse the same `boneVec = vec_rotate(m_localOffset, global)` step
+    //  while delivering the spec-correct  R(q_parent) · L_bone_local  even
+    //  for bones with non-trivial X / Y components.  The dummy stubs (7,
+    //  12, 17, 22) keep the legacy scalar form because their dummy quat is
+    //  built inline in addDummySegments() with the rotation baked in.
+    auto localFor = [&](int chainIdx, int origSeg, double scale) -> QVector3D {
+        const QVector3D Lspec = fb::kSensorToBone[origSeg].L_bone * float(scale);
+        return vec_rotate(Lspec, m_defAng[origSeg].conj());
+    };
+    // Special foot/toe per-region scale: spec L_bone with user-overridden
+    // length.  scale_foot/toe match the scalar m_len[20] / m_len[21] derived
+    // above (heelToBallM / ballToTipM) so the rendered bone has the right
+    // magnitude and the spec direction (forward-down for RFoot, forward for
+    // RToe).
+    const double specFoot_m = specLen(fb::kSEG_RFoot);
+    const double specToe_m  = specLen(18);
+    const double footScaleR = (specFoot_m > 1e-6) ? heelToBallM / specFoot_m : heightScale;
+    const double toeScaleR  = (specToe_m  > 1e-6) ? ballToTipM  / specToe_m  : heightScale;
+
+    m_localOffset = {{
+        // ----- spine + head -----
+        localFor(0, 0, trunkScale),  localFor(1, 1, trunkScale),
+        localFor(2, 2, trunkScale),  localFor(3, 3, trunkScale),
+        localFor(4, 4, trunkScale),  localFor(5, 5, trunkScale),
+        localFor(6, 6, trunkScale),
+        // [7] scap stub R — dummy quat in addDummySegments rotates X → bone
+        QVector3D(float(scapHalfM), 0.0f, 0.0f),
+        // [8..11] right arm
+        localFor(8,  7,  armScale),  localFor(9,  8,  armScale),
+        localFor(10, 9,  armScale),  localFor(11, 10, armScale),
+        // [12] scap stub L
+        QVector3D(float(scapHalfM), 0.0f, 0.0f),
+        // [13..16] left arm
+        localFor(13, 11, armScale),  localFor(14, 12, armScale),
+        localFor(15, 13, armScale),  localFor(16, 14, armScale),
+        // [17] pelvis stub R
+        QVector3D(float(pelvisHalfM), 0.0f, 0.0f),
+        // [18..21] right leg
+        localFor(18, 15, legScale),  localFor(19, 16, legScale),
+        localFor(20, 17, footScaleR), localFor(21, 18, toeScaleR),
+        // [22] pelvis stub L
+        QVector3D(float(pelvisHalfM), 0.0f, 0.0f),
+        // [23..26] left leg
+        localFor(23, 19, legScale),  localFor(24, 20, legScale),
+        localFor(25, 21, footScaleR), localFor(26, 22, toeScaleR),
+    }};
+
+    // Spec §11.2 / §39 — under -test -gloves: print the full 23 bone-vector
+    // table that FK will use so the reader can see what spec-direction was
+    // applied vs the legacy scalar length.  One-shot per construction.
+    if (fox::pose_solver::g_testFlag().load(std::memory_order_relaxed) &&
+        fox::pose_solver::g_glovesFlag().load(std::memory_order_relaxed)) {
+        std::cout << "[fk-3d §39] actor h=" << h << " m  scales: trunk=" << trunkScale
+                  << "  arm=" << armScale << "  leg=" << legScale
+                  << "  foot=" << footScaleR << "\n";
+        static const char* names[] = {
+            "Pelvis→L5", "L5→L3", "L3→T12", "T12→T8", "T8→Neck", "Neck→Head",
+            "Head→top", "[dummy R-scap]", "R-acromion→up", "RUpperArm→elbow",
+            "RForeArm→wrist", "RHand→tip", "[dummy L-scap]", "L-acromion→up",
+            "LUpperArm→elbow", "LForeArm→wrist", "LHand→tip", "[dummy R-hip]",
+            "RUpperLeg→knee", "RLowerLeg→ankle", "RFoot→ball", "RToe→tip",
+            "[dummy L-hip]", "LUpperLeg→knee", "LLowerLeg→ankle",
+            "LFoot→ball", "LToe→tip" };
+        for (int s = 0; s < kXsensSegmentCountWithDummies; ++s) {
+            // Δ vs scalar — what the legacy (m_len, 0, 0) approach put at +X.
+            const QVector3D scalarVec(m_len[s], 0.0f, 0.0f);
+            const QVector3D delta = m_localOffset[s] - scalarVec;
+            std::cout << "[fk-3d §39]  s=" << std::setw(2) << s
+                      << "  " << std::left << std::setw(18) << names[s] << std::right
+                      << "  L_local=(" << std::fixed << std::setprecision(4)
+                      << std::setw(8) << m_localOffset[s].x() << ","
+                      << std::setw(8) << m_localOffset[s].y() << ","
+                      << std::setw(8) << m_localOffset[s].z()
+                      << ")  |L|=" << std::setw(7) << m_len[s] << " m"
+                      << "  Δ_vs_scalar=(" << std::setw(8) << delta.x()
+                      << "," << std::setw(8) << delta.y()
+                      << "," << std::setw(8) << delta.z() << ")\n";
+        }
+        std::cout.flush();
+    }
 }
 
 std::array<Quat, kXsensSegmentCountWithDummies>
@@ -2663,11 +2757,16 @@ SkeletonXsens::computeKeypoints(const std::array<Quat, kXsensSegmentCount>& raw,
     // Step 2: expand to 27 (add dummy stubs).
     const auto global = addDummySegments(oriented);
 
-    // Step 3: rotate each segment's [L, 0, 0] bone vector into world.
+    // Step 3: rotate each segment's full 3D L_bone offset into world.
+    // §11.2 / §39 — m_localOffset[s] carries the per-bone vector in the
+    // parent's local frame, pre-rotated by inv(m_defAng[parent]) so the
+    // multiplication below reduces to R(raw[parent]) · L_bone_local — the
+    // spec FK propagation.  Replaces the legacy (m_len[s], 0, 0) which
+    // collapsed Pelvis→L5 to (0, 0, 0.0976) instead of (-0.011, 0, 0.097),
+    // RFoot→ball to (0.161, 0, 0) instead of (0.147, 0, -0.065), etc.
     std::array<QVector3D, kXsensSegmentCountWithDummies> boneVec{};
     for (int s = 0; s < kXsensSegmentCountWithDummies; ++s) {
-        const QVector3D local(m_len[s], 0.0f, 0.0f);
-        boneVec[s] = vec_rotate(local, global[s]);
+        boneVec[s] = vec_rotate(m_localOffset[s], global[s]);
     }
 
     // Step 4: walk kinematic chain from root (pelvis, index 0).
