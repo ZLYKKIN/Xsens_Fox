@@ -571,6 +571,9 @@ public:
     double magneticDeclinationDeg() const;
     double magneticInclinationDeg() const;
 
+    bool saveCalibration(const QString& path) const;
+    bool loadCalibration(const QString& path);
+
     QVector3D snapshotGyroAvg(int idx, int samples) const;
     QVector3D liveGyrSensor(int idx) const;
 

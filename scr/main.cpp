@@ -37,6 +37,8 @@
 #include <QtCore/QFile>
 #include <QtCore/QJsonDocument>
 #include <QtCore/QJsonObject>
+#include <QtCore/QJsonArray>
+#include <QtCore/QTextStream>
 #include <QtNetwork/QUdpSocket>
 #include <QtNetwork/QHostAddress>
 #include <QtNetwork/QNetworkInterface>
@@ -5025,6 +5027,115 @@ double MocapReceiver::magneticDeclinationDeg() const
 double MocapReceiver::magneticInclinationDeg() const
 {
     return m_impl->magInclinationDeg.load(std::memory_order_relaxed);
+}
+
+bool MocapReceiver::saveCalibration(const QString& path) const
+{
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) return false;
+    QTextStream out(&file);
+    out.setRealNumberPrecision(12);
+    QMutexLocker lk(&m_impl->lock);
+    out << "{\n";
+    out << "  \"version\": 1,\n";
+    out << "  \"magDeclinationDeg\": "
+        << m_impl->magDeclinationDeg.load(std::memory_order_relaxed) << ",\n";
+    out << "  \"magInclinationDeg\": "
+        << m_impl->magInclinationDeg.load(std::memory_order_relaxed) << ",\n";
+    out << "  \"accMagn\":  [";
+    for (int i = 0; i < kXsensSegmentCount; ++i) {
+        out << m_impl->accMagn[i];
+        if (i + 1 < kXsensSegmentCount) out << ",";
+    }
+    out << "],\n";
+    out << "  \"magMagn\":  [";
+    for (int i = 0; i < kXsensSegmentCount; ++i) {
+        out << m_impl->magMagn[i];
+        if (i + 1 < kXsensSegmentCount) out << ",";
+    }
+    out << "],\n";
+    out << "  \"gyrBias\":  [";
+    for (int i = 0; i < kXsensSegmentCount; ++i) {
+        const auto& g = m_impl->gyrBias[i];
+        out << "[" << g.x() << "," << g.y() << "," << g.z() << "]";
+        if (i + 1 < kXsensSegmentCount) out << ",";
+    }
+    out << "],\n";
+    out << "  \"s2s\": [";
+    for (int i = 0; i < kXsensSegmentCount; ++i) {
+        const auto& q = m_impl->s2s[i];
+        out << "[" << q.w << "," << q.x << "," << q.y << "," << q.z << "]";
+        if (i + 1 < kXsensSegmentCount) out << ",";
+    }
+    out << "]\n";
+    out << "}\n";
+    return file.error() == QFile::NoError;
+}
+
+bool MocapReceiver::loadCalibration(const QString& path)
+{
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) return false;
+    const QByteArray buf = file.readAll();
+    QJsonParseError err{};
+    const QJsonDocument doc = QJsonDocument::fromJson(buf, &err);
+    if (err.error != QJsonParseError::NoError || !doc.isObject()) return false;
+    const QJsonObject root = doc.object();
+
+    if (root.contains("magDeclinationDeg"))
+        setMagneticDeclinationDeg(root["magDeclinationDeg"].toDouble());
+    if (root.contains("magInclinationDeg"))
+        setMagneticInclinationDeg(root["magInclinationDeg"].toDouble());
+
+    auto readArr = [&](const QString& key,
+                       std::array<double, kXsensSegmentCount>& out) {
+        const QJsonArray a = root[key].toArray();
+        for (int i = 0; i < kXsensSegmentCount && i < a.size(); ++i)
+            out[i] = a[i].toDouble(1.0);
+    };
+
+    std::array<double,    kXsensSegmentCount> accMagn{};
+    std::array<double,    kXsensSegmentCount> magMagn{};
+    std::array<QVector3D, kXsensSegmentCount> gyrBias{};
+    std::array<Quat,      kXsensSegmentCount> s2s{};
+    for (int i = 0; i < kXsensSegmentCount; ++i) {
+        accMagn[i] = 1.0;
+        magMagn[i] = 1.0;
+        s2s[i]     = Quat(1, 0, 0, 0);
+    }
+
+    readArr("accMagn", accMagn);
+    readArr("magMagn", magMagn);
+
+    if (root.contains("gyrBias")) {
+        const QJsonArray a = root["gyrBias"].toArray();
+        for (int i = 0; i < kXsensSegmentCount && i < a.size(); ++i) {
+            const QJsonArray v = a[i].toArray();
+            if (v.size() >= 3) {
+                gyrBias[i] = QVector3D(float(v[0].toDouble()),
+                                       float(v[1].toDouble()),
+                                       float(v[2].toDouble()));
+            }
+        }
+    }
+    if (root.contains("s2s")) {
+        const QJsonArray a = root["s2s"].toArray();
+        for (int i = 0; i < kXsensSegmentCount && i < a.size(); ++i) {
+            const QJsonArray q = a[i].toArray();
+            if (q.size() >= 4) {
+                s2s[i] = Quat(q[0].toDouble(1.0),
+                              q[1].toDouble(0.0),
+                              q[2].toDouble(0.0),
+                              q[3].toDouble(0.0));
+            }
+        }
+    }
+
+    setAccNormalisation(accMagn);
+    setMagNormalisation(magMagn);
+    setGyroBias(gyrBias);
+    setS2sAlignment(s2s);
+    return true;
 }
 
 QVector3D MocapReceiver::snapshotGyroAvg(int idx, int samples) const
