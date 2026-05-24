@@ -1547,7 +1547,11 @@ public:
                     const Quat dq = quat_exp_rotvec(double(phi.x()),
                                                     double(phi.y()),
                                                     double(phi.z()));
-                    orientTrial[i] = quat_mult(orientTrial[i], dq).normalized();
+                    Quat q = quat_mult(orientTrial[i], dq).normalized();
+                    if (q.w < 0.0) {
+                        q.w = -q.w; q.x = -q.x; q.y = -q.y; q.z = -q.z;
+                    }
+                    orientTrial[i] = q;
                 }
 
                 const double residTrial = evalResidual(orientTrial);
