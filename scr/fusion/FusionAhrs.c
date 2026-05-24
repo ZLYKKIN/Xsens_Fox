@@ -460,7 +460,30 @@ static void ApplyAccUpdate(FusionAhrs *ahrs, FusionVector aSensorMs2) {
     }
 
     const FusionVector gWorld  = { .axis = { 0.0f, 0.0f, +KFA_GRAVITY_MS2 } };
-    const FusionVector hAcc    = RotByQInv(ahrs->q, gWorld);
+    FusionVector hAcc    = RotByQInv(ahrs->q, gWorld);
+    const float skinAng = ahrs->skinPhiScalar;
+    if (fabsf(skinAng) > 1e-6f) {
+        const float c = cosf(skinAng);
+        const float s = sinf(skinAng);
+        const float gx = hAcc.axis.x;
+        const float gy = hAcc.axis.y;
+        const float invXy = 1.0f / sqrtf(gx * gx + gy * gy + 1e-12f);
+        const float ax = -gy * invXy;
+        const float ay = +gx * invXy;
+        const float az = 0.0f;
+        const FusionVector hRot = {{
+            (c + ax * ax * (1.0f - c))             * hAcc.axis.x
+              + (ax * ay * (1.0f - c) - az * s)    * hAcc.axis.y
+              + (ax * az * (1.0f - c) + ay * s)    * hAcc.axis.z,
+            (ay * ax * (1.0f - c) + az * s)        * hAcc.axis.x
+              + (c + ay * ay * (1.0f - c))         * hAcc.axis.y
+              + (ay * az * (1.0f - c) - ax * s)    * hAcc.axis.z,
+            (az * ax * (1.0f - c) - ay * s)        * hAcc.axis.x
+              + (az * ay * (1.0f - c) + ax * s)    * hAcc.axis.y
+              + (c + az * az * (1.0f - c))         * hAcc.axis.z,
+        }};
+        hAcc = hRot;
+    }
     const FusionVector aCorr   = {{
         aSensorMs2.axis.x - ahrs->b_a.axis.x,
         aSensorMs2.axis.y - ahrs->b_a.axis.y,
