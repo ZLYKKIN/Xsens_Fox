@@ -6660,7 +6660,12 @@ NewSessionWizard::NewSessionWizard(MocapReceiver* rx, bool testMode, QWidget* pa
     m_statusTimer.start();
 
     m_countTimer.setInterval(100);
-    m_captureTimer.setInterval(10);
+    {
+        const double nativeRateHz =
+            std::max(60.0, fox::body::constants::kSampleRateHz);
+        const int captureMs = std::max(1, int(1000.0 / nativeRateHz + 0.5));
+        m_captureTimer.setInterval(captureMs);
+    }
     connect(&m_countTimer,   &QTimer::timeout, this, &NewSessionWizard::onCountdownTick);
     connect(&m_captureTimer, &QTimer::timeout, this, &NewSessionWizard::onCaptureTick);
 
