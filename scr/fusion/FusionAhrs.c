@@ -902,6 +902,8 @@ FusionAhrsInternalStates FusionAhrsGetInternalStates(const FusionAhrs *ahrs) {
     s.magneticError = RadToDeg(ahrs->magResidualNorm);
     s.magnetometerIgnored = !ahrs->magGateOpen;
     s.magneticRecoveryTrigger = 0.0f;
+    s.magNormBias = ahrs->magNormBias;
+    s.skinPhiDeg  = RadToDeg(ahrs->skinPhiScalar);
     return s;
 }
 

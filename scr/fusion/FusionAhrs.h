@@ -82,6 +82,8 @@ typedef struct {
     float magneticError;
     bool  magnetometerIgnored;
     float magneticRecoveryTrigger;
+    float magNormBias;
+    float skinPhiDeg;
 } FusionAhrsInternalStates;
 
 typedef struct {
