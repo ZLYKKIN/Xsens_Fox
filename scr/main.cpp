@@ -987,8 +987,7 @@ public:
                 const QVector3D phiK = quat_log(quat_mult(o[lowerSeg],
                                                           o[upperSeg].conj()).normalized());
                 const double thKnee = std::abs(double(phiK.y()));
-                const double thScrew = (fb::kCKnees[0] +
-                                         fb::kCKnees[2] * (1.0 - std::cos(thKnee))) *
+                const double thScrew = fb::kCKnees[1] * (1.0 - std::cos(thKnee)) *
                                         fb::kKneeScrewMaxDeg *
                                         fb::constants::kDeg2Rad;
                 const double signed_screw = isRight ? thScrew : -thScrew;
@@ -1461,8 +1460,7 @@ public:
                 const QVector3D phiK = quat_log(quat_mult(orient[lowerSeg],
                                                           orient[upperSeg].conj()).normalized());
                 const double thKnee = std::abs(double(phiK.y()));
-                const double thScrew = (fb::kCKnees[0] +
-                                         fb::kCKnees[2] * (1.0 - std::cos(thKnee))) *
+                const double thScrew = fb::kCKnees[1] * (1.0 - std::cos(thKnee)) *
                                         fb::kKneeScrewMaxDeg *
                                         fb::constants::kDeg2Rad;
                 const double signedScrew = isRight ? thScrew : -thScrew;
@@ -1488,7 +1486,7 @@ public:
                         (k == 0 ? r.x() : k == 1 ? r.y() : r.z());
                 }
                 const double thKneeSlope =
-                    fb::kCKnees[2] * std::sin(thKnee) *
+                    fb::kCKnees[1] * std::sin(thKnee) *
                     fb::kKneeScrewMaxDeg * fb::constants::kDeg2Rad;
                 const double w_couple = w_lax * thKneeSlope;
                 JtWJ(rowL + 2, rowU + 1) -= w_couple;
@@ -2407,9 +2405,7 @@ void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
                       << ", " << fb::kCArms[5]
                       << "]  scapulo-humeral piecewise-linear\n";
             std::cout << "[bio §47.1] c_knees=[" << fb::kCKnees[0]
-                      << ", " << fb::kCKnees[1]
-                      << ", " << fb::kCKnees[2]
-                      << ", " << fb::kCKnees[3] << "]"
+                      << ", " << fb::kCKnees[1] << "]"
                       << "  screw-home max " << fb::kKneeScrewMaxDeg << "°\n";
             std::cout << "[bio §48.1] c_ankles=[" << fb::kCAnkles[0]
                       << ", " << fb::kCAnkles[1] << " (=" << (fb::kCAnkles[1]
