@@ -1487,8 +1487,9 @@ public:
                 std::array<Quat, fb::kSegmentCount> orientTrial = orient;
                 for (int i = 0; i < N; ++i) {
                     const int row = i * 3;
-                    const QVector3D phi(float(dx[row]), float(dx[row + 1]),
-                                        float(dx[row + 2]));
+                    const QVector3D phi(static_cast<float>(dx[row]),
+                                        static_cast<float>(dx[row + 1]),
+                                        static_cast<float>(dx[row + 2]));
                     const Quat dq = quat_exp_rotvec(double(phi.x()),
                                                     double(phi.y()),
                                                     double(phi.z()));
@@ -2552,6 +2553,22 @@ void SkeletonXsens::buildLengths(const ActorConfig& actor)
         }
         std::cout.flush();
     }
+}
+
+namespace {
+struct RenderDiag {
+
+    std::array<double, kXsensSegmentCount> jumpDeg{};
+    std::array<double, kXsensSegmentCount> rejectW{};
+    std::array<bool,   kXsensSegmentCount> gyroQuiet{};
+    std::array<double, kXsensSegmentCount> localAng{};
+
+    double spineW_L5 = 0.0, spineW_L3 = 0.0, spineW_T12 = 0.0, neckW = 0.5;
+
+    double scapUpZR = 0.0, scapAngR = 0.0, scapUpZL = 0.0, scapAngL = 0.0;
+    bool   scapActiveR = false, scapActiveL = false;
+};
+RenderDiag g_renderDiag{};
 }
 
 std::array<Quat, kXsensSegmentCountWithDummies>
@@ -6451,7 +6468,10 @@ static PlacementReport analyzePlacement(
 
 }
 
-static spc::PlacementClassifier g_placementClf;
+static spc::PlacementClassifier& g_placementClf() {
+    static spc::PlacementClassifier instance;
+    return instance;
+}
 
 NewSessionWizard::NewSessionWizard(MocapReceiver* rx, bool testMode, QWidget* parent)
     : QDialog(parent), m_rx(rx), m_test(testMode)
@@ -6460,13 +6480,13 @@ NewSessionWizard::NewSessionWizard(MocapReceiver* rx, bool testMode, QWidget* pa
     setWindowTitle(Lang::t("app_title"));
     setMinimumSize(760, 640);
 
-    if (!g_placementClf.ready) {
+    if (!g_placementClf().ready) {
         const QString modelPath =
             QCoreApplication::applicationDirPath()
             + "/fox_sensor_placement_classifier.onnx";
-        g_placementClf.load(modelPath, m_test);
+        g_placementClf().load(modelPath, m_test);
     }
-    m_liveSpcEnabled = g_placementClf.ready;
+    m_liveSpcEnabled = g_placementClf().ready;
 
     buildPages();
 
@@ -7928,12 +7948,12 @@ void NewSessionWizard::onCaptureTick()
     }
 
     if (m_placementInfo) {
-        if (!m_liveSpcEnabled || !g_placementClf.ready) {
+        if (!m_liveSpcEnabled || !g_placementClf().ready) {
             m_placementInfo->setText(Lang::t("asl_loading_failed"));
             m_placementInfo->setStyleSheet("color:#9B9B9B;");
         } else {
             const spc::PlacementReport rep = spc::analyzePlacement(
-                g_placementClf, m_imuBuf, m_test);
+                g_placementClf(), m_imuBuf, m_test);
             QString msg;
             QString style = "color:#9B9B9B;";
             if (!rep.haveData) {
@@ -11131,20 +11151,6 @@ void MainWindow::onFps(double hz)
 }
 
 namespace {
-struct RenderDiag {
-
-    std::array<double, kXsensSegmentCount> jumpDeg{};
-    std::array<double, kXsensSegmentCount> rejectW{};
-    std::array<bool,   kXsensSegmentCount> gyroQuiet{};
-    std::array<double, kXsensSegmentCount> localAng{};
-
-    double spineW_L5 = 0.0, spineW_L3 = 0.0, spineW_T12 = 0.0, neckW = 0.5;
-
-    double scapUpZR = 0.0, scapAngR = 0.0, scapUpZL = 0.0, scapAngL = 0.0;
-    bool   scapActiveR = false, scapActiveL = false;
-};
-RenderDiag g_renderDiag{};
-
 inline std::string fmtQ4(const Quat& q) {
     char b[96];
     std::snprintf(b, sizeof(b), "(% .4f,% .4f,% .4f,% .4f)", q.w, q.x, q.y, q.z);

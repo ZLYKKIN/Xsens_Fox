@@ -9,8 +9,8 @@ namespace fox::body {
 
 namespace {
 
-constexpr double cos_half(double th) { return std::cos(0.5 * th); }
-constexpr double sin_half(double th) { return std::sin(0.5 * th); }
+inline double cos_half(double th) { return std::cos(0.5 * th); }
+inline double sin_half(double th) { return std::sin(0.5 * th); }
 
 Quat axisX(double thRad) { return Quat(cos_half(thRad), sin_half(thRad), 0, 0); }
 Quat axisY(double thRad) { return Quat(cos_half(thRad), 0, sin_half(thRad), 0); }
@@ -265,25 +265,22 @@ std::pair<float, float> deriveRange(const SpcFeatureSpec& f) {
 
 std::array<SpcFeatureSpec, kSpcFeatureCount> buildSpecs() {
     std::array<SpcFeatureSpec, kSpcFeatureCount> out{};
-    extern const std::array<const char*, kSpcFeatureCount> kFeatureNames;
     for (int i = 0; i < kSpcFeatureCount; ++i) {
-        out[i] = parseFeatureName(kFeatureNames[i]);
+        out[i] = parseFeatureName(::fox::body::kFeatureNames[i]);
     }
     return out;
 }
 std::array<float, kSpcFeatureCount> buildRangeLo() {
-    extern const std::array<SpcFeatureSpec, kSpcFeatureCount> kFeatureSpecs;
     std::array<float, kSpcFeatureCount> out{};
     for (int i = 0; i < kSpcFeatureCount; ++i) {
-        out[i] = deriveRange(kFeatureSpecs[i]).first;
+        out[i] = deriveRange(::fox::body::kFeatureSpecs[i]).first;
     }
     return out;
 }
 std::array<float, kSpcFeatureCount> buildRangeHi() {
-    extern const std::array<SpcFeatureSpec, kSpcFeatureCount> kFeatureSpecs;
     std::array<float, kSpcFeatureCount> out{};
     for (int i = 0; i < kSpcFeatureCount; ++i) {
-        out[i] = deriveRange(kFeatureSpecs[i]).second;
+        out[i] = deriveRange(::fox::body::kFeatureSpecs[i]).second;
     }
     return out;
 }
