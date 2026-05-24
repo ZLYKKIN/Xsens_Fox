@@ -5153,9 +5153,23 @@ void MocapReceiver::run()
                 const QVector3D accSI(float(velInc.x() * I.freqHz),
                                       float(velInc.y() * I.freqHz),
                                       float(velInc.z() * I.freqHz));
-                const QVector3D gyrSI(float(2.0 * dq.x * I.freqHz),
-                                      float(2.0 * dq.y * I.freqHz),
-                                      float(2.0 * dq.z * I.freqHz));
+
+                const double vNorm = std::sqrt(dq.x * dq.x +
+                                               dq.y * dq.y +
+                                               dq.z * dq.z);
+                double phiX = 0.0, phiY = 0.0, phiZ = 0.0;
+                if (vNorm > 1e-12) {
+                    const double absW = std::min(1.0, std::abs(dq.w));
+                    const double halfAngle = std::atan2(vNorm, absW);
+                    const double sgn = (dq.w >= 0.0) ? 1.0 : -1.0;
+                    const double scale = (2.0 * halfAngle) / vNorm;
+                    phiX = sgn * dq.x * scale;
+                    phiY = sgn * dq.y * scale;
+                    phiZ = sgn * dq.z * scale;
+                }
+                const QVector3D gyrSI(float(phiX * I.freqHz),
+                                      float(phiY * I.freqHz),
+                                      float(phiZ * I.freqHz));
                 accForFilter = accSI * float(kMs2ToG);
                 gyrForFilter = gyrSI * float(kRadToDeg);
                 fuseReady = true;
