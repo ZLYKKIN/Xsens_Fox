@@ -8231,6 +8231,9 @@ void NewSessionWizard::onCaptureTick()
             QString style = "color:#9B9B9B;";
             if (!rep.haveData) {
                 msg   = Lang::t("asl_no_data");
+            } else if (rep.suitUncertaintyAlarm) {
+                msg   = Lang::t("asl_low_confidence");
+                style = "color:#E04545; font-weight:700;";
             } else if (rep.avgMaxP < 0.35f) {
                 msg   = Lang::t("asl_low_confidence");
                 style = "color:#E0A030; font-weight:700;";
