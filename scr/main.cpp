@@ -955,9 +955,10 @@ public:
                 const QVector3D phiK = quat_log(quat_mult(o[lowerSeg],
                                                           o[upperSeg].conj()).normalized());
                 const double thKnee = std::abs(double(phiK.y()));
-                const double thScrew = fb::kCKnees[1] * (1.0 - std::cos(thKnee))
-                                       * fb::kKneeScrewMaxDeg
-                                       * fb::constants::kDeg2Rad;
+                const double thScrew = (fb::kCKnees[0] +
+                                         fb::kCKnees[2] * (1.0 - std::cos(thKnee))) *
+                                        fb::kKneeScrewMaxDeg *
+                                        fb::constants::kDeg2Rad;
                 const double signed_screw = isRight ? thScrew : -thScrew;
                 if (std::abs(signed_screw) < 1e-7) return;
                 const Quat dq(std::cos(0.5*signed_screw), 0.0, 0.0,
@@ -1019,8 +1020,7 @@ public:
             auto evalLegBi = [&](int upperLeg, int foot) {
                 const QVector3D phiHip = quat_log(
                     quat_mult(o[upperLeg], o[0].conj()).normalized());
-                const double targetDorsiY =
-                    fb::kCLegs[0] * fb::kCLegs[1] * double(phiHip.y());
+                const double targetDorsiY = fb::kCLegs[1] * double(phiHip.y());
                 const QVector3D phiFoot = quat_log(
                     quat_mult(o[foot], o[upperLeg].conj()).normalized());
                 const Quat dqTarget = quat_exp_rotvec(double(phiFoot.x()),
@@ -1375,9 +1375,10 @@ public:
                 const QVector3D phiK = quat_log(quat_mult(orient[lowerSeg],
                                                           orient[upperSeg].conj()).normalized());
                 const double thKnee = std::abs(double(phiK.y()));
-                const double thScrew = fb::kCKnees[1] * (1.0 - std::cos(thKnee))
-                                       * fb::kKneeScrewMaxDeg
-                                       * fb::constants::kDeg2Rad;
+                const double thScrew = (fb::kCKnees[0] +
+                                         fb::kCKnees[2] * (1.0 - std::cos(thKnee))) *
+                                        fb::kKneeScrewMaxDeg *
+                                        fb::constants::kDeg2Rad;
                 const double signedScrew = isRight ? thScrew : -thScrew;
                 if (isRight) {
                     d.kneeFlexRDeg  = thKnee * fb::constants::kRad2Deg;
@@ -1449,7 +1450,7 @@ public:
                 const QVector3D phiHip = quat_log(
                     quat_mult(orient[upperLeg], orient[0].conj()).normalized());
                 const double hipFlexY = double(phiHip.y());
-                const double targetDorsiY = fb::kCLegs[0] * fb::kCLegs[1] * hipFlexY;
+                const double targetDorsiY = fb::kCLegs[1] * hipFlexY;
 
                 const QVector3D phiFoot = quat_log(
                     quat_mult(orient[foot], orient[upperLeg].conj()).normalized());
@@ -2097,7 +2098,9 @@ void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
                       << fb::kCArms[2]
                       << " (max)]  scapulo-humeral piecewise-linear\n";
             std::cout << "[bio §47.1] c_knees=[" << fb::kCKnees[0]
-                      << ", " << fb::kCKnees[1] << "]"
+                      << ", " << fb::kCKnees[1]
+                      << ", " << fb::kCKnees[2]
+                      << ", " << fb::kCKnees[3] << "]"
                       << "  screw-home max " << fb::kKneeScrewMaxDeg << "°\n";
             std::cout << "[bio §48.1] c_ankles=[" << fb::kCAnkles[0]
                       << ", " << fb::kCAnkles[1] << " (=" << (fb::kCAnkles[1]
@@ -2303,9 +2306,9 @@ void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
            << "° w=" << d.toeWeightL << "\n";
 
         ss << "[coupling-wls leg-bi] c_legs=["
-           << fb::kCLegs[0] << ", " << fb::kCLegs[1]
-           << "]  effective gain=" << (fb::kCLegs[0] * fb::kCLegs[1])
-           << " (hipFlexY · gain → target ankle dorsi Y)\n";
+           << fb::kCLegs[0] << ", " << fb::kCLegs[1] << ", " << fb::kCLegs[2]
+           << "]  effective gain=" << fb::kCLegs[1]
+           << " (hipFlexY · c_legs[1] → target ankle dorsi Y)\n";
         ss << std::setprecision(4);
     }
 

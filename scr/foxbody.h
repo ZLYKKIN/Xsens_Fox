@@ -347,9 +347,9 @@ inline constexpr std::array<double, 2> kCPelvis = { 0.35, 25.0 };
 
 inline constexpr std::array<double, 3> kCArms = { 0.95, 0.95, 0.99 };
 
-inline constexpr std::array<double, 2> kCLegs  = { 0.9,  0.95 };
+inline constexpr std::array<double, 3> kCLegs  = { 0.5, 0.3, 0.15 };
 
-inline constexpr std::array<double, 2> kCKnees = { 0.9,  0.95 };
+inline constexpr std::array<double, 4> kCKnees = { 0.05, 0.1, 0.95, 1.0 };
 
 inline constexpr std::array<double, 4> kCAnkles = { 2.0, 0.523599, 0.5, 0.0 };
 
