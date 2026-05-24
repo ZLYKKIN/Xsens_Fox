@@ -3768,6 +3768,8 @@ using FnDeviceTakeFirstDataPacketInQueue =
                                         XsDataPacketBlob*(*)(void*, XsDataPacketBlob*);
 using FnDeviceLastAvailableLiveData   = XsDataPacketBlob*(*)(void*, XsDataPacketBlob*);
 using FnDevicePacketErrorRate         = int(*)(void*);
+using FnDeviceProductCode             = void*(*)(void*, void*);
+using FnDeviceHardwareVersion         = void*(*)(void*, void*);
 
 using FnScanPorts                     = void(*)(void*, int, int, int, int);
 using FnArrayAt                       = void*(*)(void*, std::size_t);
@@ -3831,6 +3833,8 @@ struct Api {
     FnDeviceGotoConfig               deviceGotoConfig       = nullptr;
     FnDeviceGotoMeasurement          deviceGotoMeasurement  = nullptr;
     FnDeviceLocationId               deviceLocationId       = nullptr;
+    FnDeviceProductCode              deviceProductCode      = nullptr;
+    FnDeviceHardwareVersion          deviceHardwareVersion  = nullptr;
     FnDeviceUpdateRate               deviceUpdateRate       = nullptr;
     FnDeviceGetDataPacketCount       deviceGetDataPacketCount = nullptr;
     FnDeviceTakeFirstDataPacketInQueue deviceTakeFirstDataPacketInQueue = nullptr;
@@ -3968,6 +3972,8 @@ static bool loadApi(Api& api, QString& errDetail)
     ok &= resolveProc(api.xda, "XsDevice_gotoConfig",               api.deviceGotoConfig);
     ok &= resolveProc(api.xda, "XsDevice_gotoMeasurement",          api.deviceGotoMeasurement);
     ok &= resolveProc(api.xda, "XsDevice_locationId",               api.deviceLocationId);
+    resolveProc (api.xda, "XsDevice_productCode",                   api.deviceProductCode);
+    resolveProc (api.xda, "XsDevice_hardwareVersion",               api.deviceHardwareVersion);
     resolveProc (api.xda, "XsDevice_updateRate",                    api.deviceUpdateRate);
     ok &= resolveProc(api.xda, "XsDevice_getDataPacketCount",       api.deviceGetDataPacketCount);
     ok &= resolveProc(api.xda, "XsDevice_takeFirstDataPacketInQueue",
