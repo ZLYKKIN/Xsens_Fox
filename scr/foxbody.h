@@ -680,7 +680,7 @@ inline constexpr ContactParams kContact = {
 inline constexpr int kFingerSensorsPerHand = 17;
 inline constexpr int kFingerSegmentsPerHand = 20;
 
-inline constexpr std::array<int, 5> kFingerBoneCount = { 3, 3, 4, 4, 3 };
+inline constexpr std::array<int, 5> kFingerBoneCount = { 3, 4, 4, 4, 4 };
 
 
 
