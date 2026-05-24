@@ -18,6 +18,76 @@ constexpr int kContactRows  = 26;
 enum Pose : std::uint8_t   { PoseT = 0, PoseN = 1 };
 enum Gender : std::uint8_t { GenderLegacy = 0, GenderMale = 1, GenderFemale = 2 };
 
+struct AnthroProportions {
+    double trunkRatio;
+    double thighRatio;
+    double shankRatio;
+    double handRatio;
+    double forearmRatio;
+    double upperArmRatio;
+    double shoulderWidthRatio;
+    double hipWidthRatio;
+    double hipHeightRatio;
+    double kneeHeightRatio;
+    double ankleHeightRatio;
+    double footRatio;
+};
+
+inline constexpr AnthroProportions kAnthroMale = {
+    .trunkRatio          = 0.295,
+    .thighRatio          = 0.245,
+    .shankRatio          = 0.246,
+    .handRatio           = 0.108,
+    .forearmRatio        = 0.146,
+    .upperArmRatio       = 0.186,
+    .shoulderWidthRatio  = 0.234,
+    .hipWidthRatio       = 0.181,
+    .hipHeightRatio      = 0.510,
+    .kneeHeightRatio     = 0.293,
+    .ankleHeightRatio    = 0.039,
+    .footRatio           = 0.144,
+};
+
+inline constexpr AnthroProportions kAnthroFemale = {
+    .trunkRatio          = 0.292,
+    .thighRatio          = 0.245,
+    .shankRatio          = 0.246,
+    .handRatio           = 0.108,
+    .forearmRatio        = 0.146,
+    .upperArmRatio       = 0.186,
+    .shoulderWidthRatio  = 0.222,
+    .hipWidthRatio       = 0.184,
+    .hipHeightRatio      = 0.505,
+    .kneeHeightRatio     = 0.290,
+    .ankleHeightRatio    = 0.039,
+    .footRatio           = 0.144,
+};
+
+inline constexpr AnthroProportions kAnthroLegacy = {
+    .trunkRatio          = 0.288,
+    .thighRatio          = 0.238,
+    .shankRatio          = 0.232,
+    .handRatio           = 0.105,
+    .forearmRatio        = 0.140,
+    .upperArmRatio       = 0.171,
+    .shoulderWidthRatio  = 0.234,
+    .hipWidthRatio       = 0.181,
+    .hipHeightRatio      = 0.510,
+    .kneeHeightRatio     = 0.293,
+    .ankleHeightRatio    = 0.039,
+    .footRatio           = 0.144,
+};
+
+inline constexpr const AnthroProportions& anthroFor(Gender g)
+{
+    switch (g) {
+        case GenderMale:   return kAnthroMale;
+        case GenderFemale: return kAnthroFemale;
+        case GenderLegacy:
+        default:           return kAnthroLegacy;
+    }
+}
+
 enum class ConfigurationLabel : std::uint8_t {
     FullBody = 0,
     FullBodyNoSternum,

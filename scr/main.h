@@ -137,6 +137,9 @@ struct ActorConfig {
     double hipWidthCm      = 0.0;
     double shoulderWidthCm = 0.0;
     double trunkLengthCm   = 0.0;
+
+    fox::body::Gender gender = fox::body::GenderMale;
+
     bool   useGloves       = false;
 };
 
