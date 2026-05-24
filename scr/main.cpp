@@ -11723,15 +11723,19 @@ void MainWindow::onRenderTick()
 
         if (f.segValid[i] && s_haveOut[i]) {
             const double jumpDeg = quat_angle_deg(quat_mult(cand, s_lastOut[i].inv()));
+            const float kGyroQuietSq = float(fox::body::kJumpDetect.gyroQuietDegS *
+                                              fox::body::kJumpDetect.gyroQuietDegS);
             const bool gyroQuiet =
-                (f.gyrSensor[SEG_Pelvis].lengthSquared() < (25.0f * 25.0f)) &&
-                (f.gyrSensor[i].lengthSquared()          < (25.0f * 25.0f));
+                (f.gyrSensor[SEG_Pelvis].lengthSquared() < kGyroQuietSq) &&
+                (f.gyrSensor[i].lengthSquared()          < kGyroQuietSq);
             g_renderDiag.jumpDeg[i]   = jumpDeg;
             g_renderDiag.gyroQuiet[i] = gyroQuiet;
 
-            if (gyroQuiet && jumpDeg > 20.0) {
+            if (gyroQuiet && jumpDeg > fox::body::kJumpDetect.threshDeg) {
                 auto smoothstep01 = [](double x){ x = std::clamp(x,0.0,1.0); return x*x*(3.0-2.0*x); };
-                const double rejectW = smoothstep01((jumpDeg - 20.0) / 15.0);
+                const double rejectW = smoothstep01(
+                    (jumpDeg - fox::body::kJumpDetect.threshDeg) /
+                    std::max(1.0, fox::body::kJumpDetect.blendRangeDeg));
                 g_renderDiag.rejectW[i] = rejectW;
                 if (rejectW > 0.999) {
                     if (m_test) {

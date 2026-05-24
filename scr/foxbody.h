@@ -697,6 +697,17 @@ inline constexpr std::array<Quat, kFingerSegmentsPerHand> kFingerQBSLeft = {{
     Quat(1, 0, 0, 0), Quat(1, 0, 0, 0), Quat(1, 0, 0, 0), Quat(1, 0, 0, 0),
 }};
 
+struct JumpDetectParams {
+    double threshDeg;
+    double blendRangeDeg;
+    double gyroQuietDegS;
+};
+inline constexpr JumpDetectParams kJumpDetect = {
+    .threshDeg     = 20.0,
+    .blendRangeDeg = 15.0,
+    .gyroQuietDegS = 25.0,
+};
+
 struct FingerSmoothParams {
     float emaAlphaThumb;
     float emaAlphaFinger;
