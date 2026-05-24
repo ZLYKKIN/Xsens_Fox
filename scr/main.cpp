@@ -4392,6 +4392,13 @@ static void parseErgoHand(const float* degs20, bool isLeft,
         outP[baseIdx + 3] = p;
     }
     {
+        const auto& qbs = isLeft ? fox::body::kFingerQBSLeft
+                                  : fox::body::kFingerQBSRight;
+        for (int i = 0; i < int(outQ.size()) && i < int(qbs.size()); ++i) {
+            outQ[i] = quat_mult(outQ[i], qbs[i]).normalized();
+        }
+    }
+    {
         QMutexLocker lk(&g_fingerDiag.lock);
         (isLeft ? g_fingerDiag.left : g_fingerDiag.right) = dg;
     }
