@@ -10155,6 +10155,7 @@ void MocapViewport::drawSkeleton()
         const QVector3D pR = kp[SEG_RHand];
         const QVector3D pL = kp[SEG_LHand];
         const float d = (pR - pL).length();
+        // жест «руки вместе» (расстояние кистей < 0.15 м) — локальный триггер вспомогательной коррекции курса
         constexpr float kPrayerRange = 0.15f;
         if (d < kPrayerRange && d > 1e-3f) {
             const Quat qRW = quat_mult(m_orient[SEG_RHand], m_skel->defAngFor(SEG_RHand));
