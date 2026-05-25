@@ -3068,6 +3068,11 @@ SkeletonXsens::addDummySegments(const std::array<Quat, kXsensSegmentCount>& s) c
     return out;
 }
 
+// formules.txt §35 (стр. 75933): сквозной конвейер «сенсор→поза». Здесь шаги 4-10 на кадр:
+// raw = q_B→G (после §24.5/§25.3) → oriented=raw⊗defAng → refine (решатель §13/X + контакт + сглаживание)
+// → FK §11 (kp[b]=kp[a]+boneVec, §2224). Инварианты §35 проверены по блокам: |q|=1 (II),
+// углы в градусах 180/π, мир NWU §25.2 (VI), коэффициенты=данные (XI/XXIV). Единицы согласованы
+// на границах: гиро °/с + акс g в FoxKF (IX), позиции м, BVH/FBX см, MXTP21 углы град.
 std::array<QVector3D, kXsensKeypointCount>
 SkeletonXsens::computeKeypoints(const std::array<Quat, kXsensSegmentCount>& raw,
                                 const QVector3D& rootPos,
