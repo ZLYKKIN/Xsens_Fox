@@ -745,6 +745,7 @@ private:
     class QProgressBar*  m_countdownBar = nullptr;
     class QProgressBar*  m_readyBar     = nullptr;
     class QPushButton*   m_btnCalibBegin = nullptr;
+    class QCheckBox*     m_chkSensorCheck = nullptr;   // опц. протокол движений ASL (выкл по умолч.)
     class QLabel*        m_calibStatus   = nullptr;
 
     QTimer m_countTimer;
@@ -835,8 +836,9 @@ private:
 
     // --- ASL: протокол движений 5 эпох (после N-позы) ---
     // 0=walk(→epochCalibration), 1=LArm, 2=RArm, 3=LLeg, 4=RLeg.
-    int m_moveStage         = 0;
-    int m_moveStageStartIdx = 0;     // m_aslOutCount на старте текущей стадии движения
+    int  m_moveStage         = 0;
+    int  m_moveStageStartIdx = 0;    // m_aslOutCount на старте текущей стадии движения
+    bool m_doSensorCheck     = false; // запускать протокол движений (по галочке, выкл по умолч.)
 
     class QLabel*        m_readyTitle = nullptr;
     class QLabel*        m_readySummary = nullptr;

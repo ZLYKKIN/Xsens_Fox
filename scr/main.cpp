@@ -31,6 +31,7 @@
 #include <QtWidgets/QSpinBox>
 #include <QtWidgets/QSlider>
 #include <QtWidgets/QScrollArea>
+#include <QtWidgets/QCheckBox>
 #include <QtWidgets/QFrame>
 #include <QtWidgets/QProgressDialog>
 #include <QtCore/QFile>
@@ -6575,6 +6576,10 @@ static const Tr kTr[] = {
     {"calib_rleg_capture", "Поднимите и опустите ПРАВУЮ ногу",  "Raise and lower your RIGHT leg"},
     {"calib_move_hint",    "Движение для авто-проверки размещения датчиков",
                            "Motion for sensor-placement auto-check"},
+    {"asl_check_label",    "Проверить размещение датчиков (≈40 с движений после калибровки)",
+                           "Verify sensor placement (≈40 s of motions after calibration)"},
+    {"asl_skipped",        "FoxSPC: проверка размещения пропущена",
+                           "FoxSPC: placement check skipped"},
     {"calib_pose_empty",   "Калибровка позы не получила стабильных данных (актёр двигался или сенсоры не передают). Качество будет низким — рекомендуется повторить калибровку.", "Pose calibration captured no stable data (actor moved or sensors not streaming). Quality will be poor — recommend recalibrating."},
 
     {"asl_loading_failed", "FoxSPC: модель размещения датчиков не загрузилась — авто-проверка отключена",
@@ -7948,6 +7953,15 @@ void NewSessionWizard::buildPages()
         connect(m_btnCalibBegin, &QPushButton::clicked,
                 this, &NewSessionWizard::onCalibrationBegin);
 
+        // Опц. протокол движений ASL (проверка размещения датчиков), выкл по умолчанию.
+        // На трекинг не влияет; добавляет ~40с (ходьба + подъёмы рук/ног).
+        m_chkSensorCheck = new QCheckBox(p);
+        m_chkSensorCheck->setChecked(false);
+        m_chkSensorCheck->setEnabled(m_liveSpcEnabled);   // нет модели → проверка недоступна
+        m_chkSensorCheck->setStyleSheet("color:#9B9B9B; font-size:9pt;");
+        connect(m_chkSensorCheck, &QCheckBox::toggled,
+                this, [this](bool on) { m_doSensorCheck = on; });
+
         auto* scrollHost = new QWidget(p);
         auto* hostLay    = new QVBoxLayout(scrollHost);
         hostLay->setContentsMargins(0, 0, 0, 0);
@@ -7968,6 +7982,8 @@ void NewSessionWizard::buildPages()
         hostLay->addWidget(m_calibStatus);
         hostLay->addWidget(m_calibQuality);
         hostLay->addWidget(m_placementInfo);
+        hostLay->addSpacing(8);
+        hostLay->addWidget(m_chkSensorCheck, 0, Qt::AlignHCenter);
         hostLay->addSpacing(12);
         hostLay->addWidget(m_btnCalibBegin, 0, Qt::AlignHCenter);
 
@@ -8132,6 +8148,7 @@ void NewSessionWizard::retranslate()
         m_poseHint->setText(Lang::t(isNPosePhase() ? "npose_hint" : "tpose_hint"));
     }
     if (m_btnCalibBegin)  m_btnCalibBegin->setText(Lang::t("start_calib"));
+    if (m_chkSensorCheck) m_chkSensorCheck->setText(Lang::t("asl_check_label"));
     if (m_readyTitle)     m_readyTitle->setText(Lang::t("ready_title"));
     if (m_readySummary)   m_readySummary->setText(Lang::t("ready_summary")
                             .arg(Lang::t("finish")));
@@ -8603,7 +8620,7 @@ void NewSessionWizard::onCaptureTick()
     // formules [1704] (40745): фазовый ресемплер служебного буфера признаков ASL
     // до ровно 60 Гц (downsample с нативной частоты костюма). ТОЛЬКО вход
     // классификатора; основной мокап и q_align идут на нативной частоте костюма.
-    const bool aslCapturing = m_liveSpcEnabled
+    const bool aslCapturing = m_liveSpcEnabled && m_doSensorCheck
         && (m_phase == CalibPhase::CaptureT
          || m_phase == CalibPhase::CaptureN
          || m_phase == CalibPhase::CaptureMove);
@@ -9017,10 +9034,11 @@ void NewSessionWizard::onCaptureTick()
         std::cout.flush();
     }
 
-    // q_align решён и применён. Запускаем протокол движений ASL (5 эпох, formules
-    // [1704]/[1728]): walk + подъёмы Л/П руки и Л/П ноги. По завершении последней стадии
-    // все 5 эпох заполнены → finishCalibrationAsl() прогонит классификатор и завершит.
-    if (m_liveSpcEnabled && g_placementClf().ready) {
+    // q_align решён и применён — основная калибровка завершена. Протокол движений ASL
+    // (5 эпох, formules [1704]/[1728]: walk + подъёмы Л/П руки и Л/П ноги) запускается
+    // ТОЛЬКО по галочке m_doSensorCheck — он нужен лишь для проверки размещения датчиков
+    // и на трекинг не влияет. Иначе сразу финал (без прогона классификатора).
+    if (m_doSensorCheck && m_liveSpcEnabled && g_placementClf().ready) {
         m_moveStage = 0;
         beginMoveStage();
         return;
@@ -9033,7 +9051,12 @@ void NewSessionWizard::onCaptureTick()
 void NewSessionWizard::finishCalibrationAsl()
 {
     if (m_placementInfo) {
-        if (!m_liveSpcEnabled || !g_placementClf().ready) {
+        if (!m_doSensorCheck) {
+            // протокол движений не выполнялся → классификатор не гоняем (иначе из пустых
+            // эпох вышли бы недостоверные предупреждения). Калибровка q_align при этом валидна.
+            m_placementInfo->setText(Lang::t("asl_skipped"));
+            m_placementInfo->setStyleSheet("color:#9B9B9B;");
+        } else if (!m_liveSpcEnabled || !g_placementClf().ready) {
             m_placementInfo->setText(Lang::t("asl_loading_failed"));
             m_placementInfo->setStyleSheet("color:#9B9B9B;");
         } else {
