@@ -1175,6 +1175,7 @@ struct MultiLevelParams {
     double zhSameSegmentBonus;
     double zhSameSegmentPenalty;
 };
+// formules.txt §52.6 (стр. 16131): многоуровневый пол (лестница) — совпадает точно.
 inline constexpr MultiLevelParams kMultiLevel = {
     .averagingStairHeight          = 5,
     .maxDevFromAvgStairHeight      = 0.05,
@@ -1233,6 +1234,9 @@ struct FootPoint {
     int       pointId;
     QVector3D r_local;
 };
+// formules.txt §37.6 (стр. 12297)/§38.1 (стр. 13000): контактные точки стопы (м) —
+// пятка pHeel(-0.036,0,-0.08), 1-я плюсна(0.116,∓0.038,-0.08), 5-я(0.116,±0.036,-0.08).
+// Совпадают точно; левая стопа — Y-зеркало (§37.3/§25.2). Точки 3/4/5/6 = HS/FF/HO/TO (§49.1).
 inline constexpr std::array<FootPoint, 4> kFootPointsRight = {{
     { 3, QVector3D(-0.036f,  0.000f, -0.080f) },
     { 4, QVector3D( 0.116f, -0.038f, -0.080f) },
