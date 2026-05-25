@@ -9648,6 +9648,15 @@ void SensorIndicatorsPanel::setSuitLive(bool live, const QString& )
     }
 }
 
+void SensorIndicatorsPanel::clearLiveDots()
+{
+    // B-UI-3: при обрыве костюма гасим все точки трекеров/пальцев СРАЗУ. Иначе updateFromPose
+    // держит их «живыми» до таймаута ~2с (последний кадр ещё «свежий») — оператор видит ложный
+    // live. Индикатор самого костюма гасит setSuitLive(false).
+    for (auto& t : m_trackers) if (t.dot) setDot(t.dot, false);
+    for (auto& g : m_fingers)  if (g.dot) setDot(g.dot, false);
+}
+
 void SensorIndicatorsPanel::setFps(double hz) { m_lblFps->setText(QString("%1 Hz").arg(hz, 0, 'f', 1)); }
 
 void SensorIndicatorsPanel::setSessionRunning(bool running)
@@ -12470,6 +12479,7 @@ void MainWindow::onConnStatusChanged(int status, const QString& )
     const ConnStatus s = (ConnStatus)status;
     const bool streaming = (s == ConnStatus::Streaming);
     m_panel->setSuitLive(streaming, {});
+    if (!streaming) m_panel->clearLiveDots();   // B-UI-3: гасим точки сразу, не ждём таймаут 2с
 
     if (!streaming && m_sessionRunning)      onPauseSession();
     else if (streaming && !m_sessionRunning) onResumeSession();
