@@ -3355,7 +3355,7 @@
 2217.  REAL-TIME PERFORMANCE METRICS
 ================================================================================
   Метрики displayed в UI и log:
-     FPS (frames/sec) — should match SampleRate (240 / 90);
+     FPS (frames/sec) — should match SampleRate (240 / 60);
      latency total (мс) — IMU sample to display;
      packet_loss_rate (%);
      CPU usage of FoxKF + FoxFE (% of core);
@@ -10148,7 +10148,7 @@
 
   ── КЛЮЧЕВЫЕ ФОРМУЛЫ И КОЭФФИЦИЕНТЫ ────────────────────────────────────
      • 12-D state: [δθ, b_g, b_a, m_W_res]^T
-     • Δt = 1/240 с (Fox_Link) или 1/90 (Fox_AW)
+     • Δt = 1/240 с (Fox_Link) или 1/60 (Fox_AW)
      • Q_δθ = nd_gyr² × Δt = 9.4e-7 рад² для Fox_HW_W2
      • R_acc = nd_acc² × fs ≈ 5.4e-4 (м/с²)²
      • R_mag = (0.02, 0.02, 0.03)² = (4e-4, 4e-4, 9e-4)
@@ -19887,7 +19887,7 @@
 ================================================================================
 2088.  ВРЕМЕННОЙ БЮДЖЕТ ВСЕЙ ЦЕПИ — END-TO-END
 ================================================================================
-  Этап                            | Fox_Link 240 Гц | Fox_Wireless 90 Гц
+  Этап                            | Fox_Link 240 Гц | Fox_Wireless 60 Гц
   --------------------------------+------------------+--------------------
   ① ADC quantize (внутри чипа)     | 0.1 мс           | 0.1 мс
   ② Calibration (внутри чипа)      | 0.05 мс          | 0.05 мс
@@ -20154,7 +20154,7 @@
      repeat.
 
   ── В МOTION CAPTURE ──────────────────────────────────────────────────────
-     Используется time-stepping (240 / 90 Hz fixed);
+     Используется time-stepping (240 / 60 Hz fixed);
      Events (heel-strike, takeoff) detected within step;
      Sub-step interpolation для precise timing метрик.
 
@@ -39972,9 +39972,9 @@
   «помочь» RTS на отсутствующих данных (это вызывает divergence).
 
 ================================================================================
-2038.  АНТИАЛИАСИНГ ФИЛЬТР МЕЖДУ 240 Гц И 90 Гц
+2038.  АНТИАЛИАСИНГ ФИЛЬТР МЕЖДУ 240 Гц И 60 Гц
 ================================================================================
-  Чип IMU работает на 1000 Гц internally. Прежде чем выдать на 240 или 90 Гц
+  Чип IMU работает на 1000 Гц internally. Прежде чем выдать на 240 или 60 Гц
   применяется цифровой LPF + decimation:
 
   Для 240 Гц:
@@ -39983,27 +39983,27 @@
      decimation factor = 1000/240 ≈ 4.17 (через polyphase filter);
      attenuation в stopband: 80 dB.
 
-  Для 90 Гц:
+  Для 60 Гц:
      internal_rate = 1000 Гц;
-     LPF cutoff = 45 Гц (Nyquist of 90);
-     decimation factor = 1000/90 ≈ 11.11;
+     LPF cutoff = 30 Гц (Nyquist of 60);
+     decimation factor = 1000/60 ≈ 16.67;
      attenuation: 80 dB.
 
   ── ВЛИЯНИЕ НА ВЫСОКОЧАСТОТНЫЕ ДВИЖЕНИЯ ────────────────────────────────────
   Удары (impacts) имеют спектр до 200-500 Гц.
      Fox_Link 240 Гц: возможно detected импульс до 120 Гц без потерь;
-     Fox_Wireless 90 Гц: импульс выше 45 Гц затухает > 40 dB.
+     Fox_Wireless 60 Гц: импульс выше 30 Гц затухает > 40 dB.
   Поэтому для precision удара (boxing, удары мяча) рекомендуется Fox_Link.
-  Для VR/обычного спорта 90 Гц достаточно.
+  Для обычного спорта/стриминга 60 Гц достаточно.
 
 ================================================================================
 2039.  RATE MATCHING — ИНТЕРПОЛЯЦИЯ МЕЖДУ ЧАСТОТАМИ
 ================================================================================
   Часто требуется матчить выход FoxKF с output rate приложения:
      IMU 240 Гц → VR shader 90 Гц = downsampling;
-     IMU 90 Гц → animation system 30 Гц = downsampling;
+     IMU 60 Гц → animation system 30 Гц = downsampling;
      IMU 240 Гц → animation 24 Гц (film) = downsampling 10:1;
-     IMU 90 Гц → VR shader 120 Гц = upsampling.
+     IMU 60 Гц → VR shader 120 Гц = upsampling.
 
   ── DOWNSAMPLING (выход реже чем IMU rate) ────────────────────────────────
   ВАРИАНТ 1: drop frames (просто берём каждый N-й):
@@ -40160,16 +40160,16 @@
      - большое compliance: расслабленное (relaxed actor or injured).
 
 ================================================================================
-2142.  ИНТЕРПОЛЯЦИЯ 90 → 240 (upsample with anti-imaging filter)
+2142.  ИНТЕРПОЛЯЦИЯ 60 → 240 (upsample with anti-imaging filter)
 ================================================================================
-  Если IMU 90 Hz, но shader/viewport требует 240 Hz:
-     factor = 240/90 = 8/3;
-     upsample factor = 8/3;
+  Если IMU 60 Hz, но shader/viewport требует 240 Hz:
+     factor = 240/60 = 4;
+     upsample factor = 4;
      для shader 1: linear or SLERP interpolation between 2 IMU samples;
      для cleaner result: anti-imaging filter после insert zeros.
 
   ── ПРАКТИКА ───────────────────────────────────────────────────────────────
-  Для VR shader на 240 Hz из IMU 90 Hz:
+  Для VR shader на 240 Hz из IMU 60 Hz:
      each shader frame t:
          t_prev = floor((t-t_0) / Δt_IMU) × Δt_IMU + t_0;
          t_next = t_prev + Δt_IMU;
@@ -41855,7 +41855,7 @@
      MOTION
      Frames: <N_frames>
      Frame Time: <Δt_seconds>      # для 240 Гц = 0.004166666666666667
-                                    # для 90 Гц  = 0.011111111111111112
+                                    # для 60 Гц  = 0.016666666666666666
   Затем N_frames строк, каждая со всеми channel values:
      <px> <py> <pz>  <root_rotZ> <root_rotX> <root_rotY>  <child1_rotZ> ...
 
@@ -41984,7 +41984,7 @@
   Наш протокол:
      - TCP/IP или UDP socket;
      - JSON или binary payload (binary efficient);
-     - rate: соответствует Fox_KF output rate (240 или 90 Гц).
+     - rate: соответствует Fox_KF output rate (240 или 60 Гц).
 
   ── BINARY PROTOCOL (предпочтительный) ─────────────────────────────────────
   Формат frame:
@@ -42054,7 +42054,7 @@
 2054.  BLENDER — RATE MATCHING (240 → 24/30/60/90)
 ================================================================================
   Blender FPS обычно 24 (film), 30 (TV), 60 (web), 120 (VR).
-  Наш IMU rate 240 (Fox_Link) или 90 (Fox_Wireless) НЕ всегда совпадает.
+  Наш IMU rate 240 (Fox_Link) или 60 (Fox_Wireless) НЕ всегда совпадает.
 
   Стратегии:
      - Запись с native rate, экспорт с native rate → Blender сам интерполирует;
@@ -42418,7 +42418,7 @@
   Размеры:
      Полный пакет: 28 + 444 + 4 = 476 байт для 1 actor;
      При 240 Hz: 240 × 476 = 111 КБ/с;
-     При 90 Hz: 42 КБ/с;
+     При 60 Hz: 28 КБ/с;
      Помещается в UDP MTU (1500 байт) без fragmentation.
 
 ================================================================================
@@ -42885,7 +42885,7 @@
   на большие расстояния (>50 м) — там m_W действительно может отличаться.
 
 ================================================================================
-2035.  ДВА ОСНОВНЫХ РЕЖИМА — 240 Гц FOX_LINK vs 90 Гц FOX_WIRELESS
+2035.  ДВА ОСНОВНЫХ РЕЖИМА — 240 Гц FOX_LINK vs 60 Гц FOX_WIRELESS
 ================================================================================
   Fox_HW поддерживает два типа беспроводной связи с различной частотой:
 
@@ -42897,24 +42897,24 @@
      - max sensors per Master: 17 (full body);
      - использование: motion capture премиум-класса, медицина.
 
-  Fox_Wireless (90 Гц):
+  Fox_Wireless (60 Гц):
      - стандартный беспроводной канал (BLE 5+);
-     - sample rate: 90 Гц (некоторые модели — 60/100/120);
-     - Δt = 1/90 ≈ 11.11 мс;
+     - sample rate: 60 Гц (полнотельная 17 сенсоров; меньше сенсоров — до 100/120 Гц);
+     - Δt = 1/60 ≈ 16.67 мс;
      - latency end-to-end: 8−15 мс;
      - max sensors per Master: 17 (но throughput ниже);
      - использование: VR-приложения, спорт, обычный mocap.
 
   ── РАЗЛИЧИЯ В МАТЕМАТИКЕ ────────────────────────────────────────────────
-  Δt в 2.67 раза больше у Fox_Wireless → шаги интегрирования больше:
+  Δt в 4 раза больше у Fox_Wireless → шаги интегрирования больше:
      σ_gyr_per_step_link = 0.015 · √(1/240) = 9.68e−4 рад/с;
-     σ_gyr_per_step_wireless = 0.015 · √(1/90) = 1.58e−3 рад/с (1.63× больше);
+     σ_gyr_per_step_wireless = 0.015 · √(1/60) = 1.94e−3 рад/с (2.0× больше);
      За 1 с: σ_θ_link = 0.015 · √1 = 0.015 рад;
              σ_θ_wireless = тоже 0.015 рад (ARW не зависит от sample rate);
      НО P_predict растёт быстрее в каждом шаге, и mag-update приходит реже.
 
   В FoxKF параметры адаптируются:
-     Fox_Wireless: SampleRate=90, marginalizationTime=1000ms (= 90 кадров);
+     Fox_Wireless: SampleRate=60, marginalizationTime=1000ms (= 60 кадров);
      Fox_Link:     SampleRate=240, marginalizationTime=1000ms (= 240 кадров);
      Q[gyr] масштабируется автоматически как nd² × Δt.
 
@@ -42979,7 +42979,7 @@
 ================================================================================
   Master clock = 240 Гц.
   Δt = 1/240 = 4.16667 мс.
-  При Fox_Wireless 90 Hz режиме: эффективный sample rate 90 Гц, но FoxKF state ещё на 240.
+  При Fox_Wireless 60 Hz режиме: эффективный sample rate 60 Гц, но FoxKF state ещё на 240.
   Конвертация upsampled через SLERP (см. [2039]).
 
 ################################################################################
@@ -44398,16 +44398,16 @@
 ================================================================================
   Применение                          | Recommended config
   ------------------------------------+---------------------
-  Live VR (Quest, Index)              | Fox_Wireless 90 Гц + prediction 11 мс
+  Live VR (Quest, Index)              | Fox_Wireless 60 Гц + prediction 17 мс
   Film mocap (24 FPS)                 | Fox_Link 240 Гц + offline HD-смusoother
-  Real-time preview                    | Fox_Link 240 Гц или Fox_Wireless 90 Гц
+  Real-time preview                    | Fox_Link 240 Гц или Fox_Wireless 60 Гц
   Boxing / удары                       | Fox_Link 240 Гц (нужны высокие частоты)
-  Walking / running outdoor            | Fox_Wireless 90 Гц + GNSS
-  Indoor sports / gym                  | Fox_Link 240 Гц или Wireless 90 Гц
+  Walking / running outdoor            | Fox_Wireless 60 Гц + GNSS
+  Indoor sports / gym                  | Fox_Link 240 Гц или Wireless 60 Гц
   Medical biomechanics                | Fox_Link 240 Гц + full anthropometry
-  Casual/streaming for fun             | Fox_Wireless 90 Гц
-  Concurrent multi-actor (2-4)         | Fox_Wireless 90 Гц (Link для одного)
-  Stage / theater performance          | Fox_Wireless 90 Гц (батарея)
+  Casual/streaming for fun             | Fox_Wireless 60 Гц
+  Concurrent multi-actor (2-4)         | Fox_Wireless 60 Гц (Link для одного)
+  Stage / theater performance          | Fox_Wireless 60 Гц (батарея)
 
 ================================================================================
 2089.  ТАБЛИЦА ТОЧНОСТИ ПО ВСЕЙ ЦЕПИ
@@ -44434,7 +44434,7 @@
      ② Calibration (factory M_lpa + user constantBias);
      ③ Temperature и cross-axis corrections;
      ④ Sign convention для каждого из 17 датчиков;
-     ⑤ Различия 240 Гц vs 90 Гц (Q-matrices, R-matrices, decimation);
+     ⑤ Различия 240 Гц vs 60 Гц (Q-matrices, R-matrices, decimation);
      ⑥ Rate matching (interp + decimation);
      ⑦ Latency budgets для всех режимов;
      ⑧ BVH export (структура, axes, units, Euler ZXY);
@@ -44504,7 +44504,7 @@
   IMU acc X3          | tau                               | 100 с
   IMU gyr X3          | nd                                | 0.0032 рад/с/√Hz
   IMU gyr X3          | tau                               | 30 с
-  Sample rate         | 240 Hz Link / 90 Hz AW            | Δt = 4.17/11.11 мс
+  Sample rate         | 240 Hz Link / 60 Hz AW            | Δt = 4.17/16.67 мс
   FoxKF acc boost     | fAccBoost                         | 1000 (max R multiplier)
   FoxKF mag gate      | angleDiffMaxDeg / dipDiffMaxDeg   | 6° / 3.5°
   ZUPT                | σ_zupt                            | 1e-3 м/с
@@ -44624,7 +44624,7 @@
      - Animation curves в FBX;
      - Twist-swing decomposition для суставов;
      - ROM в разных движениях (walking, running, squatting, jumping);
-     - 240 Гц Link и 90 Гц AW полная characterization;
+     - 240 Гц Link и 60 Гц AW полная characterization;
      - Rate matching между all components;
      - Timing synchronization;
      - Полная цепь ось-к-пикселю в одной формуле;
@@ -44645,7 +44645,7 @@
   │  IMU CHIP (×17 body + ×17 left glove + ×17 right glove = ×51)        │
   │    ↓ (1 kHz internal sampling)                                       │
   │  IMU FIRMWARE (LPF + decimate + calibrate + pack)                    │
-  │    ↓ (Fox_Link 240 Hz или Fox_AW 90 Hz)                              │
+  │    ↓ (Fox_Link 240 Hz или Fox_AW 60 Hz)                              │
   └──────────────────────────────────────────────────────────────────────┘
   ┌──────────────────────────────────────────────────────────────────────┐
   │  MASTER RECEIVER                                                     │
@@ -45067,41 +45067,41 @@
   acc/mag noise, а не gyr.
 
 ================================================================================
-2036.  МАТРИЦА Q ДЛЯ FOX_WIRELESS (90 Гц) — ТОЧНЫЕ ЧИСЛА
+2036.  МАТРИЦА Q ДЛЯ FOX_WIRELESS (60 Гц) — ТОЧНЫЕ ЧИСЛА
 ================================================================================
-  Δt = 1/90 = 0.01111 с.
+  Δt = 1/60 = 0.01667 с.
   Используя те же nd, τ что в [1854]:
 
-  Q (12×12) ДИАГОНАЛЬ для Fox_HW_W2 @ 90 Гц:
-    Q_δθ_xx = nd_gyr_x² × Δt = 0.015² × 0.01111 = 2.500000e-06  (рад²)
-    Q_δθ_yy = 2.500000e-06  (рад²)
-    Q_δθ_zz = 2.500000e-06  (рад²)
-    Q_b_g_xx = 2.820532e-12  (рад/с)²
-    Q_b_g_yy = 2.820532e-12  (рад/с)²
-    Q_b_g_zz = 2.820532e-12  (рад/с)²
-    Q_b_a_xx = (0.0015 × √(2/7))² × Δt = 7.142857e-09  (м/с²)²
-    Q_b_a_yy = (0.0015 × √(2/7))² × Δt = 7.142857e-09  (м/с²)²
-    Q_b_a_zz = (0.002 × √(2/7))² × Δt = 1.269841e-08  (м/с²)²
-    Q_mW_xx = (0.0003)² × Δt = 1.000000e-09  (норм.)²
-    Q_mW_yy = (0.0003)² × Δt = 1.000000e-09  (норм.)²
-    Q_mW_zz = (0.0003)² × Δt = 1.000000e-09  (норм.)²
+  Q (12×12) ДИАГОНАЛЬ для Fox_HW_W2 @ 60 Гц:
+    Q_δθ_xx = nd_gyr_x² × Δt = 0.015² × 0.01667 = 3.750000e-06  (рад²)
+    Q_δθ_yy = 3.750000e-06  (рад²)
+    Q_δθ_zz = 3.750000e-06  (рад²)
+    Q_b_g_xx = 4.230798e-12  (рад/с)²
+    Q_b_g_yy = 4.230798e-12  (рад/с)²
+    Q_b_g_zz = 4.230798e-12  (рад/с)²
+    Q_b_a_xx = (0.0015 × √(2/7))² × Δt = 1.071429e-08  (м/с²)²
+    Q_b_a_yy = (0.0015 × √(2/7))² × Δt = 1.071429e-08  (м/с²)²
+    Q_b_a_zz = (0.002 × √(2/7))² × Δt = 1.904762e-08  (м/с²)²
+    Q_mW_xx = (0.0003)² × Δt = 1.500000e-09  (норм.)²
+    Q_mW_yy = (0.0003)² × Δt = 1.500000e-09  (норм.)²
+    Q_mW_zz = (0.0003)² × Δt = 1.500000e-09  (норм.)²
 
   Сравнение с Fox_Link (240 Гц):
      Q_δθ_xx_240 = nd² × (1/240) = 0.015² × 0.004167 = 9.376e−7;
-     Q_δθ_xx_90  = 0.015² × 0.01111 = 2.5000e-06;
-     отношение: 90/240 = 0.375 → Q при 90 Гц в 2.67× МЕНЬШЕ;
-  Это ПРАВИЛЬНО потому что Q «на шаг», а шаг 2.67× длиннее.
+     Q_δθ_xx_60  = 0.015² × 0.01667 = 3.7500e-06;
+     отношение Q_240/Q_60 = 60/240 = 0.25 → Q при 60 Гц в 4× БОЛЬШЕ, чем при 240 Гц;
+  Это ПРАВИЛЬНО потому что Q «на шаг», а шаг при 60 Гц в 4× длиннее.
   За 1 секунду накопленная дисперсия одинакова — Δt² · Q одинаково.
 
 ================================================================================
-2037.  R МАТРИЦА ДЛЯ FOX_WIRELESS (90 Гц)
+2037.  R МАТРИЦА ДЛЯ FOX_WIRELESS (60 Гц)
 ================================================================================
   R_acc, R_mag, R_stillness НЕ зависят от sample rate, остаются как в [1854]:
      R_acc[xx] = (2.3238e-02)² ≈ 5.4000e-04  (м/с²)² @ 240 Гц
-     R_acc[xx] = (1.4230e-02)² ≈ 2.0250e-04  (м/с²)² @ 90 Гц
+     R_acc[xx] = (1.1619e-02)² ≈ 1.3500e-04  (м/с²)² @ 60 Гц
   ВНИМАНИЕ: R_acc измеряется в (м/с²)² на bandwidth.
-  При 90 Гц bandwidth = 45 Гц (Nyquist) vs 120 Гц при 240 Гц → R_acc_90 = R_acc_240 × (45/120).
-  То есть при 90 Гц шум на сэмпл МЕНЬШЕ (узкая полоса фильтра antialiasing).
+  При 60 Гц bandwidth = 30 Гц (Nyquist) vs 120 Гц при 240 Гц → R_acc_60 = R_acc_240 × (30/120).
+  То есть при 60 Гц шум на сэмпл МЕНЬШЕ (узкая полоса фильтра antialiasing).
   Это даёт компенсацию в Kalman gain и общая точность ориентации сравнима.
 
 ================================================================================
@@ -45140,15 +45140,15 @@
   Это в пределах FoxKF bias-tracking → автоматически компенсируется через stillness.
 
 ================================================================================
-2140.  90 Гц АВАНСИРОВАННЫЙ WIRELESS — ПОЛНАЯ ХАРАКТЕРИСТИКА
+2140.  60 Гц АВАНСИРОВАННЫЙ WIRELESS — ПОЛНАЯ ХАРАКТЕРИСТИКА
 ================================================================================
-  Fox_AW (Advanced Wireless) 90 Гц:
+  Fox_AW (Advanced Wireless) 60 Гц:
      Carrier: 2.4 ГГц BLE 5 или подобное;
      Channels: BLE channels (40);
      Data rate: 1-2 Мбит/с per channel;
-     17 sensors × 90 Гц × ~96 байт = 147 КБ/с raw → 1.2 Мбит/с.
+     17 sensors × 60 Гц × ~96 байт = 98 КБ/с raw → 0.78 Мбит/с.
 
-  Timing budget per кадр (11.11 мс):
+  Timing budget per кадр (16.67 мс):
      IMU sample: 0.1 мс;
      ADC + cal: 0.05 мс;
      Radio TX queue (BLE): 5-10 мс (variable);
@@ -45166,20 +45166,18 @@
      - Возможные пересечения с другими BLE-устройствами в окружении.
 
 ================================================================================
-2141.  МАТЕМАТИЧЕСКАЯ КОНВЕРТАЦИЯ 240 → 90 (downsample with antialiasing)
+2141.  МАТЕМАТИЧЕСКАЯ КОНВЕРТАЦИЯ 240 → 60 (downsample with antialiasing)
 ================================================================================
-  Если данные приходят на 240 Гц, но выходят на 90:
-     factor = 240/90 = 8/3 = 2.6̄ (рациональный);
-     для simple downsample: каждый 240/90 = 2.67 кадра;
-     для cleanest signal: применить antialiasing LPF cutoff 45 Hz before decimation.
+  Если данные приходят на 240 Гц, но выходят на 60:
+     factor = 240/60 = 4 (целочисленный);
+     для simple downsample: брать каждый 4-й кадр;
+     для cleanest signal: применить antialiasing LPF cutoff 30 Hz before decimation.
 
-  ── POLYPHASE FILTER ──────────────────────────────────────────────────────
-  factor 8/3 reduces к коэффициенту 8 upsample + 3 downsample.
-  Polyphase implementation:
-     1. Upsample by 8 (insert 7 zeros between samples);
-     2. Apply low-pass filter cutoff = min(45, 120)/factor;
-     3. Downsample by 3 (take every 3rd sample);
-  Эквивалентно одной операции с tapped delay line.
+  ── ЦЕЛОЧИСЛЕННАЯ ДЕЦИМАЦИЯ (4:1) ──────────────────────────────────────────
+  factor 4 — целое, polyphase upsample не нужен (в отличие от дробного случая):
+     1. Apply low-pass filter cutoff = 30 Hz (Nyquist of 60);
+     2. Downsample by 4 (take every 4th sample);
+  Эквивалентно одной операции с tapped delay line (FIR-децимация 4:1).
   Это эффективно и фазово-coherent.
 
 ================================================================================
@@ -49565,7 +49563,7 @@
 ================================================================================
 2040.  LATENCY BUDGET ДЛЯ ОБОИХ РЕЖИМОВ
 ================================================================================
-  Источник задержки                  | Fox_Link (240 Гц) | Fox_Wireless (90 Гц)
+  Источник задержки                  | Fox_Link (240 Гц) | Fox_Wireless (60 Гц)
   -----------------------------------+--------------------+----------------------
   IMU sampling + ADC                  | 1 мс               | 1 мс
   Radio TX (Fox_Link или wireless)    | 0.5 мс             | 5-10 мс (BLE)
@@ -50021,10 +50019,10 @@
 2143.  HZ-MATCHING МЕЖДУ КОМПОНЕНТАМИ СИСТЕМЫ
 ================================================================================
   В реальной системе разные частоты:
-     IMU sensor: 1000 Hz internal → 240/90 output;
-     FoxKF: 240/90 Hz (matches IMU);
-     FoxFE: 240/90 Hz;
-     Stream over wireless: 240/90 Hz;
+     IMU sensor: 1000 Hz internal → 240/60 output;
+     FoxKF: 240/60 Hz (matches IMU);
+     FoxFE: 240/60 Hz;
+     Stream over wireless: 240/60 Hz;
      Network: variable (packets могут agregate or be split);
      Application:
          Blender viewport: 60 Hz typical;
@@ -50040,14 +50038,14 @@
      Network → Application: SLERP-interpolated to app rate.
 
 ================================================================================
-2145.  ВЕРОЯТНОСТЬ ОШИБОК — ДЛЯ HZ 240 vs 90
+2145.  ВЕРОЯТНОСТЬ ОШИБОК — ДЛЯ HZ 240 vs 60
 ==========================================================================================
   Для caracterization, реальные probabilities errors:
      Fox_Link 240 Hz:
          packet loss: < 0.005% (in clean environment);
          outlier (corrupted): < 0.001%;
          timestamp jitter: σ = 50 мкс.
-     Fox_AW 90 Hz:
+     Fox_AW 60 Hz:
          packet loss: 0.1-1% (BLE typical);
          outlier: 0.01-0.1%;
          timestamp jitter: σ = 200 мкс.
@@ -50145,7 +50143,7 @@
   ─── ВХОДЯЩИЙ ПОТОК ──────────────────────────────────────────────────────
   IMU чип (1000 Hz internal)
      ↓ (LPF + decimate)
-  IMU output (240 или 90 Hz)
+  IMU output (240 или 60 Hz)
      ↓ (wireless radio)
   Driver / Dispatch (Fox_Driver)
      ↓
@@ -50236,7 +50234,7 @@
      sensors_per_actor: 17 (тело) + 17 ×2 (перчатки), всего до 51 per actor;
      max sensors per Master: 4 × 51 = 204 (теоретический).
      practical limit (Fox_Link 240 Гц): 2-3 actors before bandwidth saturates;
-     practical limit (Fox_AW 90 Гц): 4 actors comfortably.
+     practical limit (Fox_AW 60 Гц): 4 actors comfortably.
 
   ── СИНХРОНИЗАЦИЯ TIMESTAMP МЕЖДУ АКТЁРАМИ ─────────────────────────────────
      Все sensors всех actors имеют ОДИН master clock через периодический sync.

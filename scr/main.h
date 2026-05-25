@@ -54,12 +54,17 @@ constexpr int     kCalibrationSamples = 720;
 constexpr int     kCountdownSeconds   = 3;
 
 enum class SuitType { Awinda, Link };
-constexpr double nativeRateHz(SuitType s) { return s == SuitType::Link ? 240.0 : 90.0; }
+// §2035/§2088 нативная частота костюма: Link 240 Гц, Awinda 60 Гц (полнотельная, 17 сенсоров).
+//   Это дефолт/фолбэк/подсказка UI — в работе частота берётся из реального железа
+//   (deviceUpdateRate, main.cpp ~5745) и пробрасывается в обработку (см. SuitPose::nativeHz). (formules.txt)
+constexpr double nativeRateHz(SuitType s) { return s == SuitType::Link ? 240.0 : 60.0; }
 
 inline int ticksFor(double seconds, double rateHz) {
     const long n = std::lround(seconds * rateHz);
     return n < 1 ? 1 : static_cast<int>(n);
 }
+// dt0=1/90 — ЭТАЛОННАЯ частота, при которой заданы коэффициенты a0 (НЕ частота костюма):
+//   функция сохраняет постоянную времени tau при любом реальном dt. Менять dt0 нельзя — сместит тюнинг.
 inline double rateAdjustAlpha(double a0, double dt, double dt0 = 1.0 / 90.0) {
     if (a0 <= 0.0) return 0.0;
     if (a0 >= 1.0) return 1.0;
@@ -100,6 +105,9 @@ struct FingerJointLimit {
 struct SuitPose {
     quint64 sampleCounter = 0;
     double  recvTime      = 0.0;
+    // §2035 разрешённая нативная частота железа (deviceUpdateRate, иначе ожидаемая по типу костюма):
+    //   Awinda 60 Гц / Link 240 Гц / прочие модели 100/120 — обработка подстраивается под неё (formules.txt)
+    double  nativeHz      = 0.0;
 
     std::array<Quat, kXsensSegmentCount> quat;
     std::array<bool, kXsensSegmentCount> segValid{};
@@ -315,7 +323,7 @@ private:
         double    m_lastTiltCos        = 1.0;
         int       m_landedTicks        = 0;
 
-        double    m_procRateHz          = 90.0;
+        double    m_procRateHz          = 60.0;   // дефолт = частота костюма по умолчанию (Awinda 60 Гц); перезаписывается setProcRate реальной частотой
         int       m_airborneStableTicks = 5;
         int       m_landedRampTicks     = 12;
         int       m_commitFadeTicks     = 12;
@@ -403,7 +411,7 @@ private:
         }
 
         void setProcRate(double hz) {
-            m_procRateHz = (hz > 1.0) ? hz : 90.0;
+            m_procRateHz = (hz > 1.0) ? hz : 60.0;
             const double dt = 1.0 / m_procRateHz;
             m_poseStableTicks     = ticksFor(0.500, m_procRateHz);
             m_zuptTicksThresh     = ticksFor(0.667, m_procRateHz);
@@ -953,9 +961,11 @@ public:
 
     void setProcRate(double hz) {
         m_loco.setProcRate(hz);
-        const double cap = (hz > 90.0) ? 90.0 : (hz > 1.0 ? hz : 90.0);
+        // kRenderFps здесь = потолок частоты ОТРИСОВКИ, НЕ частота сенсора: рисуем не быстрее
+        //   рендер-цели даже на Link 240 Гц (солвер при этом обрабатывает все кадры). Не путать с багом Awinda.
+        const double cap = (hz > kRenderFps) ? kRenderFps : (hz > 1.0 ? hz : kRenderFps);
         m_paintMinIntervalSec = 1.0 / cap;
-        m_nomDt = 1.0 / ((hz > 1.0) ? hz : 90.0);
+        m_nomDt = 1.0 / ((hz > 1.0) ? hz : 60.0);
     }
 
     void resetSceneOrigin();
@@ -1055,7 +1065,7 @@ private:
 
     std::array<Quat, kXsensSegmentCount>   m_condPrev{};
     bool                                    m_haveCond    = false;
-    double                                  m_nomDt       = 1.0 / 90.0;
+    double                                  m_nomDt       = 1.0 / 60.0;   // дефолт частоты обработки (Awinda 60 Гц); перезаписывается setProcRate
     bool                                    m_condVerbose = false;
     std::array<double, kXsensSegmentCount> m_unlockBlend{};
 
@@ -1080,7 +1090,7 @@ private:
     double                                  m_lastRenderT = 0.0;
 
     double                                  m_lastPaintSec = 0.0;
-    double                                  m_paintMinIntervalSec = 1.0 / 90.0;
+    double                                  m_paintMinIntervalSec = 1.0 / kRenderFps;   // потолок ОТРИСОВКИ (рендер), не частота сенсора
 
     WristAnatomicalCfg m_wristCfgR{};
     WristAnatomicalCfg m_wristCfgL{};
@@ -1304,7 +1314,7 @@ private:
 
     bool            m_sessionRunning = true;
 
-    double          m_procRateHz   = 90.0;
+    double          m_procRateHz   = 60.0;   // дефолт = частота костюма по умолчанию (Awinda 60 Гц); перезаписывается реальной частотой железа
 
     std::unique_ptr<SkeletonXsens> m_skel;
 
