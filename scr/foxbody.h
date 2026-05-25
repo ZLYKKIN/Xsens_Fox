@@ -1753,6 +1753,9 @@ inline int ergoTypeOf(int jointIdx) {
 constexpr int kSpcClassCount   = 17;
 constexpr int kSpcFeatureCount = 315;
 
+// formules.txt §1699 (стр. 23197)/§XXXI: 17 классов ASL = classlabels_strings ONNX-модели
+// (алфавитный порядок skl2onnx). ПОДТВЕРЖДЕНО локальной инспекцией .onnx — совпадает точно.
+// kClassToSeg/kSegToClass — взаимное соответствие класс↔сегмент (Head→6, Pelvis→0, T8→4…).
 inline constexpr std::array<const char*, kSpcClassCount> kSensorPlacementClasses = {
     "Head", "LeftFoot", "LeftForeArm", "LeftHand", "LeftLowerLeg",
     "LeftShoulder", "LeftUpperArm", "LeftUpperLeg", "Pelvis",
