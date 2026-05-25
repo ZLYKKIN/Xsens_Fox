@@ -452,11 +452,21 @@ inline constexpr std::array<double, 9> kCSpine = {
 
 inline constexpr double kCFemoropelvic = 0.12;
 
-inline constexpr std::array<double, 3> kCPelvis = { 0.35, 25.0, 0.30 };
+// formules.txt §138.20 (стр.7199/12402): сырой дамп xsb c_pelvis = V[2] [0.35, 25].
+// [0]=доля передачи наклона таза, [1]=угол вовлечения (°). Приведено к дампу (убран лишний
+// 3-й элемент 0.30 из спекулятивной развёртки).
+inline constexpr std::array<double, 2> kCPelvis = { 0.35, 25.0 };
+
+// Штраф латерального наклона таза — ЭВРИСТИКА движка (НЕ в дампе xsb V[2]); вынесен из
+// бывшего kCPelvis[2], поведение латерального терма сохранено.
+inline constexpr double kPelvisLatTiltPenalty = 0.30;
 
 inline constexpr std::array<double, 3> kCArms = { 0.95, 0.95, 0.99 };
 
-inline constexpr std::array<double, 3> kCLegs  = { 0.5, 0.3, 0.15 };
+// formules.txt §138.22 (стр.7198/12506): сырой дамп xsb c_legs = V[2] [0.9, 0.95] (связь ног).
+// Приведено к дампу (был спекулятивный 3-элементный [0.5,0.3,0.15] со стр.12896 «новая
+// развёртка»). ВНИМАНИЕ: kCLegs[1] меняет gain dorsiflexion 0.3→0.95 — проверить на железе.
+inline constexpr std::array<double, 2> kCLegs  = { 0.9, 0.95 };
 
 inline constexpr std::array<double, 2> kCKnees = { 0.9, 0.95 };
 
@@ -471,6 +481,20 @@ inline constexpr std::array<double, 3> kALumpA_jump2 = { 0.995, 0.995, 0.9995 };
 
 inline constexpr double kJointLaxityRad     = 0.005;
 inline constexpr double kHyperExtensionMax  = 0.0;
+
+// formules.txt §FoxCal (стр.5798-5800,7399,7391): σ-веса ориентации МНК (рад) и старт. пол.
+// Это коэффициенты FOX_FE МНК (вес наблюдения = 1/σ²). ЗАЗЕМЛЕНЫ как именованные константы.
+// ПРИМ.: живой BodyPoseSolver — кастомный (spine/neck coupling stdSpine=0.001, kCArms-ramp,
+// laxity), у него НЕТ per-axis pose-prior структуры FOX_FE, поэтому эти σ пока НЕ подключены
+// к решателю (подключение = поведенческая правка, нужна проверка на железе).
+inline constexpr std::array<double, 3> kSdThetaPoseRad      = { 0.0174533, 0.0523599, 0.0349066 }; // [1°,3°,2°] §5798
+inline constexpr std::array<double, 3> kSdThetaShouldersRad = { 0.10472,   0.10472,   0.10472   }; // [6°×3]    §5799
+inline constexpr std::array<double, 3> kSdThetaUpperArmRad  = { 0.10472,   0.139626,  0.10472   }; // [6°,8°,6°] §5800
+inline constexpr std::array<double, 2> kStdHingeDeg         = { 4.0, 2.0 };                          // мягкий предел МНК §7399
+// init.floorLevel=1.25 м — это конвенция FOX_FE (стр.7391). В ЭТОМ приложении пол = Z=0
+// (drawFloor/standHeight), оценка пола стартует с 0 (main.cpp m_floorEstimate=0) — 1.25 здесь
+// НЕ применяется (иначе скелет «всплыл» бы на 1.25 м). Значение задокументировано для сверки.
+inline constexpr double kFoxInitFloorLevelM = 1.25;
 
 struct JointRom {
     double abdMin, abdMax;

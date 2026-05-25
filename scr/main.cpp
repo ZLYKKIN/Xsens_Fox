@@ -1362,7 +1362,7 @@ public:
             {
                 const double frac     = fb::kCPelvis[0];
                 const double scale    = fb::kCPelvis[1];
-                const double latPen   = fb::kCPelvis[2];
+                const double latPen   = fb::kPelvisLatTiltPenalty;  // Q1: бывш. kCPelvis[2] (не в дампе V[2])
                 if (std::abs(frac) > 1e-6) {
                     const QVector3D phiPel = quat_log(orient[0]);
                     const double tiltDeg = std::abs(double(phiPel.y())) *
@@ -2413,8 +2413,8 @@ void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
                       << fb::kCSpine[7] << ", " << fb::kCSpine[8]
                       << "]  (Pelvis→T8 distribution + cervical chain)\n";
             std::cout << "[bio §45.3] c_pelvis=[" << fb::kCPelvis[0]
-                      << " (frac), " << fb::kCPelvis[1] << "° (ramp scale), "
-                      << fb::kCPelvis[2] << " (lat tilt penalty)]\n";
+                      << " (frac), " << fb::kCPelvis[1] << "° (ramp scale)]  latTiltPenalty="
+                      << fb::kPelvisLatTiltPenalty << " (engine heuristic, not in xsb V[2])\n";
             std::cout << "[bio §316.6] c_femoropelvic=" << fb::kCFemoropelvic
                       << " (anti-pelvic-tilt on hip flexion)\n";
             std::cout << "[bio §46.1] c_arms=[" << fb::kCArms[0]
@@ -2653,8 +2653,8 @@ void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
            << "° w=" << d.toeWeightL << "\n";
 
         ss << "[coupling-wls leg-bi] c_legs=["
-           << fb::kCLegs[0] << ", " << fb::kCLegs[1] << ", " << fb::kCLegs[2]
-           << "]  effective gain=" << fb::kCLegs[1]
+           << fb::kCLegs[0] << ", " << fb::kCLegs[1]
+           << "] (xsb V[2])  effective gain=" << fb::kCLegs[1]
            << " (hipFlexY · c_legs[1] → target ankle dorsi Y)\n";
         ss << std::setprecision(4);
     }
@@ -11479,6 +11479,11 @@ static bool writeBvh(const QString& path,
         havePrev = true;
         os << "\n";
     }
+    // B-UI-2: ловим сбой записи В ПРОЦЕССЕ (диск полон / I/O), а не только сбой открытия.
+    // Без этого QTextStream/QFile тихо проглатывают ошибку и finishRecording покажет «сохранено».
+    os.flush();
+    if (os.status() != QTextStream::Ok || f.error() != QFileDevice::NoError)
+        return false;
     return true;
 }
 
@@ -11676,6 +11681,10 @@ static bool writeFbxAscii(const QString& path,
            << ",\"" << prop << "\"\n";
     }
     os << "}\n";
+    // B-UI-2: см. writeBvh — ловим сбой записи в процессе (диск полон / I/O), не только открытия.
+    os.flush();
+    if (os.status() != QTextStream::Ok || f.error() != QFileDevice::NoError)
+        return false;
     return true;
 }
 
@@ -12467,9 +12476,12 @@ void MainWindow::onConnStatusChanged(int status, const QString& )
     logTest(std::string("[suit] ") + connStatusName(s));
 }
 
-void MainWindow::onGloveStatus(bool )
+void MainWindow::onGloveStatus(bool on)
 {
-
+    // B-UI-1: «живой» статус перчаток в сессии оператор видит по точкам пальцев панели
+    // (SensorIndicatorsPanel::updateFromPose гейтит их по f.hasGloves, стр. ~9678). Здесь
+    // выделенный сигнал был пустым — логируем событие connect/disconnect для диагностики.
+    logTest(std::string("[gloves] ") + (on ? "connected" : "disconnected"));
 }
 
 void MainWindow::onFps(double hz)
@@ -13510,6 +13522,11 @@ void MainWindow::onResumeSession()
 {
     m_sessionRunning = true;
     if (m_panel) m_panel->setSessionRunning(true);
+    // B-UI-4: при возобновлении сбрасываем заморозку координат. Иначе после
+    // кратковременного обрыва/реконнекта сцена остаётся замороженной (кнопка
+    // re-enabled, но m_frozen/m_freezeXY сохранялись), и оператор не видит движения.
+    if (m_panel)    m_panel->setFreezeState(false);
+    if (m_viewport) m_viewport->setFreezeXY(false);
     logTest("[session] resumed");
 }
 
