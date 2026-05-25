@@ -57,6 +57,8 @@ Quat slerp_quat(const Quat& a, const Quat& b, double t);
 
 double quat_angle_deg(const Quat& q);
 
+// formules.txt §115 (стр. 947): безопасные asin/acos с зажимом аргумента в [-1,1]
+// (защита от NaN при x=1.0000001 из-за округления). Граница возвращается точным значением.
 inline double clamp_asin(double x) {
     if (x <= -1.0) return -M_PI_2;
     if (x >=  1.0) return  M_PI_2;

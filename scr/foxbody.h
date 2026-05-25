@@ -1604,6 +1604,9 @@ inline constexpr std::array<std::uint8_t, kJointCount> kErgoHandler = {
 };
 
 namespace constants {
+    // formules.txt §563 (стр. 1096): 180/π=57.29577951308232; §565 (стр. 1102): π/360 (полуугол).
+    // Проверено: kRad2Deg=180/π, kDeg2Rad=π/180 (до 1e-13). kSlerpEps/kNLerp{A,B,C}=0.2/0.8/(1/3)
+    // — числа NLERP-поправки §8 (стр. 261)/§121 (стр. 407).
     inline constexpr double kRad2Deg   = 57.29577951308232;
     inline constexpr double kDeg2Rad   = 0.017453292519943295;
     inline constexpr double kPi_2      = 1.5707963267948966;
@@ -1622,6 +1625,8 @@ namespace constants {
     inline constexpr double kSolverAlpha  = 0.25;
     inline constexpr double kSolverLambda = 0.01;
 
+    // formules.txt (стр. 2673, 3501): поле тяжести g=9.812687 м/с² из fox_definitions.xsb
+    // (мировое g=(0,0,-9.812687), Z=вверх). Подтверждено grep'ом по эталону.
     inline constexpr double kGravityMs2 = 9.812687;
 
     inline constexpr double kSampleRateHz = 240.0;
