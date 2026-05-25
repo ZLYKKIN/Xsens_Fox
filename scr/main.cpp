@@ -6135,8 +6135,10 @@ void MocapReceiver::run()
                         staging.rightGloveQ = g_ergo.rightQ;
                         staging.rightGloveP = g_ergo.rightP;
                     }
-                    if (haveL || haveR)
-                        staging.hasGloves = true;
+                    // §XXI ФИКС залипания: staging персистентен между кадрами, поэтому hasGloves
+                    // надо ОБНОВЛЯТЬ по текущей свежести (обрыв >500мс -> false), иначе флаг оставался
+                    // true и стримились/писались устаревшие позы пальцев (ср. гашение датчиков костюма).
+                    staging.hasGloves = (haveL || haveR);
                 }
 
                 I.frame = staging;
@@ -8905,6 +8907,10 @@ void NewSessionWizard::onCaptureTick()
         const Quat& qRefN = fox::body::kRefQuatN[i];
         const Quat& qRefT = fox::body::kRefQuatT[i];
 
+        // §174.4/§1682/§2564 выравнивание датчик->сегмент q_align (усреднение поз Маркли §1824).
+        // КОНВЕНЦИЯ ДВИЖКА: q_align применяется ПРЕД-поворотом измерений (s2sInv=conj(q_align), стр.~5966)
+        // и в связке с m_defAng в FK (oriented=fused⊗m_defAng, стр.~3066) — это согласованная декомпозиция,
+        // поэтому здесь conj(q_bs), а не постмультипликативная запись §1682. НЕ менять без сверки невязок калибровки.
         const Quat qAlignN = quat_mult(
             quat_mult(qRefN, qAvgN.conj()),
             q_bs.conj()).normalized();
