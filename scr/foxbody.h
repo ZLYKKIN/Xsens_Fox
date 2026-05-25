@@ -324,6 +324,8 @@ inline constexpr std::array<Quat, kSegmentCount> kRefQuatN = {{
      Quat( 1.0,                0.0,            0.0,                 0.0),
 }};
 
+// formules.txt §87.1 (стр. 24837): бёдра ±0.08 м по Y (ширина таза 0.16 м); рост модели 1.75 м (§57.1).
+// §25.2 (стр. 24782): оси мира X=вперёд/отведение, Y=влево/сгибание, Z=вверх/ротация (правая тройка).
 inline constexpr float kHipHalfY      = 0.080f;
 inline constexpr float kShoulderHalfY = 0.140f;
 inline constexpr float kRefHeightM    = 1.75f;
