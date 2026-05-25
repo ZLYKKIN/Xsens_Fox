@@ -475,6 +475,9 @@ struct JointRom {
     double rotMin, rotMax;
 };
 
+// formules.txt §1527 (стр. 1524)/§30.3/§676: анатомические ROM суставов [abd,flx,rot] (град),
+// применяются клампом в foxergo (§676 θ→[min,max], штраф 1/stdJoint²=2.5e7). Совпадают:
+// колено flex 0-135° (§1527 hinge), локоть 0-150°+про/супинация ±80°, плечо широкий, запястье/голеностоп.
 inline constexpr std::array<JointRom, kJointCount> kJointRom = {{
      {  -25.0,  25.0,   -30.0,  35.0,  -25.0, 25.0 },
      {  -20.0,  20.0,   -25.0,  30.0,  -20.0, 20.0 },
