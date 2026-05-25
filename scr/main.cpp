@@ -7156,23 +7156,26 @@ static float computeFeature(
     return 0.0f;
 }
 
-// formules.txt §1705 (стр. 40286): x_norm=(x_raw−min)/(max−min), clip в [0,1] ПЕРЕД SVM.
-// min/max берутся из deriveRange (эвристика — точные тренировочные недоступны, см. foxbody.cpp).
-// §1707-1718: 315 признаков (5 эпох × Acc/Gyr × оси × банды × статистики), порядок лексикографический.
+// formules.txt §1705 (стр.40286): x_norm=(x−min)/(max−min), clip[0,1] ПЕРЕД SVM, в ПОРЯДКЕ МОДЕЛИ.
+// out[m] — m-я позиция МОДЕЛИ (= sorted() ASCII, §1707; ДОКАЗАНО из структуры опорных векторов). Спека
+// берётся через kSpcModelPerm (kFeatureSpecs идёт в порядке kFeatureNames = case-insensitive), нормировка —
+// точными kFeatureMinM/MaxM (порядок модели). Прежде вектор строился в порядке КОДА (208/315 позиций
+// неверны) + эвристика deriveRange (неверна для 85/315, maxIdx губила в [0,1]) → ASL получал мусор.
 static std::array<float, fox::body::kSpcFeatureCount> extractFeatures315(
     int target,
     const std::array<NewSessionWizard::RawImuBuf, kXsensSegmentCount>& bufs)
 {
     std::array<float, fox::body::kSpcFeatureCount> out{};
-    for (int i = 0; i < fox::body::kSpcFeatureCount; ++i) {
-        const float raw = computeFeature(target, bufs, fox::body::kFeatureSpecs[i]);
-        const float lo  = fox::body::kFeatureMin[i];
-        const float hi  = fox::body::kFeatureMax[i];
+    for (int m = 0; m < fox::body::kSpcFeatureCount; ++m) {
+        const int   c   = fox::body::kSpcModelPerm[m];
+        const float raw = computeFeature(target, bufs, fox::body::kFeatureSpecs[c]);
+        const float lo  = fox::body::kFeatureMinM[m];
+        const float hi  = fox::body::kFeatureMaxM[m];
         const float den = (hi > lo) ? (hi - lo) : 1.0f;
         float n = (raw - lo) / den;
         if (n < 0.0f) n = 0.0f;
         if (n > 1.0f) n = 1.0f;
-        out[i] = n;
+        out[m] = n;
     }
     return out;
 }
