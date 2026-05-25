@@ -38,6 +38,9 @@ build.ninja
 *.bak
 *.orig
 
+# Runtime log directory (whole folder is throwaway; recreated by the app)
+/logs/
+
 # Internal session/working notes (kept locally, not for public repo)
 bugfix.txt
 dedup_session.txt
