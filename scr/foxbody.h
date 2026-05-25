@@ -137,6 +137,9 @@ inline constexpr std::array<double, kSegmentCount> kMassRatio = {
      0.3906,  // LToe
 };
 
+// formules.txt §35594-35604/§36022: проксимальная доля центра масс сегмента (Winter biomech),
+// CoM_local=ratio·L_bone. Совпадает точно: UpperArm 0.436, ForeArm 0.430, Hand 0.506,
+// UpperLeg/LowerLeg 0.433, Foot/Toe/таз/позвоночник 0.500.
 inline constexpr std::array<double, kSegmentCount> kWinterProxToComRatio = {
     0.500,
     0.500,
