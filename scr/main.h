@@ -569,6 +569,9 @@ public:
     void setTransport(Transport t);
 
     void setExpectedRate(double hz);
+    // Нативная частота кадров костюма (Link 240 / Awinda 90). Нужна ASL-ресемплеру
+    // для приведения служебного буфера признаков к 60 Гц (formules [1704]/40745).
+    double expectedRate() const;
 
     void setS2sAlignment(const std::array<Quat, kXsensSegmentCount>& s2s);
     void resetS2sAlignment();
@@ -742,6 +745,7 @@ private:
     class QProgressBar*  m_countdownBar = nullptr;
     class QProgressBar*  m_readyBar     = nullptr;
     class QPushButton*   m_btnCalibBegin = nullptr;
+    class QCheckBox*     m_chkSensorCheck = nullptr;   // опц. протокол движений ASL (выкл по умолч.)
     class QLabel*        m_calibStatus   = nullptr;
 
     QTimer m_countTimer;
@@ -759,7 +763,10 @@ private:
 
     qint64 m_phaseStartMs = 0;
 
-    enum class CalibPhase { Idle, PrepT, CaptureT, SettleT, PrepN, CaptureN, Settle, LiveSpc, Done };
+    // PrepMove/CaptureMove — стадии протокола движений ASL (formules [1704]/[1728]):
+    // walk + подъёмы Л/П руки и Л/П ноги. Конкретную стадию задаёт m_moveStage.
+    enum class CalibPhase { Idle, PrepT, CaptureT, SettleT, PrepN, CaptureN, Settle,
+                            PrepMove, CaptureMove, LiveSpc, Done };
     CalibPhase m_phase = CalibPhase::Idle;
 
     std::array<QVector3D, kXsensSegmentCount> m_accAccumT{};
@@ -814,8 +821,24 @@ public:
 
 private:
     std::array<RawImuBuf, kXsensSegmentCount> m_imuBuf{};
-    int  m_imuBufDecim    = 0;
     bool m_liveSpcEnabled = true;
+
+    // --- ASL: фазовый ресемплер служебного буфера признаков до ровно 60 Гц ---
+    // formules [1704] (40745): признаки классификатора считаются на 60 Гц (downsample
+    // с нативной частоты костюма). НЕ влияет на основной мокап — это отдельный буфер.
+    double m_aslResStep    = 4.0;    // = nativeRate/60 (Link 4.0, Awinda 1.5)
+    double m_aslResNextOut = 0.0;    // позиция следующего выхода в input-сэмплах
+    int    m_aslResInIdx   = -1;     // индекс текущего входного кадра
+    bool   m_aslHavePrev   = false;
+    int    m_aslOutCount   = 0;      // общее число эмитнутых 60-Гц сэмплов (== длине буфера)
+    std::array<QVector3D, kXsensSegmentCount> m_aslPrevAcc{};
+    std::array<QVector3D, kXsensSegmentCount> m_aslPrevGyr{};
+
+    // --- ASL: протокол движений 5 эпох (после N-позы) ---
+    // 0=walk(→epochCalibration), 1=LArm, 2=RArm, 3=LLeg, 4=RLeg.
+    int  m_moveStage         = 0;
+    int  m_moveStageStartIdx = 0;    // m_aslOutCount на старте текущей стадии движения
+    bool m_doSensorCheck     = false; // запускать протокол движений (по галочке, выкл по умолч.)
 
     class QLabel*        m_readyTitle = nullptr;
     class QLabel*        m_readySummary = nullptr;
@@ -831,6 +854,11 @@ private:
     void setBadge(QLabel* lab, const QString& txt, bool green);
 
     void logCalibPhaseTransition(const char* tag);
+
+    // ASL-протокол движений: запустить очередную стадию (countdown + инструкция),
+    // и финальный шаг — прогон классификатора по заполненным эпохам + завершение.
+    void beginMoveStage();
+    void finishCalibrationAsl();
 
     bool calibBusy() const {
         return m_phase != CalibPhase::Idle && m_phase != CalibPhase::Done;

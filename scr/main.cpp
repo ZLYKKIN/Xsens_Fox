@@ -31,6 +31,7 @@
 #include <QtWidgets/QSpinBox>
 #include <QtWidgets/QSlider>
 #include <QtWidgets/QScrollArea>
+#include <QtWidgets/QCheckBox>
 #include <QtWidgets/QFrame>
 #include <QtWidgets/QProgressDialog>
 #include <QtCore/QFile>
@@ -4356,6 +4357,11 @@ void MocapReceiver::setExpectedRate(double hz)
     if (hz > 1.0 && hz <= 1000.0) m_impl->expectedRateHz.store(hz);
 }
 
+double MocapReceiver::expectedRate() const
+{
+    return m_impl->expectedRateHz.load();
+}
+
 void MocapReceiver::restart()
 {
 
@@ -6551,6 +6557,29 @@ static const Tr kTr[] = {
     {"calib_t_capture",    "T-поза — не двигайтесь",            "T-pose — hold still"},
     {"calib_n_prepare",    "Теперь N-поза — приготовьтесь (12с неподвижно)…", "Now N-pose — prepare (12s still)…"},
     {"calib_n_capture",    "N-поза — не двигайтесь 12с",        "N-pose — hold still 12s"},
+
+    // --- ASL: стадии движений (formules [1704]/[1728], стр. 23375) ---
+    {"calib_walk_prepare", "Авто-проверка датчиков: приготовьтесь пройти ~5 м вперёд…",
+                           "Sensor auto-check: get ready to walk ~5 m forward…"},
+    {"calib_walk_capture", "Идите вперёд ~5 м обычным шагом",   "Walk forward ~5 m at a normal pace"},
+    {"calib_larm_prepare", "Приготовьтесь поднять ЛЕВУЮ руку до 90° и опустить…",
+                           "Get ready to raise your LEFT arm to 90° and lower…"},
+    {"calib_larm_capture", "Поднимите и опустите ЛЕВУЮ руку",   "Raise and lower your LEFT arm"},
+    {"calib_rarm_prepare", "Приготовьтесь поднять ПРАВУЮ руку до 90° и опустить…",
+                           "Get ready to raise your RIGHT arm to 90° and lower…"},
+    {"calib_rarm_capture", "Поднимите и опустите ПРАВУЮ руку",  "Raise and lower your RIGHT arm"},
+    {"calib_lleg_prepare", "Приготовьтесь поднять ЛЕВУЮ ногу (бедро ~90°) и опустить…",
+                           "Get ready to raise your LEFT leg (hip ~90°) and lower…"},
+    {"calib_lleg_capture", "Поднимите и опустите ЛЕВУЮ ногу",   "Raise and lower your LEFT leg"},
+    {"calib_rleg_prepare", "Приготовьтесь поднять ПРАВУЮ ногу (бедро ~90°) и опустить…",
+                           "Get ready to raise your RIGHT leg (hip ~90°) and lower…"},
+    {"calib_rleg_capture", "Поднимите и опустите ПРАВУЮ ногу",  "Raise and lower your RIGHT leg"},
+    {"calib_move_hint",    "Движение для авто-проверки размещения датчиков",
+                           "Motion for sensor-placement auto-check"},
+    {"asl_check_label",    "Проверить размещение датчиков (≈40 с движений после калибровки)",
+                           "Verify sensor placement (≈40 s of motions after calibration)"},
+    {"asl_skipped",        "FoxSPC: проверка размещения пропущена",
+                           "FoxSPC: placement check skipped"},
     {"calib_pose_empty",   "Калибровка позы не получила стабильных данных (актёр двигался или сенсоры не передают). Качество будет низким — рекомендуется повторить калибровку.", "Pose calibration captured no stable data (actor moved or sensors not streaming). Quality will be poor — recommend recalibrating."},
 
     {"asl_loading_failed", "FoxSPC: модель размещения датчиков не загрузилась — авто-проверка отключена",
@@ -6961,6 +6990,8 @@ static float computeFeature(
     const std::array<NewSessionWizard::RawImuBuf, kXsensSegmentCount>& bufs,
     const fox::body::SpcFeatureSpec& f)
 {
+    // formules [1704] (40745): признаки ASL считаются на 60 Гц (буфер ресемплится
+    // с нативной частоты костюма в onCaptureTick). Определяет частотные полосы FFT.
     constexpr double kFs = 60.0;
     using fox::body::SpcStat;
     using fox::body::SpcBand;
@@ -7922,6 +7953,15 @@ void NewSessionWizard::buildPages()
         connect(m_btnCalibBegin, &QPushButton::clicked,
                 this, &NewSessionWizard::onCalibrationBegin);
 
+        // Опц. протокол движений ASL (проверка размещения датчиков), выкл по умолчанию.
+        // На трекинг не влияет; добавляет ~40с (ходьба + подъёмы рук/ног).
+        m_chkSensorCheck = new QCheckBox(p);
+        m_chkSensorCheck->setChecked(false);
+        m_chkSensorCheck->setEnabled(m_liveSpcEnabled);   // нет модели → проверка недоступна
+        m_chkSensorCheck->setStyleSheet("color:#9B9B9B; font-size:9pt;");
+        connect(m_chkSensorCheck, &QCheckBox::toggled,
+                this, [this](bool on) { m_doSensorCheck = on; });
+
         auto* scrollHost = new QWidget(p);
         auto* hostLay    = new QVBoxLayout(scrollHost);
         hostLay->setContentsMargins(0, 0, 0, 0);
@@ -7942,6 +7982,8 @@ void NewSessionWizard::buildPages()
         hostLay->addWidget(m_calibStatus);
         hostLay->addWidget(m_calibQuality);
         hostLay->addWidget(m_placementInfo);
+        hostLay->addSpacing(8);
+        hostLay->addWidget(m_chkSensorCheck, 0, Qt::AlignHCenter);
         hostLay->addSpacing(12);
         hostLay->addWidget(m_btnCalibBegin, 0, Qt::AlignHCenter);
 
@@ -8009,7 +8051,7 @@ void NewSessionWizard::logCalibPhaseTransition(const char* tag)
     if (!m_test) return;
     static constexpr const char* kPhaseNames[] = {
         "Idle", "PrepT", "CaptureT", "SettleT",
-        "PrepN", "CaptureN", "Settle", "LiveSpc", "Done"
+        "PrepN", "CaptureN", "Settle", "PrepMove", "CaptureMove", "LiveSpc", "Done"
     };
     const int idx = static_cast<int>(m_phase);
     const char* name = (idx >= 0 && idx < int(std::size(kPhaseNames)))
@@ -8106,6 +8148,7 @@ void NewSessionWizard::retranslate()
         m_poseHint->setText(Lang::t(isNPosePhase() ? "npose_hint" : "tpose_hint"));
     }
     if (m_btnCalibBegin)  m_btnCalibBegin->setText(Lang::t("start_calib"));
+    if (m_chkSensorCheck) m_chkSensorCheck->setText(Lang::t("asl_check_label"));
     if (m_readyTitle)     m_readyTitle->setText(Lang::t("ready_title"));
     if (m_readySummary)   m_readySummary->setText(Lang::t("ready_summary")
                             .arg(Lang::t("finish")));
@@ -8372,7 +8415,11 @@ void NewSessionWizard::onCalibrationBegin()
     m_lastSampleCtr = -1;
     m_havePrev = false;
     m_countdownBar->setValue(0);
-    m_readyBar->setValue(0);
+    if (m_readyBar) {                       // сброс после возможного режима "%p%" стадий движений
+        m_readyBar->setRange(0, kCalibrationSamples);
+        m_readyBar->setValue(0);
+        m_readyBar->setFormat("%v / %m");
+    }
     m_btnCalibBegin->setEnabled(false);
 
     for (int i = 0; i < kXsensSegmentCount; ++i) {
@@ -8411,7 +8458,20 @@ void NewSessionWizard::onCalibrationBegin()
         buf.epochLeftLeg      = RawImuBuf::Win{-1, -1};
         buf.epochRightLeg     = RawImuBuf::Win{-1, -1};
     }
-    m_imuBufDecim = 0;
+    // formules [1704] (40745): вход ASL = 60 Гц. Шаг ресемплера = нативная/60
+    // (Link 240→4.0, Awinda 90→1.5). Основной мокап остаётся на нативной частоте.
+    {
+        const double nativeHz = (m_rx ? m_rx->expectedRate() : 240.0);
+        m_aslResStep = std::max(1.0, (nativeHz > 1.0 ? nativeHz : 240.0) / 60.0);
+    }
+    m_aslResNextOut = 0.0;
+    m_aslResInIdx   = -1;
+    m_aslHavePrev   = false;
+    m_aslOutCount   = 0;
+    m_aslPrevAcc.fill(QVector3D(0, 0, 0));
+    m_aslPrevGyr.fill(QVector3D(0, 0, 0));
+    m_moveStage     = 0;
+    m_moveStageStartIdx = 0;
 
     m_accAccum    = &m_accAccumT;
     m_gyrAccum    = &m_gyrAccumT;
@@ -8465,6 +8525,15 @@ void NewSessionWizard::onCountdownTick()
             m_phase = CalibPhase::CaptureN;
             if (m_calibStatus)
                 m_calibStatus->setText(Lang::t("calib_n_capture"));
+        } else if (m_phase == CalibPhase::PrepMove) {
+            m_phase = CalibPhase::CaptureMove;
+            // окно текущей стадии движения начинается с этого индекса 60-Гц буфера
+            m_moveStageStartIdx = m_aslOutCount;
+            static const char* kCap[5] = {
+                "calib_walk_capture", "calib_larm_capture", "calib_rarm_capture",
+                "calib_lleg_capture", "calib_rleg_capture" };
+            const int s = (m_moveStage < 0) ? 0 : (m_moveStage > 4 ? 4 : m_moveStage);
+            if (m_calibStatus) m_calibStatus->setText(Lang::t(kCap[s]));
         }
 
         m_phaseStartMs = QDateTime::currentMSecsSinceEpoch();
@@ -8472,6 +8541,54 @@ void NewSessionWizard::onCountdownTick()
         m_captureTimer.start();
     }
 }
+
+namespace {
+// formules [1728] (23375): walk ~5 м; подъёмы конечностей до ~90°. Длительности стадий
+// захвата (сек) — в formules численно не заданы, подобраны и проверены локально.
+constexpr double kAslWalkCaptureSec  = 6.0;
+constexpr double kAslRaiseCaptureSec = 5.0;
+
+// formules [1704] (40263): окно эпохи подъёма вырезается между точками подъёма/опускания
+// по кривой Gyr.Normxyz опорного датчика (сигма-фильтр). Базовая линия — по тихому
+// префиксу 0.5 с; порог = max(mu+3·sd, mu+0.15·(peak−mu)). Параметры проверены локально
+// в Python (устойчивы к амплитуде и шуму). При отсутствии движения → всё окно стадии.
+NewSessionWizard::RawImuBuf::Win detectRaiseWindow(
+    const std::vector<QVector3D>& gyr, int from, int to)
+{
+    NewSessionWizard::RawImuBuf::Win w{ from, to };
+    const int n = to - from;
+    if (from < 0 || to > int(gyr.size()) || n < 12) return w;
+
+    std::vector<double> g(n);
+    double peak = 0.0;
+    for (int i = 0; i < n; ++i) {
+        const QVector3D& v = gyr[from + i];
+        const double m = std::sqrt(double(v.x()) * v.x() + double(v.y()) * v.y()
+                                 + double(v.z()) * v.z());
+        g[i] = m;
+        if (m > peak) peak = m;
+    }
+    constexpr double kFs = 60.0;                       // formules [1704] (40745)
+    const int pfx = std::min(n, std::max(5, int(0.5 * kFs)));
+    double mu = 0.0;
+    for (int i = 0; i < pfx; ++i) mu += g[i];
+    mu /= double(pfx);
+    double var = 0.0;
+    for (int i = 0; i < pfx; ++i) { const double d = g[i] - mu; var += d * d; }
+    const double sd  = std::sqrt(std::max(1e-12, var / double(pfx)));
+    const double thr = std::max(mu + 3.0 * sd, mu + 0.15 * (peak - mu));
+
+    int first = -1, last = -1;
+    for (int i = 0; i < n; ++i)
+        if (g[i] > thr) { if (first < 0) first = i; last = i; }
+    if (first < 0) return w;
+
+    const int pad = int(0.05 * kFs);
+    w.start = from + std::max(0, first - pad);
+    w.end   = from + std::min(n, last + 1 + pad);
+    return w;
+}
+}  // namespace
 
 void NewSessionWizard::onCaptureTick()
 {
@@ -8500,20 +8617,96 @@ void NewSessionWizard::onCaptureTick()
     constexpr double kStillRad = 0.025;
     const bool still = second < kStillRad;
 
-    if (m_liveSpcEnabled
-        && (m_phase == CalibPhase::CaptureT || m_phase == CalibPhase::CaptureN)) {
-        if (++m_imuBufDecim >= 4) {
-            m_imuBufDecim = 0;
+    // formules [1704] (40745): фазовый ресемплер служебного буфера признаков ASL
+    // до ровно 60 Гц (downsample с нативной частоты костюма). ТОЛЬКО вход
+    // классификатора; основной мокап и q_align идут на нативной частоте костюма.
+    const bool aslCapturing = m_liveSpcEnabled && m_doSensorCheck
+        && (m_phase == CalibPhase::CaptureT
+         || m_phase == CalibPhase::CaptureN
+         || m_phase == CalibPhase::CaptureMove);
+    if (aslCapturing) {
+        ++m_aslResInIdx;
+        const int n = m_aslResInIdx;
+        const bool calibEpoch = (m_phase == CalibPhase::CaptureT
+                              || m_phase == CalibPhase::CaptureN
+                              || (m_phase == CalibPhase::CaptureMove && m_moveStage == 0));
+        while (m_aslResNextOut <= double(n) + 1e-9) {
+            double frac = (n >= 1) ? (m_aslResNextOut - double(n - 1)) : 0.0;
+            if (frac < 0.0) frac = 0.0; else if (frac > 1.0) frac = 1.0;
+            const float f = float(frac);
             for (int i = 0; i < kXsensSegmentCount; ++i) {
-                if (!fr.segValid[i]) continue;
-                m_imuBuf[i].acc.push_back(fr.accSensor[i]);
-                m_imuBuf[i].gyr.push_back(fr.gyrSensor[i]);
-                if (m_imuBuf[i].epochCalibration.start < 0) {
-                    m_imuBuf[i].epochCalibration.start = int(m_imuBuf[i].acc.size()) - 1;
+                const QVector3D pA = m_aslHavePrev ? m_aslPrevAcc[i] : fr.accSensor[i];
+                const QVector3D pG = m_aslHavePrev ? m_aslPrevGyr[i] : fr.gyrSensor[i];
+                const QVector3D cA = fr.segValid[i] ? fr.accSensor[i] : pA;
+                const QVector3D cG = fr.segValid[i] ? fr.gyrSensor[i] : pG;
+                m_imuBuf[i].acc.push_back(pA * (1.0f - f) + cA * f);
+                m_imuBuf[i].gyr.push_back(pG * (1.0f - f) + cG * f);
+                if (calibEpoch) {
+                    if (m_imuBuf[i].epochCalibration.start < 0)
+                        m_imuBuf[i].epochCalibration.start = m_aslOutCount;
+                    m_imuBuf[i].epochCalibration.end = m_aslOutCount + 1;
                 }
-                m_imuBuf[i].epochCalibration.end = int(m_imuBuf[i].acc.size());
+            }
+            ++m_aslOutCount;
+            m_aslResNextOut += m_aslResStep;
+        }
+        for (int i = 0; i < kXsensSegmentCount; ++i) {
+            if (fr.segValid[i]) {
+                m_aslPrevAcc[i] = fr.accSensor[i];
+                m_aslPrevGyr[i] = fr.gyrSensor[i];
             }
         }
+        m_aslHavePrev = true;
+    }
+
+    // formules [1704]/[1728]: стадия движений (walk + подъёмы рук/ног) — прогресс по
+    // времени, затем фиксация окна эпохи и переход к следующей стадии или к ASL.
+    if (m_phase == CalibPhase::CaptureMove) {
+        const qint64 elapsedMs = (m_phaseStartMs > 0)
+            ? (QDateTime::currentMSecsSinceEpoch() - m_phaseStartMs) : 0;
+        const double stageSec = (m_moveStage == 0)
+            ? kAslWalkCaptureSec : kAslRaiseCaptureSec;
+        const qint64 budgetMs = qint64(stageSec * 1000.0);
+        if (m_readyBar) {
+            m_readyBar->setRange(0, int(budgetMs));
+            m_readyBar->setValue(int(std::min<qint64>(elapsedMs, budgetMs)));
+            m_readyBar->setFormat("%p%");
+        }
+        if (m_stillLabel) {
+            m_stillLabel->setStyleSheet("color:#2EC25A; font-weight:700;");
+            m_stillLabel->setText(Lang::t("calib_move_hint"));
+        }
+        if (elapsedMs < budgetMs) return;
+
+        m_captureTimer.stop();
+        if (m_moveStage >= 1) {
+            // formules [1704] (40263): окно подъёма по Gyr.Normxyz опорного датчика.
+            // Опорные сегменты (kClassToSeg): LeftUpperArm=12, RightUpperArm=8,
+            // LeftUpperLeg=19, RightUpperLeg=15. Одно окно — на все датчики.
+            static const int kRefSeg[5] = { -1, 12, 8, 19, 15 };
+            const int ref = kRefSeg[m_moveStage];
+            const RawImuBuf::Win wWin =
+                detectRaiseWindow(m_imuBuf[ref].gyr, m_moveStageStartIdx, m_aslOutCount);
+            for (int i = 0; i < kXsensSegmentCount; ++i) {
+                switch (m_moveStage) {
+                    case 1: m_imuBuf[i].epochLeftArm  = wWin; break;
+                    case 2: m_imuBuf[i].epochRightArm = wWin; break;
+                    case 3: m_imuBuf[i].epochLeftLeg  = wWin; break;
+                    case 4: m_imuBuf[i].epochRightLeg = wWin; break;
+                    default: break;
+                }
+            }
+            if (m_test) {
+                std::cout << "[FoxSPC] move stage " << m_moveStage
+                          << " window=[" << wWin.start << "," << wWin.end << ") of "
+                          << m_aslOutCount << " (ref seg " << ref << ")\n";
+                std::cout.flush();
+            }
+        }
+        ++m_moveStage;
+        if (m_moveStage <= 4) beginMoveStage();
+        else                  finishCalibrationAsl();
+        return;
     }
 
     if (still) {
@@ -8841,8 +9034,29 @@ void NewSessionWizard::onCaptureTick()
         std::cout.flush();
     }
 
+    // q_align решён и применён — основная калибровка завершена. Протокол движений ASL
+    // (5 эпох, formules [1704]/[1728]: walk + подъёмы Л/П руки и Л/П ноги) запускается
+    // ТОЛЬКО по галочке m_doSensorCheck — он нужен лишь для проверки размещения датчиков
+    // и на трекинг не влияет. Иначе сразу финал (без прогона классификатора).
+    if (m_doSensorCheck && m_liveSpcEnabled && g_placementClf().ready) {
+        m_moveStage = 0;
+        beginMoveStage();
+        return;
+    }
+    finishCalibrationAsl();
+}
+
+// formules §1721 (23495): probs[s]=clf(features[s]); HungarianAssign → сверка с ожидаемым
+// местом. Вызывается после того, как все 5 эпох (calibration+walk, 4 подъёма) заполнены.
+void NewSessionWizard::finishCalibrationAsl()
+{
     if (m_placementInfo) {
-        if (!m_liveSpcEnabled || !g_placementClf().ready) {
+        if (!m_doSensorCheck) {
+            // протокол движений не выполнялся → классификатор не гоняем (иначе из пустых
+            // эпох вышли бы недостоверные предупреждения). Калибровка q_align при этом валидна.
+            m_placementInfo->setText(Lang::t("asl_skipped"));
+            m_placementInfo->setStyleSheet("color:#9B9B9B;");
+        } else if (!m_liveSpcEnabled || !g_placementClf().ready) {
             m_placementInfo->setText(Lang::t("asl_loading_failed"));
             m_placementInfo->setStyleSheet("color:#9B9B9B;");
         } else {
@@ -8896,6 +9110,30 @@ void NewSessionWizard::onCaptureTick()
     m_phase = CalibPhase::Done;
     logCalibPhaseTransition("calibration complete");
     this->goNext();
+}
+
+void NewSessionWizard::beginMoveStage()
+{
+    static const char* kPrep[5] = {
+        "calib_walk_prepare", "calib_larm_prepare", "calib_rarm_prepare",
+        "calib_lleg_prepare", "calib_rleg_prepare" };
+    const int s = (m_moveStage < 0) ? 0 : (m_moveStage > 4 ? 4 : m_moveStage);
+
+    m_phase = CalibPhase::PrepMove;
+    refreshPoseImage();
+    if (m_calibStatus) m_calibStatus->setText(Lang::t(kPrep[s]));
+    if (m_poseHint)    m_poseHint->setText(Lang::t("calib_move_hint"));
+
+    m_countTicksLeft = kCountdownSeconds * 10;
+    if (m_countdownBar) m_countdownBar->setValue(0);
+    if (m_countLabel)   m_countLabel->setText(QString::number(kCountdownSeconds));
+    if (m_readyBar) {
+        m_readyBar->setValue(0);
+        m_readyBar->setFormat("%p%");
+    }
+    logCalibPhaseTransition("move stage prep");
+    m_countTimer.start();
+    updateNavButtons();
 }
 
 void NewSessionWizard::closeEvent(QCloseEvent* e)
