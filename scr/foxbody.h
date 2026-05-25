@@ -106,30 +106,33 @@ enum class ConfigurationLabel : std::uint8_t {
 
 inline constexpr int kConfigurationLabelCount = 13;
 
+// formules.txt §37.1 (стр. 12214): доли массы сегмента (FOX_FE.bioMech.segmentMassRatios,
+// кратны 1/256·100, L/R одинаковы, сумма≈100). Раньше были округлены до 0.1 — заменены на
+// точные значения эталона. Используются только нормированно в centerOfMass → безопасно.
 inline constexpr std::array<double, kSegmentCount> kMassRatio = {
-    11.7,
-     7.8,
-     6.8,
-     5.9,
-     5.9,
-     2.0,
-     5.9,
-     2.0,
-     2.9,
-     1.6,
-     0.6,
-     2.0,
-     2.9,
-     1.6,
-     0.6,
-    14.2,
-     4.4,
-     1.1,
-     0.4,
-    14.2,
-     4.4,
-     1.1,
-     0.4,
+    11.7188,  // Pelvis
+     7.8125,  // L5
+     6.8359,  // L3
+     5.8594,  // T12
+     5.8594,  // T8
+     1.9531,  // Neck
+     5.8594,  // Head
+     1.9531,  // RShoulder
+     2.9297,  // RUpperArm
+     1.5625,  // RForeArm
+     0.5859,  // RHand
+     1.9531,  // LShoulder
+     2.9297,  // LUpperArm
+     1.5625,  // LForeArm
+     0.5859,  // LHand
+    14.1602,  // RUpperLeg
+     4.3945,  // RLowerLeg
+     1.0742,  // RFoot
+     0.3906,  // RToe
+    14.1602,  // LUpperLeg
+     4.3945,  // LLowerLeg
+     1.0742,  // LFoot
+     0.3906,  // LToe
 };
 
 inline constexpr std::array<double, kSegmentCount> kWinterProxToComRatio = {
@@ -484,6 +487,8 @@ inline constexpr std::array<JointRom, kJointCount> kJointRom = {{
      {   -5.0,   5.0,   -30.0,  70.0,  -10.0, 10.0 },
 }};
 
+// formules.txt §37.4 (стр. 12259): FOX_FE.sd_lump_joint=0.025 (7 групп) → жёсткость связи
+// в МНК = 1/0.025² = 1600. Совпадает точно. §14.1: c₀…c₃=0 в DLL, реальная связь — LUMP-группы.
 inline constexpr double kSdLumpRad = 0.025;
 inline constexpr double kLumpStiffness = 1.0 / (kSdLumpRad * kSdLumpRad);
 
