@@ -441,6 +441,8 @@ constexpr double kSin6  = 0.10452846;
 
 Quat referenceQuat(int seg, Pose pose, Gender gender);
 
+// formules.txt §104 (стр. 36659): шейно-позвоночная связь — cL5=0.45, cL3=0.65, cT12=0.85,
+// cNeck=0.35 (индексы 1..4). Совпадает точно (stdSpine/stdNeck=0.001, w≈1e6). r_spine §104.
 inline constexpr std::array<double, 9> kCSpine = {
     0.05, 0.45, 0.65, 0.85, 0.35, 0.9, 0.9, 0.9, 0.9
 };
