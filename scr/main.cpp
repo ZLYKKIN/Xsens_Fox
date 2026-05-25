@@ -6028,6 +6028,9 @@ void MocapReceiver::run()
                     s = fusionAhrsDefaultSettings;
                     s.convention   = FusionConventionNwu;
                     s.sampleRateHz = float(std::max(60.0, I.freqHz));
+                    // formules.txt §51.4/§19.4: learnMagField=true (из дефолта) — гейт §38.4 берёт dip
+                    // из выученного локального поля, а не фикс. magDipModelDeg ниже. Подтверждено на
+                    // реальных данных лога (среда ~70°, фикс. 78° запирал гейт 11/16 сенсоров).
 
                     s.magDipModelDeg    = float(I.magInclinationDeg.load(std::memory_order_relaxed));
                     s.magDeclinationDeg = float(I.magDeclinationDeg.load(std::memory_order_relaxed));

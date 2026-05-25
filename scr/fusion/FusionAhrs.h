@@ -18,6 +18,10 @@ typedef struct {
     float            magAngGateRelax;
 
     float            magNormGateRelax;
+
+    // formules.txt §51.4 (стр. 14628)/§19.1/§19.4: learnMagField — адаптивно учить опорное поле m0
+    // при покое; гейт берёт dip/склонение из выученного m0, а не из фикс. модели (false=выкл, true=вкл).
+    bool             learnMagField;
 } FusionAhrsSettings;
 
 typedef struct {

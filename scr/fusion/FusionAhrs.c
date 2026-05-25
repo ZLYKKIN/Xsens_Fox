@@ -52,6 +52,10 @@
 #define KFA_TAU_M0_FAST_S        30.0f
 #define KFA_TAU_M0_MED_S         120.0f
 #define KFA_TAU_M0_SLOW_S        300.0f
+// formules.txt §51.4 (стр. 14628): обучать поле при покое ||ω||<omegaStillMagLearnDeg=10°/с;
+// §51.5 (стр. 14671): только если |норма−модель|<normDiffLearnFromModelMax=0.1.
+#define KFA_MAG_LEARN_OMEGA_DEG  10.0f
+#define KFA_MAG_LEARN_NORMDIFF   0.1f
 
 #define KFA_ZRU_VARIANCE         9.0f
 #define KFA_ZRU_MIN_SAMPLES      15
@@ -257,6 +261,9 @@ const FusionAhrsSettings fusionAhrsDefaultSettings = {
     .magDipGateRelax        = 0.0f,
     .magAngGateRelax        = 0.0f,
     .magNormGateRelax       = 0.0f,
+    // formules.txt §51.4/§19.4: адаптивный режим включён (true) — система сама подстраивает опорное
+    // поле под локальное помещение (фикс. 78° не совпадает со средами ~70°, см. тест на реальных данных).
+    .learnMagField          = true,
 };
 
 static void RebuildM0(FusionAhrs *ahrs) {
@@ -593,7 +600,16 @@ static bool MagGate(FusionAhrs *ahrs, FusionVector m) {
                              gUp.axis.y * m.axis.y +
                              gUp.axis.z * m.axis.z) / mNorm;
     const float dipMeasDeg = RadToDeg(asinf(fmaxf(-1.0f, fminf(1.0f, -gDotMUnit))));
-    if (fabsf(dipMeasDeg - ahrs->settings.magDipModelDeg)
+    // formules.txt §19.1: опорные dip/склонение — из ОБУЧЕННОГО поля m0 (learnMagField §51.4),
+    // иначе из фикс. модели настроек. Это и открывает гейт в помещении с локальным dip ≠ 78°
+    // (иначе дедлок: гейт по 78° не открыт → поле не учится → гейт не открыт).
+    float dipRefDeg = ahrs->settings.magDipModelDeg;
+    float decRefDeg = ahrs->settings.magDeclinationDeg;
+    if (ahrs->settings.learnMagField && ahrs->m0_avg_ready) {
+        dipRefDeg = RadToDeg(asinf(fmaxf(-1.0f, fminf(1.0f, -ahrs->m0.axis.z))));
+        decRefDeg = RadToDeg(atan2f(-ahrs->m0.axis.y, ahrs->m0.axis.x));
+    }
+    if (fabsf(dipMeasDeg - dipRefDeg)
             > KFA_MAG_DIP_GATE_DEG * dipRelax) return false;
 
     const float gDotM = gUp.axis.x * m.axis.x + gUp.axis.y * m.axis.y + gUp.axis.z * m.axis.z;
@@ -605,9 +621,45 @@ static bool MagGate(FusionAhrs *ahrs, FusionVector m) {
     const FusionVector mWorld = RotByQ(ahrs->q, mHoriz);
 
     const float angDeg = RadToDeg(atan2f(-mWorld.axis.y, mWorld.axis.x));
-    if (fabsf(angDeg - ahrs->settings.magDeclinationDeg)
+    if (fabsf(angDeg - decRefDeg)
             > KFA_MAG_ANG_GATE_DEG * angRelax) return false;
     return true;
+}
+
+// formules.txt §51.4 (стр. 14628)/§19.4: learnMagField — обучение опорного поля m0 при ПОКОЕ,
+// НЕЗАВИСИМО от mag-гейта (бутстрап в любой среде, ломает дедлок гейта по фикс. 78°). EMA
+// m0 ← m0·a + m_m·(1−a), a=exp(−dt/tauM0) (tau §43.9 30/120/300с). Условия §51.4/§51.5:
+// ||ω−bias|| < omegaStillMagLearnDeg=10°/с И |норма−модель|/норма < normDiffLearnFromModelMax=0.1.
+// dip учится в гравитационной системе (q tilt-верен в покое) → робастно к дрейфу yaw.
+static void LearnMagFieldIfStill(FusionAhrs *ahrs, FusionVector m, FusionVector gyroDegS, float dt) {
+    if (!ahrs->settings.learnMagField) return;
+    const float mNorm = sqrtf(m.axis.x * m.axis.x + m.axis.y * m.axis.y + m.axis.z * m.axis.z);
+    if (mNorm < 1e-6f) return;
+    const float ox = gyroDegS.axis.x - RadToDeg(ahrs->b_g.axis.x);
+    const float oy = gyroDegS.axis.y - RadToDeg(ahrs->b_g.axis.y);
+    const float oz = gyroDegS.axis.z - RadToDeg(ahrs->b_g.axis.z);
+    if (sqrtf(ox * ox + oy * oy + oz * oz) >= KFA_MAG_LEARN_OMEGA_DEG) return;
+    const float refNorm = (ahrs->settings.magNormReferenceLocal > 1e-3f)
+                              ? ahrs->settings.magNormReferenceLocal : KFA_MAG_NORM_REF;
+    if (fabsf(mNorm - refNorm) / refNorm > KFA_MAG_LEARN_NORMDIFF) return;
+    const FusionVector mWorld = RotByQ(ahrs->q, m);
+    const float a = expf(-dt / ahrs->tauM0);
+    if (!ahrs->m0_avg_ready) {
+        ahrs->m0_avg = mWorld;
+        ahrs->m0_avg_ready = true;
+    } else {
+        ahrs->m0_avg.axis.x = a * ahrs->m0_avg.axis.x + (1 - a) * mWorld.axis.x;
+        ahrs->m0_avg.axis.y = a * ahrs->m0_avg.axis.y + (1 - a) * mWorld.axis.y;
+        ahrs->m0_avg.axis.z = a * ahrs->m0_avg.axis.z + (1 - a) * mWorld.axis.z;
+    }
+    const float n = sqrtf(ahrs->m0_avg.axis.x * ahrs->m0_avg.axis.x +
+                          ahrs->m0_avg.axis.y * ahrs->m0_avg.axis.y +
+                          ahrs->m0_avg.axis.z * ahrs->m0_avg.axis.z);
+    if (n > 1e-6f) {
+        ahrs->m0.axis.x = ahrs->m0_avg.axis.x / n;
+        ahrs->m0.axis.y = ahrs->m0_avg.axis.y / n;
+        ahrs->m0.axis.z = ahrs->m0_avg.axis.z / n;
+    }
 }
 
 static void ApplyMagUpdate(FusionAhrs *ahrs, FusionVector m, float dt) {
@@ -861,6 +913,7 @@ void FusionAhrsUpdate(FusionAhrs *ahrs,
 
     ApplyAccUpdate(ahrs, aMs2);
 
+    LearnMagFieldIfStill(ahrs, magnetometer, gyroscope, dt);
     ApplyMagUpdate(ahrs, magnetometer, dt);
 
     ApplyZruIfStill(ahrs, gyroscope, aMs2, dt);
