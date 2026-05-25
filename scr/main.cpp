@@ -10536,11 +10536,19 @@ void LiveStreamSender::setTposeBaseline(
     m_impl->resetWireContinuity();
 }
 
+// formules.txt §1934 (стр. 1725): внутренний мир — NWU (X=вперёд, Y=влево, Z=вверх, правая).
+// §2155 (стр. 1740)/§75450-75452: ориентация шлётся в нативном мире БЕЗ свопа — приёмные плагины
+// сами делают axis-swap на импорте (§1737). Проверено: для Blender так и нужно (нативный Z-up).
 static inline Quat mvnWireOrient(const Quat& worldSeg, LiveTarget )
 {
     return worldSeg;
 }
 
+// formules.txt §75450-75452: для Blender X_b=X_native, Y_b=Y_native, Z_b=Z_native (нативный Z-up).
+// Своп (z,x,y) ЗДЕСЬ намеренно КОМПЕНСИРУЕТ своп (y,z,x) в комплектном плагине
+// Plugins/MVNBlenderPlugin-main/pose.py::_convert_vectors → итог в Blender = (nwu.x,nwu.y,nwu.z)=native.
+// Проверено численно: (z,x,y) ∘ (y,z,x) = identity. Unreal: §75551-75573 — Z-up, ЛЕВАЯ тройка, см;
+// конверсию делает UE-плагин (исходник вне репо) → проверить на железе (блок XXIX).
 static inline QVector3D mvnWirePelvisPos(const QVector3D& nwu, LiveTarget target)
 {
     if (target == LiveTarget::BlenderMVN)
