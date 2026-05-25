@@ -605,11 +605,16 @@ inline constexpr std::array<ContactRow, 12> kFootContacts = {{
 }};
 
 inline constexpr double kStdHeightMeasDefault = 0.002;
+// formules.txt §52.2 (стр. 16097): stdHeightMeas по сегменту — default 0.002 м;
+// Pelvis(0)/T8(4)/Shoulder(7,11)/UpperLeg(15,19)=0.03; ForeArm(9,13)/LowerLeg(16,20)=0.005.
+// ФИКС: добавлен case 7 (RShoulder) — раньше отсутствовал, RShoulder получал 0.002 вместо
+// 0.03 (асимметрия L/R, нарушение инварианта §1698 И1). Теперь оба плеча 0.03.
 inline double stdHeightMeasFor(int seg)
 {
     switch (seg) {
         case 0:  return 0.03;
         case 4:  return 0.03;
+        case 7:  return 0.03;
         case 11: return 0.03;
         case 15: return 0.03;
         case 19: return 0.03;
@@ -759,6 +764,8 @@ struct ZuptThresholds {
     double weightTh3;
     double weightTh4;
 };
+// formules.txt §49.2 (стр. 16059): пороги контакта IcontactsConsidered [th1..th4].
+// Совпадают точно: 0.05/0.25/0.25/0.40; носок (точка 6) th2/th3=0.20; колено (голень) th1=0.08 (§38.1).
 inline constexpr ZuptThresholds kZuptTh = {
     .th1       = 0.05,
     .th2       = 0.25,
@@ -1032,6 +1039,8 @@ inline constexpr std::array<std::array<double, 3>, kLumpGroups> kSdIntAccToVelXY
 
 inline constexpr double kStdJointBoneLength = 0.0002;
 
+// formules.txt §52.1 (стр. 16092): ZUPT sd=stdSamePosMeasXY=0.0003 м/с → вес 1/0.0003²≈1.11e7
+// («приклеивает» контактную точку к полу очень жёстко). impactTh=15 (§49.5) — см. kContact.
 inline constexpr double kStdSamePosMeasXY   = 0.0003;
 
 inline constexpr double kStdSamePosMeasZ3d  = 0.002;
