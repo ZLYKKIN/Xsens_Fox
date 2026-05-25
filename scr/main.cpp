@@ -2270,6 +2270,7 @@ public:
             m_lastBodyMass = bodyMass;
             m_haveCoMPrev  = true;
 
+            // formules §1131 (35653/35657): F_GRF=m·(a+g); стоя → (0,0,+m·g) вверх. Поле g=(0,0,-9.812687) §2673.
             const QVector3D gravityWorld(0.0f, 0.0f,
                 float(fb::constants::kGravityMs2));
             m_lastGRFNewtons =
@@ -5877,6 +5878,7 @@ void MocapReceiver::run()
                 const QVector3D gyrSI(float(phiX * I.freqHz),
                                       float(phiY * I.freqHz),
                                       float(phiZ * I.freqHz));
+                // formules:90106 sensor gyr=rad/s → Fusion ждёт gyr в °/s и acc в g (xio convention).
                 accForFilter = accSI * float(kMs2ToG);
                 gyrForFilter = gyrSI * float(kRadToDeg);
                 fuseReady = true;
@@ -7129,6 +7131,7 @@ static std::array<int, fox::body::kSpcClassCount> hungarian17(
     return assign;
 }
 
+// formules §1719-1723 (23201): Auto Sensor Localization — на сенсор 315 призн.→17 классов размещения.
 struct PlacementClassifier {
     Ort::Env env{ORT_LOGGING_LEVEL_WARNING, "fox_kfa_spc"};
     std::optional<Ort::Session> session;
@@ -7196,6 +7199,7 @@ struct PlacementReport {
     bool        suitUncertaintyAlarm = false;
 };
 
+// formules §1721 (23495): probs[s]=clf(features[s]); HungarianAssign(probs) (max Σlog p) → сверка с ожидаемым местом.
 static PlacementReport analyzePlacement(
     PlacementClassifier& clf,
     const std::array<NewSessionWizard::RawImuBuf, kXsensSegmentCount>& bufs,
@@ -8715,6 +8719,7 @@ void NewSessionWizard::onCaptureTick()
         const Quat& qRefN = fox::body::kRefQuatN[i];
         const Quat& qRefT = fox::body::kRefQuatT[i];
 
+        // formules §174 (4843): qAlign = q_eta⊗conj(q_S_avg)⊗q_bs; трекинг-инвариант oriented=q_BW⊗K (проверено численно).
         const Quat qAlignN = quat_mult(
             quat_mult(qRefN, qAvgN.conj()),
             q_bs.conj()).normalized();

@@ -16,6 +16,9 @@
 > tracking, streaming and recording. It is usable for experimentation,
 > but it is **not production-ready** and needs serious further development.
 >
+> **Free forever — and free for everyone.** Fox Mocap is free now and will always stay
+> free; it will never become paid software.
+>
 > **I'd be very glad for help.** If you can contribute — bug fixes,
 > calibration/streaming improvements, testing, ideas — please open an
 > issue or a pull request. Any help moving the project forward is welcome.
@@ -24,6 +27,9 @@
 > В этой версии остаются шероховатости и известные баги в калибровке,
 > трекинге, стриминге и записи. Ею можно пользоваться для экспериментов,
 > но она **не готова для продакшена** и требует серьёзной доработки.
+>
+> **Бесплатна навсегда — и для всех.** Fox Mocap бесплатна сейчас и останется бесплатной
+> всегда; платной она не станет никогда.
 >
 > **Буду очень рад помощи.** Если можете помочь с доработкой — исправления
 > багов, улучшения калибровки/стриминга, тестирование, идеи — открывайте
@@ -40,9 +46,9 @@ inertial suit. It takes the raw sensor stream straight off the suit, builds a cl
 exact same pose into **Unreal Engine 5.6** and **Blender** in real time — no MVN Live
 licence required. Optional **Manus** gloves add full finger tracking.
 
-You put on the suit, run a short three-pose calibration, press *Start*, and your
-character moves with you everywhere at once: in the app's viewport, in Unreal, and in
-Blender.
+You put on the suit, run a short two-pose **T-pose → N-pose** calibration, press *Start*,
+and your character moves with you everywhere at once: in the app's viewport, in Unreal, and
+in Blender.
 
 **How it works under the hood:**
 
@@ -51,8 +57,9 @@ Blender.
 2. **Fuse** — each sensor runs through an [xio Fusion](https://github.com/xioTechnologies/Fusion)
    AHRS (Madgwick filter + gyro-bias estimator) to produce a stable orientation, hardened
    against NaN / dropouts at every external boundary.
-3. **Calibrate** — a guided **T-pose → N-pose → K-pose** sequence solves the
-   sensor-to-segment alignment, including asymmetric and mirrored sensor mounts.
+3. **Calibrate** — a guided two-pose **T-pose → N-pose** sequence solves the
+   sensor-to-segment alignment (including asymmetric and mirrored sensor mounts), then an
+   automatic sensor-placement check verifies each sensor is on the right body part.
 4. **Solve the skeleton** — forward kinematics drives all 23 segments (spine, arms, legs,
    articulated feet/toes) with anatomical joint limits; locomotion logic keeps the pelvis
    anchored and kills foot-sliding and vertical drift.
@@ -71,8 +78,9 @@ The whole interface is fully localized in **English and Russian**.
 позу в **Unreal Engine 5.6** и **Blender** в реальном времени — лицензия MVN Live не нужна.
 Опционально перчатки **Manus** добавляют полный трекинг пальцев.
 
-Надеваете костюм, проходите короткую калибровку из трёх поз, нажимаете *Start* — и ваш
-персонаж двигается вместе с вами сразу везде: во вьюпорте приложения, в Unreal и в Blender.
+Надеваете костюм, проходите короткую калибровку из двух поз (**T-поза → N-поза**), нажимаете
+*Start* — и ваш персонаж двигается вместе с вами сразу везде: во вьюпорте приложения, в
+Unreal и в Blender.
 
 **Как это работает внутри:**
 
@@ -81,8 +89,9 @@ The whole interface is fully localized in **English and Russian**.
 2. **Фьюжн** — каждый сенсор проходит через AHRS-фильтр [xio Fusion](https://github.com/xioTechnologies/Fusion)
    (фильтр Маджвика + оценка дрейфа гироскопа) для получения стабильной ориентации, с защитой
    от NaN и пропусков на всех внешних границах.
-3. **Калибровка** — последовательность **T-поза → N-поза → K-поза** вычисляет привязку
-   сенсоров к сегментам, включая случаи зеркальной и несимметричной установки датчиков.
+3. **Калибровка** — последовательность из двух поз **T-поза → N-поза** вычисляет привязку
+   сенсоров к сегментам (включая зеркальную и несимметричную установку датчиков), затем
+   автоматическая проверка размещения убеждается, что каждый датчик на нужной части тела.
 4. **Решение скелета** — прямая кинематика управляет всеми 23 сегментами (позвоночник, руки,
    ноги, артикулированные стопы и носки) с анатомическими ограничениями суставов; логика
    локомоции удерживает таз на месте и убирает проскальзывание стоп и вертикальный дрейф.
@@ -107,7 +116,8 @@ Grab the latest Windows build from the
 ## What it does
 
 * Receives the live MVN suit stream over UDP (no MVN Live add-on needed).
-* Calibrates in three poses — **T-pose → N-pose → K-pose** — for a clean rig.
+* Calibrates in two poses — **T-pose → N-pose** — for a clean rig, with an automatic
+  sensor-placement check.
 * Renders a live 3-D skeleton in its own OpenGL window.
 * Streams the same pose to **Unreal Engine 5.6** and **Blender** in real time.
 * Optional **Manus** glove support for finger tracking.
@@ -121,7 +131,7 @@ Grab the latest Windows build from the
 2. In MVN turn on **Network Streamer → UDP** to `127.0.0.1:9763` (format MXTP02 or MXTP25).
 3. *(Optional)* Plug in Manus gloves, start Manus Core.
 4. Launch **Fox Mocap**.
-5. Click **New Session** → run calibration (T → N → K poses).
+5. Click **New Session** → run calibration (**T-pose → N-pose**).
 6. Hit **Live → Start**. Your skeleton renders in the viewport and streams out
    to UE / Blender at the same time.
 
