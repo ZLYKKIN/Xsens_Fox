@@ -8,8 +8,10 @@ using fox::Euler3;
 
 namespace {
 
+// §30.2/§38 множитель рад->град (эргоуглы суставов выдаются в градусах) (formules.txt)
 constexpr double kRad2Deg = 57.29577951308232;
 
+// §4/§114 [4.1] инженерные углы Эйлера ZYX относительного кватерниона (formules.txt)
 inline Euler3 eulerZYX(const Quat& q)
 {
     Euler3 e;
@@ -24,24 +26,28 @@ inline Euler3 eulerZYX(const Quat& q)
     return e;
 }
 
+// §30.4 тип0: осевые/срединные суставы (позвоночник/шея/голова) — без лево/правой зеркальности (formules.txt)
 JointAngles handlerAxial(const Quat& qRel)
 {
     const Euler3 e = eulerZYX(qRel);
     return { e.e0 * kRad2Deg, e.e1 * kRad2Deg, e.e2 * kRad2Deg };
 }
 
+// §30.4 тип1: правые суставы конечностей (formules.txt)
 JointAngles handlerRight(const Quat& qRel)
 {
     const Euler3 e = eulerZYX(qRel);
     return { e.e0 * kRad2Deg, e.e1 * kRad2Deg, e.e2 * kRad2Deg };
 }
 
+// §30.4 тип2: левые суставы — зеркальные знаки (инверсия e0,e2 по латеральной оси Y, §SYM стр.4086) (formules.txt)
 JointAngles handlerLeft(const Quat& qRel)
 {
     const Euler3 e = eulerZYX(qRel);
     return { -e.e0 * kRad2Deg,  e.e1 * kRad2Deg, -e.e2 * kRad2Deg };
 }
 
+// §30.4 тип3/4: стопы (matrix_to_euler_B [4.3]); левая зеркалит abduction и rotation (formules.txt)
 JointAngles handlerFoot(const Quat& qRel, bool leftSide)
 {
     const Matrix3 R = fox::quat_to_matrix(qRel);
@@ -56,6 +62,7 @@ JointAngles handlerFoot(const Quat& qRel, bool leftSide)
 
 }
 
+// §30/§11.3 угол сустава: относит. поворот qRel = qParent (x) conj(qChild); диспетчер по ergoTypeOf [30.4] (formules.txt)
 JointAngles jointAnglesErgo(int jointIdx, const Quat& qParentWorld, const Quat& qChildWorld)
 {
 
@@ -71,6 +78,7 @@ JointAngles jointAnglesErgo(int jointIdx, const Quat& qParentWorld, const Quat& 
         default: a = handlerAxial(qRel); break;
     }
 
+    // §676/§30.4 клип углов на ROM (kJointRom); штрафной член penalty живёт в решателе МНК (formules.txt)
     if (jointIdx >= 0 && jointIdx < fox::body::kJointCount) {
         const auto& rom = fox::body::kJointRom[jointIdx];
         if (a.abductionDeg < rom.abdMin) a.abductionDeg = rom.abdMin;
@@ -83,6 +91,7 @@ JointAngles jointAnglesErgo(int jointIdx, const Quat& qParentWorld, const Quat& 
     return a;
 }
 
+// §30/§1259 эргоуглы всех суставов из мировых ориентаций сегментов (formules.txt)
 std::array<JointAngles, fox::body::kJointCount>
 jointAnglesErgoAll(const std::array<Quat, fox::body::kSegmentCount>& segWorld)
 {

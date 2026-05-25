@@ -8,6 +8,10 @@
 
 namespace fox {
 
+// §XXIX MVN-совместимый протокол стриминга MXTP (UDP к плагинам Blender/Unreal, §стр.20109-20110).
+// Big-endian; заголовок 24 байта: "MXTP"+msgId2(2)+sample(4)+dgCounter(1)+dataCount(1)+frameTimeMs(4)
+//   +0+segCount(1)+0+fingerCount(1)+4 нулевых. Внутренний формат §1334 — иной (doubles+sync 0xFA15CC55).
+// Проверено по плагинам репо: XsensLivc/Datagram.cpp ("MXTP"+hex), MVNBlenderPlugin/receiver.py (BE).
 QByteArray buildMxtpHeader(const char* msgId2,
                            quint32 sample,
                            quint8  dgCounter,
@@ -49,6 +53,7 @@ void appendInt32BE(QByteArray& pkt, qint32 v)
     pkt.append(reinterpret_cast<const char*>(&be), 4);
 }
 
+// §XXIX сегмент позы MXTP02: segId(int32 BE) + позиция xyz + кватернион wxyz (по float32 BE)
 void appendPoseSegment(QByteArray& pkt, qint32 segId,
                        float px, float py, float pz,
                        float qw, float qx, float qy, float qz)

@@ -16,10 +16,13 @@ Quat axisX(double thRad) { return Quat(cos_half(thRad), sin_half(thRad), 0, 0); 
 Quat axisY(double thRad) { return Quat(cos_half(thRad), 0, sin_half(thRad), 0); }
 Quat axisZ(double thRad) { return Quat(cos_half(thRad), 0, 0, sin_half(thRad)); }
 
+// §38 градусы -> радианы (formules.txt)
 constexpr double kDeg = 0.017453292519943295;
 
 constexpr Quat kIdent = Quat(1, 0, 0, 0);
 
+// §24 эталонные ориентации сегментов q_eta для калибровочных поз N/T (сверено с *.xsa дампом):
+//   позвоночник legacy (база) / male §24.3 §1672 / female §24.4 §1674; руки/ноги ниже (formules.txt)
 inline Quat legacySpine(int seg) {
     switch (seg) {
         case 0:  return Quat(0.9984697627340179, 0, 0.05530038793601835, 0);
@@ -52,6 +55,7 @@ inline Quat legacyLeg(int seg) {
     }
 }
 
+// §24.3/§1672 мужская N-поза: таз +9° по +Y (formules.txt)
 inline Quat maleSpine(int seg) {
     switch (seg) {
         case 0:  return Quat(0.99691733, 0,  0.0784591,   0);
@@ -65,6 +69,7 @@ inline Quat maleSpine(int seg) {
     }
 }
 
+// §24.4/§1674 женская N-поза: таз +12° по +Y (больший наклон, 0.10452846=sin6°) (formules.txt)
 inline Quat femaleSpine(int seg) {
     switch (seg) {
         case 0:  return Quat(0.9945219,  0,  0.10452846,  0);
@@ -84,6 +89,7 @@ inline Quat armT(int seg) {
     return kIdent;
 }
 
+// §24 руки в N-позе: плечо 10° (cos5/sin5), плечо/предплечье/кисть опущены на 90° (√2/2) (formules.txt)
 inline Quat armN(int seg) {
 
     switch (seg) {
@@ -99,6 +105,7 @@ inline Quat armN(int seg) {
     }
 }
 
+// §1673 мужская T-поза: пронация предплечья ±0.020149 по Z (RForeArm +, LForeArm -) (formules.txt)
 inline Quat maleArmTOverride(int seg) {
     if (seg == 9)  return Quat(0.9997969880959272, 0, 0,  0.02014900976009601);
     if (seg == 13) return Quat(0.9997969880959272, 0, 0, -0.02014900976009601);
@@ -107,6 +114,7 @@ inline Quat maleArmTOverride(int seg) {
 
 }
 
+// §24 диспетчер эталонной ориентации сегмента q_eta: спина(0-6)/руки(7-14)/ноги, по полу и позе N/T (formules.txt)
 Quat referenceQuat(int seg, Pose pose, Gender gender) {
     if (seg < 0 || seg >= kSegmentCount) return kIdent;
 
@@ -189,6 +197,7 @@ SpcStat parseStat(const std::string& s, std::size_t& i) {
     return SpcStat::Mean;
 }
 
+// §XXVII/§1707 разбор имени признака FoxSPC: epoch_signal_axis_band_stat -> структурная спецификация (formules.txt)
 SpcFeatureSpec parseFeatureName(const char* name) {
     const std::string s(name);
     std::size_t i = 0;
@@ -203,6 +212,8 @@ SpcFeatureSpec parseFeatureName(const char* name) {
     return out;
 }
 
+// §1705 мин-макс диапазоны нормировки признака по типу статистики: корреляции ±1/±16, skew ±3,
+//   kurtosis -3..30, gyr/acc scalarMax (15/25/40/50/80), var=scalarMax², sum×окно 300 (formules.txt)
 std::pair<float, float> deriveRange(const SpcFeatureSpec& f) {
     const bool isCorr = f.stat == SpcStat::SameAxisInterSensorCorrMax
                      || f.stat == SpcStat::SameAxisInterSensorCorrAbsMax
@@ -287,6 +298,7 @@ std::array<float, kSpcFeatureCount> buildRangeHi() {
 
 }
 
+// §XXVII/§1707 имена 315 признаков FoxSPC (epoch_signal_axis_band_stat); порядок критичен для совпадения с ONNX (formules.txt)
 const std::array<const char*, kSpcFeatureCount> kFeatureNames = {{
     "calibrationAcc_Normxyz_freqBand4.5To10.0mean",
     "calibrationAcc_Normxyz_freqBand4.5To10.0sum",

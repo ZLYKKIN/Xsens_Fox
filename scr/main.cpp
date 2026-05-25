@@ -373,6 +373,8 @@ struct ActiveContact {
     double    z_floor;
 };
 
+// §XIV/§52 детектор контакта стопы с полом и ZUPT-якорей: вероятностная модель
+//   (contactParameters §138) + перекат пятка->носок (§49), multiLevel-лестница (§XIV) (formules.txt)
 class ContactDetector {
 public:
     struct FrameInput {
@@ -1562,6 +1564,7 @@ public:
                 const QVector3D r = quat_log(
                     quat_mult(targetFoot, orient[foot].conj()).normalized());
 
+                // §X/§XI σ билатеральной связи ног 0.05 рад -> вес w=1/σ² в МНК (formules.txt)
                 const double sdLegBi = 0.05;
                 const double w_leg = 1.0 / (sdLegBi * sdLegBi);
                 const int rowF = foot * 3;
@@ -1762,6 +1765,8 @@ inline const char* locomotionPhaseName(LocomotionPhase p) {
     }
 }
 
+// §29/§1543 классификация активности (стоит/идёт/бежит/сидит/прыжок/акробатика) и §49 фазы походки
+//   HS->FF->HO->TO->SW; пороги в fb::kGait/fb::kJumpDetect (§foxbody) (formules.txt)
 class LocomotionClassifier {
 public:
     enum class GaitPhase : std::uint8_t {
@@ -2068,6 +2073,9 @@ private:
     int m_count = 0;
 };
 
+// §X FoxFE — фьюжн тела (разрежённый взвешенный МНК §13): объединяет ориентации датчиков в согласованную позу
+//   скелета с биомех-связями (§XI: спина §1098.8, лопаточно-плечевой ритм §46, колено §1300, стопа §48/§49),
+//   контактами/ZUPT (§XIV/§52/§XIII), локомоцией (§29) и skin-моделью (§XI). (formules.txt)
 class PoseRefiner {
 public:
     void reset() {
@@ -2098,6 +2106,8 @@ public:
         double                                          dt;
     };
 
+    // §X/§30 главный шаг фьюжна тела на кадр: детект контактов -> разрежённый МНК-решатель (§13)
+    //   с биомех-связями и подсказками -> уточнённые ориентации сегментов orient (formules.txt)
     BodyPoseSolver::Diag refine(std::array<Quat, fb::kSegmentCount>& orient,
                                 const FrameContext& ctx,
                                 ContactDetector::Result* outContacts = nullptr) {
@@ -2225,6 +2235,7 @@ public:
                                           rFootPitchZ, lFootPitchZ,
                                           rFootVelZ, lFootVelZ, dt);
 
+            // §90/§138.16 точка пятки pHeel (= fb::kFootPointsRight[0].r_local) для CoM/детекции heel-strike
             const QVector3D rHeelW = (*ctx.segCenter)[fb::kSEG_RFoot]
                 + vec_rotate(QVector3D(-0.036f, 0.0f, -0.080f),
                               orient[fb::kSEG_RFoot]);
@@ -2360,7 +2371,7 @@ void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
         static bool antropDumped = false;
         if (!antropDumped) {
             antropDumped = true;
-            const double H = 1.75;
+            const double H = 1.75;  // §57 эталонный рост (= fb::kRefHeightM), только для диагностического дампа
             const double hStand = fb::pelvisStandHeightM(H);
             const double hSit   = fb::pelvisSitHeightM(H);
             const double tLen   = fb::trunkLengthM(H);
@@ -2781,6 +2792,7 @@ void SkeletonXsens::buildLengths(const ActorConfig& actor)
         specLen(fb::kSEG_RShoulder + 1) +
         specLen(fb::kSEG_RShoulder + 2) +
         specLen(fb::kSEG_RShoulder + 3);
+    // §57 полуширина лопаток 0.08 м — опорный размах рук для антропометрической подгонки armSpan
     const double refScapHalfY = 0.08;
     const double refSpanM = 2.0 * refArmOneSide + 2.0 * refScapHalfY;
     const double anthroArmSpanM = 2.0 * (anthro.upperArmRatio + anthro.forearmRatio + anthro.handRatio) * h;
@@ -2833,6 +2845,7 @@ void SkeletonXsens::buildLengths(const ActorConfig& actor)
     auto armLen   = [&](int s) { return float(specLen(s) * armScale);   };
     auto legLen   = [&](int s) { return float(specLen(s) * legScale);   };
 
+    // §57/§XVIII анатомический инсет плеча внутрь от ширины плеч (0.10·trunkScale)
     const double inShoulderOffsetM = 0.10 * trunkScale;
 
     const std::array<float, kXsensSegmentCountWithDummies> L = {
@@ -3048,6 +3061,8 @@ SkeletonXsens::addDummySegments(const std::array<Quat, kXsensSegmentCount>& s) c
     return out;
 }
 
+// §V/§1158/§1159 прямая кинематика (FK) от корня: oriented[i]=raw⊗m_defAng[i] (поза §24),
+//   уточнение позы PoseRefiner (§X), затем обход скелета kp[b]=kp[a]+R(global)·L_bone -> 28 keypoints (formules.txt)
 std::array<QVector3D, kXsensKeypointCount>
 SkeletonXsens::computeKeypoints(const std::array<Quat, kXsensSegmentCount>& raw,
                                 const QVector3D& rootPos,
@@ -5451,6 +5466,8 @@ bool MocapReceiver::hasGloves() const
     return m_impl->frame.hasGloves;
 }
 
+// §XXX сквозной конвейер на датчик->поза (поток приёма): сырые acc/gyr/mag -> нормировка/смещения/s2s ->
+//   FoxKF (§IX FusionAhrs) -> ориентации сегментов + перчатка -> публикация кадра staging (formules.txt)
 void MocapReceiver::run()
 {
     using namespace xda;
@@ -6135,8 +6152,10 @@ void MocapReceiver::run()
                         staging.rightGloveQ = g_ergo.rightQ;
                         staging.rightGloveP = g_ergo.rightP;
                     }
-                    if (haveL || haveR)
-                        staging.hasGloves = true;
+                    // §XXI ФИКС залипания: staging персистентен между кадрами, поэтому hasGloves
+                    // надо ОБНОВЛЯТЬ по текущей свежести (обрыв >500мс -> false), иначе флаг оставался
+                    // true и стримились/писались устаревшие позы пальцев (ср. гашение датчиков костюма).
+                    staging.hasGloves = (haveL || haveR);
                 }
 
                 I.frame = staging;
@@ -8615,6 +8634,7 @@ void NewSessionWizard::onCaptureTick()
     }
     m_prevSnap = snap; m_havePrev = true;
 
+    // §XIII/§XVII порог неподвижности при сборе калибровочной позы (движение сегмента < 0.025 рад)
     constexpr double kStillRad = 0.025;
     const bool still = second < kStillRad;
 
@@ -8905,6 +8925,10 @@ void NewSessionWizard::onCaptureTick()
         const Quat& qRefN = fox::body::kRefQuatN[i];
         const Quat& qRefT = fox::body::kRefQuatT[i];
 
+        // §174.4/§1682/§2564 выравнивание датчик->сегмент q_align (усреднение поз Маркли §1824).
+        // КОНВЕНЦИЯ ДВИЖКА: q_align применяется ПРЕД-поворотом измерений (s2sInv=conj(q_align), стр.~5966)
+        // и в связке с m_defAng в FK (oriented=fused⊗m_defAng, стр.~3066) — это согласованная декомпозиция,
+        // поэтому здесь conj(q_bs), а не постмультипликативная запись §1682. НЕ менять без сверки невязок калибровки.
         const Quat qAlignN = quat_mult(
             quat_mult(qRefN, qAvgN.conj()),
             q_bs.conj()).normalized();
@@ -9050,6 +9074,7 @@ void NewSessionWizard::finishCalibrationAsl()
             QString style = "color:#9B9B9B;";
             if (!rep.haveData) {
                 msg   = Lang::t("asl_no_data");
+            // §XXVII тревога SPC: средняя макс. вероятность класса < 0.35 -> неуверенное размещение датчиков
             } else if (rep.suitUncertaintyAlarm || rep.avgMaxP < 0.35f) {
                 msg   = Lang::t("asl_low_confidence");
             } else if (rep.mismatches.isEmpty()) {
@@ -10130,6 +10155,7 @@ void MocapViewport::drawSkeleton()
         const QVector3D pR = kp[SEG_RHand];
         const QVector3D pL = kp[SEG_LHand];
         const float d = (pR - pL).length();
+        // жест «руки вместе» (расстояние кистей < 0.15 м) — локальный триггер вспомогательной коррекции курса
         constexpr float kPrayerRange = 0.15f;
         if (d < kPrayerRange && d > 1e-3f) {
             const Quat qRW = quat_mult(m_orient[SEG_RHand], m_skel->defAngFor(SEG_RHand));
@@ -10491,6 +10517,8 @@ static inline QVector3D mvnWirePelvisPos(const QVector3D& nwu, LiveTarget target
     return nwu;
 }
 
+// §XXIX стрим тела MXTP02 (23 сегмента) к Blender/Unreal: per-target ремап осей (§VI: Blender Z-up/-Y,
+//   Unreal Z-up/X, q_swap) + непрерывность полушария; foxwire-сериализация big-endian (formules.txt)
 void LiveStreamSender::pushFrame(quint32 sample,
     const std::array<Quat, kXsensSegmentCount>& segQuat,
     const QVector3D& pelvisPos)
@@ -10580,6 +10608,8 @@ void LiveStreamSender::pushFrame(quint32 sample,
     }
 }
 
+// §XXIX/§XXI стрим тела+пальцев MXTP02 (63 сегмента: 23 тела + по 20 пальцев на руку);
+//   пальцы через emitFinger с baseline калибровки и непрерывностью (formules.txt)
 void LiveStreamSender::pushFrameWithGloves(quint32 sample,
     const std::array<Quat, kXsensSegmentCount>& segQuat,
     const QVector3D& pelvisPos,
@@ -11236,6 +11266,7 @@ static inline Quat exportLocalRot(int j,
     return quat_mult(W[parentSeg].inv(), W[ownSeg]).normalized();
 }
 
+// §719/§1354/§2042 экспорт BVH: иерархия HIERARCHY + MOTION, углы Эйлера (порядок каналов BVH), см, система координат BVH (formules.txt)
 static bool writeBvh(const QString& path,
                      const std::vector<RecordedFrame>& frames,
                      int fps,
@@ -11331,6 +11362,7 @@ static bool writeBvh(const QString& path,
     return true;
 }
 
+// §717/§720/§1355 экспорт FBX (ASCII): узлы Model/AnimationCurve, локальные повороты сегментов, см (formules.txt)
 static bool writeFbxAscii(const QString& path,
                           const std::vector<RecordedFrame>& frames,
                           int fps,

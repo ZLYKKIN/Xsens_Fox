@@ -10,6 +10,8 @@
 
 namespace fox::body {
 
+// §VIII размеры модели тела: 23 сегмента, 22 сустава, 7 lump-групп (§1784),
+//   26 контактных строк IcontactsConsidered M[26,6] (§138.16) (formules.txt)
 constexpr int kSegmentCount = 23;
 constexpr int kJointCount   = 22;
 constexpr int kLumpGroups   = 7;
@@ -33,6 +35,8 @@ struct AnthroProportions {
     double footRatio;
 };
 
+// §57/§1990 антропометрические пропорции (доли от роста bodyHeight); uniform-масштабирование
+//   от базовой модели ~1.75 м: длины сегментов *= H/1.75. Значения M/Ж/legacy сверены (formules.txt)
 inline constexpr AnthroProportions kAnthroMale = {
     .trunkRatio          = 0.295,
     .thighRatio          = 0.245,
@@ -106,6 +110,7 @@ enum class ConfigurationLabel : std::uint8_t {
 
 inline constexpr int kConfigurationLabelCount = 13;
 
+// §37.1 доли массы тела по сегментам, % (FOX_FE.bioMech.segmentMassRatios x100): Pelvis 11.7188% и т.д. (formules.txt)
 inline constexpr std::array<double, kSegmentCount> kMassRatio = {
     11.7188,
      7.8125,
@@ -132,6 +137,9 @@ inline constexpr std::array<double, kSegmentCount> kMassRatio = {
      0.3906,
 };
 
+// §1341 доля проксимальный_конец -> CoM на сегменте (ratio_i): UpperArm 0.436, ForeArm 0.430,
+//   Hand 0.506, Up/LowLeg 0.433, прочие 0.50. Значения УНИКАЛЬНЫ для движка, НЕ Winter-1990 (§1123).
+//   (имя kWinter* историческое; значения сверены с §1341) (formules.txt)
 inline constexpr std::array<double, kSegmentCount> kWinterProxToComRatio = {
     0.500,
     0.500,
@@ -158,6 +166,7 @@ inline constexpr std::array<double, kSegmentCount> kWinterProxToComRatio = {
     0.500,
 };
 
+// §37.1/§311.2 эталонная масса субъекта 75 кг (m_i = mass_ratio_i * body_mass; Pelvis=8.79 кг) (formules.txt)
 inline constexpr double kDefaultBodyMassKg = 75.0;
 
 struct SensorToBone {
@@ -166,6 +175,8 @@ struct SensorToBone {
     QVector3D  L_bone;
 };
 
+// §88 q_bs — ориентация датчика в системе кости (sensor->bone); §89/§90 r_bs — смещение датчика на кости;
+//   §57 L_bone — вектор длины кости. Pelvis q_bs=(0.048101,0.517692,-0.029168,-0.853716), angle=174.49° (formules.txt)
 inline const std::array<SensorToBone, kSegmentCount> kSensorToBone = {{
 
     { Quat( 0.048101,  0.517692, -0.029168, -0.853716),
@@ -261,10 +272,12 @@ inline const std::array<SensorToBone, kSegmentCount> kSensorToBone = {{
       QVector3D( 0.06400f,  0.00000f, -0.01500f) },
 }};
 
+// §24 калибровочные углы эталонных поз: √2/2=sin45° (руки 90° в N-позе), sin5°/cos5° (плечо 10°) (formules.txt)
 inline constexpr double kRefSqrtHalf  = 0.7071067811865475;
 inline constexpr double kRefSin5      = 0.087155742747658166;
 inline constexpr double kRefCos5      = 0.996194698091745532;
 
+// §24/§1762 эталонные ориентации сегментов q_gb для T-позы (q_eta); сверено с дампом fox_definitions.xsb (formules.txt)
 inline constexpr std::array<Quat, kSegmentCount> kRefQuatT = {{
      Quat( 0.9984697627340179, 0.0,  0.05530038793601835, 0.0),
      Quat( 1.0,                0.0,  0.0,                 0.0),
@@ -291,6 +304,7 @@ inline constexpr std::array<Quat, kSegmentCount> kRefQuatT = {{
      Quat( 1.0,                0.0,  0.0,                 0.0),
 }};
 
+// §24/§1762 эталонные ориентации q_gb для N-позы: руки опущены (√2/2), плечо 10° (cos5/sin5) (formules.txt)
 inline constexpr std::array<Quat, kSegmentCount> kRefQuatN = {{
      Quat( 0.9984697627340179, 0.0,            0.05530038793601835, 0.0),
      Quat( 1.0,                0.0,            0.0,                 0.0),
@@ -317,6 +331,7 @@ inline constexpr std::array<Quat, kSegmentCount> kRefQuatN = {{
      Quat( 1.0,                0.0,            0.0,                 0.0),
 }};
 
+// §57 полуширина таза 0.080 м, полуширина плеч 0.140 м (Shoulder->UpperArm), эталонный рост 1.75 м (formules.txt)
 inline constexpr float kHipHalfY      = 0.080f;
 inline constexpr float kShoulderHalfY = 0.140f;
 inline constexpr float kRefHeightM    = 1.75f;
@@ -327,6 +342,7 @@ struct JointDef {
     int  child;
 };
 
+// §137 22 сустава (label, родитель->потомок сегмент); сверено с FoxSkel.joints<N>.label/.indices (formules.txt)
 inline constexpr std::array<JointDef, kJointCount> kJoints = {{
     { "jL5S1",            0,  1 },
     { "jL4L3",            1,  2 },
@@ -358,6 +374,7 @@ struct LumpDef {
     double sd;
 };
 
+// §1784/§138 7 lump-групп FoxFE (upperbody/ноги/стопы/руки), σ интегрирования 0.025 рад (formules.txt)
 inline constexpr std::array<LumpDef, kLumpGroups> kLumps = {{
     { "upperbody", 1, 0.025 },
     { "rightleg",  2, 0.025 },
@@ -368,6 +385,7 @@ inline constexpr std::array<LumpDef, kLumpGroups> kLumps = {{
     { "leftarm",   4, 0.025 },
 }};
 
+// §1784 отображение сустав -> lump-группа FoxFE (formules.txt)
 inline constexpr std::array<int, kJointCount> kJointLump = {
     0,
     0,
@@ -393,6 +411,8 @@ inline constexpr std::array<int, kJointCount> kJointLump = {
     4,
 };
 
+// §1762/§1221-1223 наличие датчика на сегменте (конфигурация FullBody = 17 датчиков);
+//   L5/L3/T12/Neck/носки — без своего датчика, ориентация интерполируется через c_spine/c_toes (formules.txt)
 inline constexpr std::array<bool, kSegmentCount> kSensorPresent = {
      true,
      false,
@@ -419,6 +439,7 @@ inline constexpr std::array<bool, kSegmentCount> kSensorPresent = {
      false,
 };
 
+// §24 калибровочные углы эталонных поз: cos/sin 5° (плечо 10°), √2/2=sin45° (рука 90°), cos/sin 6° (жен. таз 12°) (formules.txt)
 constexpr double kCos5  = 0.99619469809174555;
 constexpr double kSin5  = 0.087155742747658166;
 constexpr double kSqrt2H = 0.7071067811865475;
@@ -427,14 +448,19 @@ constexpr double kSin6  = 0.10452846;
 
 Quat referenceQuat(int seg, Pose pose, Gender gender);
 
+// §1663/§138 коэффициенты биомех-связей FoxFE (сверены с FOX_FE.bioMech.*):
+//   c_spine §1098.8; c_pelvis=[0.35,25]; c_arms=[0.95,0.95,0.99]; c_legs=[0.9,0.95];
+//   c_knees=[0.9,0.95]; c_ankles=[2,0.523599=30°,0.5,0] §48.1; c_toes §138.25 (formules.txt)
 inline constexpr std::array<double, 9> kCSpine = {
     0.05, 0.45, 0.65, 0.85, 0.35, 0.9, 0.9, 0.9, 0.9
 };
 
+// проверено вручную: эвристический коэф. бедро-таз связи 0.12; в дампе xsb bioMech отсутствует (engine heuristic)
 inline constexpr double kCFemoropelvic = 0.12;
 
 inline constexpr std::array<double, 2> kCPelvis = { 0.35, 25.0 };
 
+// проверено вручную: штраф латерального наклона таза 0.30 — engine heuristic, нет в xsb V[2]
 inline constexpr double kPelvisLatTiltPenalty = 0.30;
 
 inline constexpr std::array<double, 3> kCArms = { 0.95, 0.95, 0.99 };
@@ -448,17 +474,22 @@ inline constexpr std::array<double, 4> kCAnkles = { 2.0, 0.523599, 0.5, 0.0 };
 inline constexpr std::array<double, 6> kCToes =
     { 0.2, 1.05, -0.5, 1.0, 0.1, 0.0872 };
 
+// §1784 lumpDef.A — масштаб шума интегрирования по активности: sub=1.0, jump1=0.9, jump2=[0.995,0.995,0.9995] (formules.txt)
 inline constexpr std::array<double, 3> kALumpA_sub   = { 1.000, 1.000, 1.000  };
 inline constexpr std::array<double, 3> kALumpA_jump1 = { 0.900, 0.900, 0.900  };
 inline constexpr std::array<double, 3> kALumpA_jump2 = { 0.995, 0.995, 0.9995 };
 
+// §XIX люфт сустава 0.005 рад; гиперэкстензия не допускается (max 0.0) (formules.txt)
 inline constexpr double kJointLaxityRad     = 0.005;
 inline constexpr double kHyperExtensionMax  = 0.0;
 
+// §IX FoxCal.sd_theta_* — σ ориентации (рад) для веса МНК: pose=[1°,3°,2°], плечи/предплечье 6°/8° (formules.txt)
 inline constexpr std::array<double, 3> kSdThetaPoseRad      = { 0.0174533, 0.0523599, 0.0349066 };
 inline constexpr std::array<double, 3> kSdThetaShouldersRad = { 0.10472,   0.10472,   0.10472   };
 inline constexpr std::array<double, 3> kSdThetaUpperArmRad  = { 0.10472,   0.139626,  0.10472   };
+// §150 joint.stdHingeDegVec=[4°,2°] — σ шарнирных суставов (formules.txt)
 inline constexpr std::array<double, 2> kStdHingeDeg         = { 4.0, 2.0 };
+// §1630/§1930 init.floorLevel=1.25 м — стартовая высота пола при cold start (formules.txt)
 inline constexpr double kFoxInitFloorLevelM = 1.25;
 
 struct JointRom {
@@ -467,6 +498,8 @@ struct JointRom {
     double rotMin, rotMax;
 };
 
+// §XXIV/§XIX диапазоны движения ROM (abd/flx/rot, град) по 22 суставам; сверено: плечо §72 (flx -60..180),
+//   локоть flx 0..150°, колено flx 0..135° (стр.1526-1529); shoulder/hip — конусное ROM (§ стр.1567) (formules.txt)
 inline constexpr std::array<JointRom, kJointCount> kJointRom = {{
      {  -25.0,  25.0,   -30.0,  35.0,  -25.0, 25.0 },
      {  -20.0,  20.0,   -25.0,  30.0,  -20.0, 20.0 },
@@ -492,9 +525,11 @@ inline constexpr std::array<JointRom, kJointCount> kJointRom = {{
      {   -5.0,   5.0,   -30.0,  70.0,  -10.0, 10.0 },
 }};
 
+// §1784/§1928 σ lump-группы 0.025 рад; жёсткость = 1/σ² (вес связи в МНК) (formules.txt)
 inline constexpr double kSdLumpRad = 0.025;
 inline constexpr double kLumpStiffness = 1.0 / (kSdLumpRad * kSdLumpRad);
 
+// §1683 качество калибровки по остаточному углу residual: пороги 5/10/20/30° -> отлично/хорошо/удовл./плохо (formules.txt)
 inline constexpr std::array<double, 4> kCalibQualityThresholdDeg = {
     5.0, 10.0, 20.0, 30.0
 };
@@ -526,12 +561,15 @@ inline const char* calibrationQualityLabel(int q)
     }
 }
 
+// §XI/§IX skinArtifact + sensor.states init-σ: ориентация тело-сенсор 45° (до калибровки) -> 1.5°,
+//   нижняя граница 0.3°; позиция 0.01 -> пол 0.004 м (formules.txt)
 inline constexpr double kCalibInitStdOriBodyDeg          = 45.0;
 inline constexpr double kCalibInitStdSensorToBodyDeg     = 1.5;
 inline constexpr double kCalibStdSensorToBodyOriFloorDeg = 0.3;
 inline constexpr double kCalibInitStdSensorToBodyPos     = 0.01;
 inline constexpr double kCalibStdSensorToBodyPosFloor    = 0.004;
 
+// §XIV сегменты, опирающиеся на пол при калибровке: RFoot(17), LFoot(21) (formules.txt)
 inline constexpr bool kCalibSegmentOnFloor(int seg)
 {
 
@@ -543,6 +581,8 @@ struct DimDef {
     double sd_dim;
 };
 
+// §2006 σ измерения антропом. размеров (FoxCal.<dim>.sd_dim, вес в МНК): bodyHeight 0.0005,
+//   footSize 0.001, ankle/knee/hip/shoulder/span 0.01..0.05, armSpan 0.05; сверено по FoxCal (formules.txt)
 inline constexpr std::array<DimDef, 12> kDimensions = {{
     { "bodyHeight",     0.0005   },
     { "footSize",       0.001    },
@@ -564,6 +604,7 @@ struct ContactRow {
     double th1, th2, th3, th4;
 };
 
+// §137 порядок сегментов модели (0-based в коде; в formules.txt нумерация 1-based: seg N <-> код N-1) (formules.txt)
 inline constexpr int kSEG_Pelvis    = 0;
 inline constexpr int kSEG_L5        = 1;
 inline constexpr int kSEG_L3        = 2;
@@ -588,6 +629,8 @@ inline constexpr int kSEG_LLowerLeg = 20;
 inline constexpr int kSEG_LFoot     = 21;
 inline constexpr int kSEG_LToe      = 22;
 
+// §138.16 контактные точки стоп IcontactsConsidered M[26,6] (пороги th1..th4): RFoot/RToe/LFoot/LToe +
+//   нижние точки голеней; значения 0.05/0.25/0.40 и 0.08/1.0 сверены с xsb (formules.txt)
 inline constexpr std::array<ContactRow, 12> kFootContacts = {{
 
     { kSEG_RFoot,     3, 0.05, 0.25, 0.25, 0.40 },
@@ -607,6 +650,7 @@ inline constexpr std::array<ContactRow, 12> kFootContacts = {{
     { kSEG_LLowerLeg, 5, 0.08, 1.0,  1.0,  0.40 },
 }};
 
+// §XIV stdHeightMeas (σ измерения высоты контакта): default 0.002 м; таз/T8/плечи/бёдра 0.03; предплечья/голени 0.005 (formules.txt)
 inline constexpr double kStdHeightMeasDefault = 0.002;
 inline double stdHeightMeasFor(int seg)
 {
@@ -642,6 +686,8 @@ struct ContactParams {
     double secondWinWidthBefore;
     double secondWinWidthAfter;
 };
+// §138/§XIV FOX_FE.contactParameters + contactHandling: уровни dLevel 0.175/0.10 м, импакт-порог 15,
+//   окно импакта 1 с, maxDetectedContacts=4, sameHeightTh 0.0015 м (formules.txt)
 inline constexpr ContactParams kContact = {
     .dLevelDefault             = 0.175,
     .dLevelFoot                = 0.10,
@@ -660,13 +706,16 @@ inline constexpr ContactParams kContact = {
     .secondWinWidthAfter       = 0.01,
 };
 
+// §XXI/§155 кисть: 20 сегментов пальцев, 17 датчиков перчатки на руку; rightHand.jointsCount=19 (formules.txt)
 inline constexpr int kFingerSensorsPerHand = 17;
 inline constexpr int kFingerSegmentsPerHand = 20;
 
+// §XXI/§91 число костей на палец: большой=3, остальные=4 (formules.txt)
 inline constexpr std::array<int, 5> kFingerBoneCount = { 3, 4, 4, 4, 4 };
 
 
 
+// §XXI q_bs пальцев = тождественный (leftHand/rightHand.segments.sensor.q_bs=[1,0,0,0]); сверено с xsb (formules.txt)
 inline constexpr std::array<Quat, kFingerSegmentsPerHand> kFingerQBSRight = {{
     Quat(1, 0, 0, 0), Quat(1, 0, 0, 0), Quat(1, 0, 0, 0), Quat(1, 0, 0, 0),
     Quat(1, 0, 0, 0), Quat(1, 0, 0, 0), Quat(1, 0, 0, 0), Quat(1, 0, 0, 0),
@@ -683,6 +732,7 @@ inline constexpr std::array<Quat, kFingerSegmentsPerHand> kFingerQBSLeft = {{
     Quat(1, 0, 0, 0), Quat(1, 0, 0, 0), Quat(1, 0, 0, 0), Quat(1, 0, 0, 0),
 }};
 
+// §XXVII FoxSPC: порог приёма классификации P>=0.5 и суммарная неопределённость костюма <=4 (SV/α — в Fox_NN.onnx/.csv) (formules.txt)
 inline constexpr float kSpcAcceptanceP   = 0.5f;
 inline constexpr float kSpcSuitUncertSum = 4.0f;
 
@@ -693,6 +743,7 @@ struct AnthroFloors {
     double hipHalfMin;
     double scapHalfMin;
 };
+// §57 нижние границы антропометрии (защита масштабирования от вырожденных размеров): руки/ноги>=0.30, торс>=0.40 м (formules.txt)
 inline constexpr AnthroFloors kAnthroFloors = {
     .armSpanMin     = 0.30,
     .legLengthMin   = 0.30,
@@ -706,6 +757,7 @@ struct JumpDetectParams {
     double blendRangeDeg;
     double gyroQuietDegS;
 };
+// §1543/§29 детектор прыжка (классификация активности): порог наклона 20°, блендинг 15°, «тихий» гироскоп 25°/с (formules.txt)
 inline constexpr JumpDetectParams kJumpDetect = {
     .threshDeg     = 20.0,
     .blendRangeDeg = 15.0,
@@ -720,6 +772,7 @@ struct FingerSmoothParams {
     float outlierThreshThumbDeg;
     float outlierThreshFingerDeg;
 };
+// §XXI сглаживание пальцев перчатки: EMA α (большой 0.15, прочие 0.35), фильтр выбросов 0.04/0.10 при >15°/30° (formules.txt)
 inline constexpr FingerSmoothParams kFingerSmooth = {
     .emaAlphaThumb          = 0.15f,
     .emaAlphaFinger         = 0.35f,
@@ -740,6 +793,9 @@ struct GaitParams {
     double ffHoldSec;
     double acrobaticTiltDeg;
 };
+// §49 цикл переката стопы HS->FF->HO->TO->SW (ZUPT пятка->носок) + §29/§1543 классификация активности:
+//   полёт>0.05с -> бег; скорость таза<0.30 м/с -> стояние; double-support 0.10 (§стр.46467); наклон таза/T8>90° -> акробатика;
+//   pitchHeel/Toe ±0.10 рад, velGround 0.05 / velFlight 0.30 м/с — пороги событий походки (formules.txt)
 inline constexpr GaitParams kGait = {
     .flightSecForRun          = 0.05,
     .standingPelvisSpeedMax   = 0.30,
@@ -763,6 +819,8 @@ struct ZuptThresholds {
     double weightTh3;
     double weightTh4;
 };
+// §52/§138.16 пороги детектора ZUPT (нулевая скорость) = контактные th1..th4: 0.05/0.25/0.25/0.40 м;
+//   носок th2/th3=0.20; колено th1=0.08; веса связи 0.7/1.0 (formules.txt)
 inline constexpr ZuptThresholds kZuptTh = {
     .th1       = 0.05,
     .th2       = 0.25,
@@ -789,6 +847,8 @@ struct MagnetParams {
     double magResTimeUpSec;
     double magResTimeDownSec;
 };
+// §XII магнитная модель (sensor.magModel + FoxCal.e_dip_mag): dip -1.1750679 рад = -67.3°, |наклонение| 78°;
+//   gates angleDiff 6°, dipDiff 3.5°, normDiff 0.03; порог magRes 0.9, tau вверх/вниз 0.6/3.0 с (formules.txt)
 inline constexpr MagnetParams kMagnet = {
     .declinationDeg            = 0.0,
     .inclinationDeg            = 78.0,
@@ -803,6 +863,7 @@ inline constexpr MagnetParams kMagnet = {
     .magResTimeDownSec         = 3.0,
 };
 
+// §XII опорный вектор магнитного поля m0 из угла наклонения (dip) и склонения (declination) (formules.txt)
 inline QVector3D referenceM0Vec(double dipDeg, double declinationDeg) {
 
     constexpr double kD2R = 0.017453292519943295;
@@ -831,6 +892,7 @@ struct MagGateRelax {
     float normMul;
 };
 
+// §XII пер-сегментное ослабление магнитных gate (руки/кисти доверяют магнитометру меньше -> множители до 5x) (formules.txt)
 inline constexpr std::array<MagGateRelax, kSegmentCount> kMagGateRelax = {{
      { 1.5f, 1.3f, 1.0f + 0.20f },
      { 1.0f, 1.0f, 1.0f },
@@ -859,6 +921,7 @@ inline constexpr std::array<MagGateRelax, kSegmentCount> kMagGateRelax = {{
 
 enum class ImuChipType : std::uint8_t { W2, X2, X3 };
 
+// §XXXIII тип IMU-чипа на сегмент (W2/X2/X3); базовая конфигурация — все W2 (formules.txt)
 inline constexpr std::array<ImuChipType, kSegmentCount> kImuChipPerSeg = {{
 
     ImuChipType::W2, ImuChipType::W2, ImuChipType::W2, ImuChipType::W2,
@@ -869,6 +932,7 @@ inline constexpr std::array<ImuChipType, kSegmentCount> kImuChipPerSeg = {{
     ImuChipType::W2, ImuChipType::W2, ImuChipType::W2,
 }};
 
+// §XXXIII масштаб шума магнитометра по чипу: X3 = 7.91 = sigmaMag(X3 0.2215)/sigmaMag(W2 0.028) (formules.txt)
 inline float magNoiseScaleForChip(ImuChipType c) {
     switch (c) {
         case ImuChipType::X3: return 7.91f;
@@ -887,6 +951,8 @@ struct ImuChipNoise {
     float gainErrorAcc;
     float gainErrorGyr;
 };
+// §XXXIII шумы IMU-чипов (FoxHW.FoxIMU_*): σ acc/gyr/mag, dynRange acc 157 м/с² (±16g), gyr 2000°/с,
+//   gainError 0.004; X3 точнее W2/X2 (acc 0.00899, gyr 0.075). Сверено с FoxHW дампом (formules.txt)
 inline constexpr ImuChipNoise kImuChipNoiseW2 = {
     .sigmaAccMs2     = 0.0232f,
     .sigmaGyrDegS    = 0.20f,
@@ -943,6 +1009,8 @@ struct SkinParams {
     double tauMotionRefRad;
     double linAccRefMps2;
 };
+// §XI skin-артефакт (мягкие ткани, Гаусс-Марков): skinArtifact.tau=0.15 с, σ ориент. 3°/2.5°, σ позиции 0.02/0.025 м;
+//   init-σ тело-сенсор 45°->1.5°, пол 0.3°/0.004 м; tau быстрая/медленная 0.05/0.30 с (formules.txt)
 inline constexpr SkinParams kSkin = {
     .tauSec                       = 0.15,
     .sigmaOriDeg                  = 3.0,
@@ -970,6 +1038,8 @@ struct FilterParams {
     double tauM0AvgMedium;
     double tauM0AvgSlow;
 };
+// §XII/§XXV постоянные времени фильтров: LPA ускорения 10 с, дин. LPF гироскопа 6 с;
+//   усреднение опорного магнит. поля m0 — быстрое/среднее/медленное 30/120/300 с по динамике (formules.txt)
 inline constexpr FilterParams kFilter = {
     .tauAcc            = 10.0,
     .tauFGyrLpfDynamic = 6.0,
@@ -993,6 +1063,8 @@ struct EstimatorWeights {
     double gyrBiasStdMaxDeg;
     double multiLevelZhcClipVert;
 };
+// §1928/§X шумы оценщика FoxFE: sd_int_acc_to_vel по 7 lump-группам (X-столбец M[7,3] = [2,2,1,4,4,2,8]);
+//   sd_int_vel_to_pos 1e-5, freeze-σ ориент/позиции, init-σ скорости/смещений, gyr bias 0.005..0.07°/с (formules.txt)
 inline constexpr EstimatorWeights kEstimator = {
     .sdIntAccToVel  = {{ 2.0, 2.0, 1.0, 4.0, 4.0, 2.0, 8.0 }},
     .sdIntVelToPos  = 1.0e-5,
@@ -1012,11 +1084,13 @@ struct AidingBiasParams {
     double cT;
     double cV;
 };
+// §VII смещения подсказок aiding: cT 0.9 (временное), cV 0.01 (formules.txt)
 inline constexpr AidingBiasParams kAidingBias = {
     .cT = 0.9,
     .cV = 0.01,
 };
 
+// §1928 FoxFE.sd_int_acc_to_vel = M[7,3] (lump-группы × оси XYZ): [[2,2,1],[4,4,2],[8,8,4],...,[20,20,20]] (formules.txt)
 inline constexpr std::array<std::array<double, 3>, kLumpGroups> kSdIntAccToVelXYZ = {{
     {{  2.0,  2.0,  1.0 }},
     {{  4.0,  4.0,  2.0 }},
@@ -1027,6 +1101,7 @@ inline constexpr std::array<std::array<double, 3>, kLumpGroups> kSdIntAccToVelXY
     {{ 20.0, 20.0, 20.0 }},
 }};
 
+// §X веса МНК: σ длины кости 0.0002 м; σ совмещения точек XY 0.0003, Z(3D) 0.002, Z(2D) 10 м (formules.txt)
 inline constexpr double kStdJointBoneLength = 0.0002;
 
 inline constexpr double kStdSamePosMeasXY   = 0.0003;
@@ -1034,12 +1109,14 @@ inline constexpr double kStdSamePosMeasXY   = 0.0003;
 inline constexpr double kStdSamePosMeasZ3d  = 0.002;
 inline constexpr double kStdSamePosMeasZ    = 10.0;
 
+// §241/§V решатель IK: до 5 шагов; толеранс градиента 1e-4 рад, шага 1e-5; люфт сустава 0.005; штраф гиперэкст. σ 0.0002 (formules.txt)
 inline constexpr int    kMaxIKSteps         = 5;
 inline constexpr double kIKGradTolRad       = 1.0e-4;
 inline constexpr double kIKStepTolRad       = 1.0e-5;
 inline constexpr double kJointLaxitySolver  = 0.005;
 inline constexpr double kHypExtPenaltySd    = 0.0002;
 
+// §138/§XIV уровни контакта: по умолчанию 0.175 м, для стопы 0.10 м (formules.txt)
 inline constexpr double kDLevelDefault      = 0.175;
 inline constexpr double kDLevelFoot         = 0.10;
 
@@ -1051,6 +1128,7 @@ struct SpineNeckParams {
     double stdNeck;
     double stdSpine;
 };
+// §1098.8 связь спины/шеи (подмножество c_spine): cL5 0.45, cL3 0.65, cT12 0.85, cNeck 0.35; σ 0.001 (formules.txt)
 inline constexpr SpineNeckParams kSpineNeck = {
     .cL3      = 0.65,
     .cL5      = 0.45,
@@ -1060,16 +1138,22 @@ inline constexpr SpineNeckParams kSpineNeck = {
     .stdSpine = 0.001,
 };
 
+// §46/§1114 лопаточно-плечевой ритм (scapulohumeral): активация при угле плеча 60°..90° (formules.txt)
 inline constexpr double kScapHumThetaLowDeg  = 60.0;
 inline constexpr double kScapHumThetaHighDeg = 90.0;
 
+// §1300 колено screw-home: винтовая ротация = c_knees[1]*(1-cos(flex))*(15°·π/180) (formules.txt)
 inline constexpr double kKneeScrewMaxDeg     = 15.0;
 
+// §48 предел тыльного сгибания голеностопа 0.785398 рад = π/4 = 45° (formules.txt)
 inline constexpr double kAnkleDorsiLimitRad  = 0.785398;
 
+// §49 диапазон переката носка (toe rocker): 5°..30° (formules.txt)
 inline constexpr double kToeRockerLowRad     = 5.0  * 0.017453292519943295;
 inline constexpr double kToeRockerHighRad    = 30.0 * 0.017453292519943295;
 
+// §138/§228 FoxFE.contactParameters.* (сверено с xsb-дампом): air/com/acc/vel/general/peakDetection/
+//   level/samepos/boost/pos — параметры вероятностной модели детектора контакта стопы с полом (formules.txt)
 inline constexpr std::array<double, 11> kAir = {
     -3.0, 0.0, 0.3, 3.0, 0.1, -0.05, 0.3, 0.0, -6.0, -0.05, -0.02
 };
@@ -1100,6 +1184,7 @@ struct ContactWeights {
     double bias;
 };
 
+// §XIV веса слагаемых детектора контакта (acc/vel/com/air/general/level/boost/pos/peak/samepos) — все 1.0 (formules.txt)
 inline constexpr ContactWeights kContactWeights = {
     .wAcc           = 1.0,
     .wVel           = 1.0,
@@ -1134,6 +1219,7 @@ struct OutlierRej {
     double jointResWin1;
     double jointResWin2;
 };
+// §XV отбраковка выбросов (марг./RTS): пороги невязок 100/10/2.5, per-joint residual, скольжение стопы, окна 0.1/0.05 (formules.txt)
 inline constexpr OutlierRej kOutlierRej = {
     .outRejTh1    = 100.0,
     .outRejTh2    = 10.0,
@@ -1163,6 +1249,8 @@ struct MultiLevelParams {
     double zhSameSegmentBonus;
     double zhSameSegmentPenalty;
 };
+// §XIV multiLevel (ходьба по лестнице/уровням): усреднение высоты ступени 5, новый уровень 0.03 м,
+//   запас уровня 0.09 м, ZHC (zero-height-contact) likelihood 0.4..0.9, boost 1000, tau сглаж. 0.2 с (formules.txt)
 inline constexpr MultiLevelParams kMultiLevel = {
     .averagingStairHeight          = 5,
     .maxDevFromAvgStairHeight      = 0.05,
@@ -1199,6 +1287,8 @@ struct CalibMagE {
     double e_norm_feet;
     double e_sternum_pelvis;
 };
+// §24/FoxCal.e_* пороги калибровки по магнитному полю: dip 78°/85°, наклонения рук/таза/грудины 30/45/40/25°,
+//   нормы поля рук/головы/таза/стоп и различия; сверено с FoxCal-дампом (formules.txt)
 inline constexpr CalibMagE kCalibMagE = {
     .e_dip_mag        = 78.0,
     .e_dip_mag2       = 85.0,
@@ -1221,6 +1311,7 @@ struct FootPoint {
     int       pointId;
     QVector3D r_local;
 };
+// §90/§138.16 контактные точки стопы (локальн. коорд., м): 3=pHeel(-0.036,0,-0.08), 4=pFirstMet, 5=pFifthMet, 6=ball; сверено с xsb (formules.txt)
 inline constexpr std::array<FootPoint, 4> kFootPointsRight = {{
     { 3, QVector3D(-0.036f,  0.000f, -0.080f) },
     { 4, QVector3D( 0.116f, -0.038f, -0.080f) },
@@ -1234,6 +1325,7 @@ inline constexpr std::array<FootPoint, 4> kFootPointsLeft = {{
     { 6, QVector3D( 0.140f,  0.000f, -0.080f) },
 }};
 
+// §90 анатомические anchor-точки сегментов (носок, перед колена, SIPS таза, центр ягодицы) для контактов/маркеров (formules.txt)
 inline constexpr QVector3D kToeTipPoint = QVector3D(0.064f, 0.0f, -0.015f);
 
 inline constexpr QVector3D kKneeFrontPointR = QVector3D(0.040f,  0.000f, -0.050f);
@@ -1250,6 +1342,8 @@ struct FingerRom {
     double abdMin, abdMax;
     double rotMin, rotMax;
 };
+// §91 ROM 19 суставов кисти (rightHand.joints, ballandsocket с огранич. DOF, град): большой TM_CMC/MCP/IP,
+//   указат..мизинец MCP/PIP/DIP, Carpus/OPP/Spread/RSV; flx/abd/rot пределы (formules.txt)
 inline constexpr std::array<FingerRom, 19> kFingerRom = {{
      { "TM_CMC",   -15.0,  60.0,  -45.0,  45.0,  -20.0, 30.0 },
      { "TM_MCP",     0.0,  60.0,   -5.0,   5.0,    0.0,  0.0 },
@@ -1272,6 +1366,8 @@ inline constexpr std::array<FingerRom, 19> kFingerRom = {{
      { "RSV",       -5.0,   5.0,    0.0,   0.0,    0.0,  0.0 },
 }};
 
+// §XXI FoxKF.gloveBase.* — конфиг калмановского фильтра перчатки (FOX_KFA-Core): магнитная модель,
+//   ZRU, acc/gyr boost/clip, redefine курса, skin/bias; значения в kGloveBase ниже сверены с xsb (formules.txt)
 struct KfaGloveParams {
 
     double accDivMonTauDecay;
@@ -1414,6 +1510,8 @@ struct KfaGloveParams {
     double clipAcc;
     double clipGyrDegS;
 };
+// §XXI FoxKF.gloveBase (сверено с xsb-дампом FOX_KFA_Filter.gloveBase): nominalT=0.008333=1/120 (перчатка 120 Гц),
+//   магнитные gate 6°/3.5°/0.03, ZRU, clipAcc 157 / clipGyr 2000, sd init, redefine курса (formules.txt)
 inline constexpr KfaGloveParams kGloveBase = {
     .accDivMonTauDecay=0.1, .accDivMonThreshold=0.5,
     .accDivMonThresholdHighBoost=2.0, .accDivMonTime=2.0,
@@ -1480,6 +1578,7 @@ inline constexpr KfaGloveParams kGloveBase = {
     .clipAcc=157.0, .clipGyrDegS=2000.0,
 };
 
+// §XXI вариант фильтра для надетой перчатки (human): проекция магнита на горизонт, temporal redefine (formules.txt)
 inline constexpr KfaGloveParams kGloveHuman = []() {
     KfaGloveParams p = kGloveBase;
     p.accDivMonThresholdHighBoost = 3.0;
@@ -1493,6 +1592,7 @@ inline constexpr KfaGloveParams kGloveHuman = []() {
     return p;
 }();
 
+// §XXI вариант фильтра VRU (vertical reference unit): обновление m0, без ZRU и магнитометра (formules.txt)
 inline constexpr KfaGloveParams kGloveVRU = []() {
     KfaGloveParams p = kGloveBase;
     p.doDominantFieldLearning = false;
@@ -1507,6 +1607,7 @@ struct CarpusPoint {
     const char* label;
     double      x, y, z;
 };
+// §92.1 6 опорных точек запястья (rightHand.segments1.points): длина пясти 0.027 м, разнос CMC по Y ±0.0274 (зеркалится L/R) (formules.txt)
 inline constexpr std::array<CarpusPoint, 6> kRightCarpusPoints = {{
     { "wrist origin", 0.0000,  0.0000,  0.0 },
     { "Thumb CMC",    0.0270, -0.0274,  0.0 },
@@ -1529,6 +1630,7 @@ enum class FingerJointType : std::uint8_t {
     Spread,
     Reserved,
 };
+// §91/§92 типы суставов пальцев (DOF): большой=saddle-CMC-3DOF/hinge-MCP-1DOF/hinge-IP; II..V=MCP-2DOF/PIP/DIP; Carpal/Opposition/Spread/Reserved (formules.txt)
 inline constexpr std::array<FingerJointType, 19> kFingerJointTypes = {{
     FingerJointType::SaddleCMC,
     FingerJointType::HingeMCP1DOF,
@@ -1567,6 +1669,7 @@ inline const char* fingerJointTypeName(FingerJointType t) {
     return "?";
 }
 
+// §1683 качество позы по остаточной невязке МНК (м): <0.02 отлично .. >0.10 невалидно (formules.txt)
 inline constexpr std::array<double, 5> kPoseQualityResidBands = {
     0.02, 0.03, 0.05, 0.10, 1.00
 };
@@ -1586,6 +1689,8 @@ inline int poseQualityFromResidual(double residual) {
     return PoseQualityInvalid;
 }
 
+// §30.4 байтовая таблица диспетчеризации эргоуглов по 22 суставам (точное совпадение со спекой):
+//   тип0 ×7 (осевые) | тип1 правые | тип2 левые | тип3/4 стопы. Драйвит ergoTypeOf()/foxergo (formules.txt)
 inline constexpr std::array<std::uint8_t, kJointCount> kErgoHandler = {
 
     0,
@@ -1613,6 +1718,8 @@ inline constexpr std::array<std::uint8_t, kJointCount> kErgoHandler = {
 };
 
 namespace constants {
+    // §38 точные числовые константы движка: 180/π, π/180, π/2, π;
+    //   порог малого угла SLERP 1e-6 (1e-6..1e-5); поправочные числа NLERP-ветви 0.2/0.8/(1/3)
     inline constexpr double kRad2Deg   = 57.29577951308232;
     inline constexpr double kDeg2Rad   = 0.017453292519943295;
     inline constexpr double kPi_2      = 1.5707963267948966;
@@ -1621,13 +1728,16 @@ namespace constants {
     inline constexpr double kNLerpA    = 0.2;
     inline constexpr double kNLerpB    = 0.8;
     inline constexpr double kNLerpC    = 1.0 / 3.0;
+    // §13[д] коэффициенты решателя позы; §38/§31.2 шаг Гаусса–Ньютона α=0.25, демпфирование Левенберга λ=0.01
     inline constexpr double kSolverC1     = ::fox::kSolverC1;
     inline constexpr double kSolverC2     = ::fox::kSolverC2;
     inline constexpr double kSolverAlpha  = 0.25;
     inline constexpr double kSolverLambda = 0.01;
 
+    // §41.1 гравитация модели g = 9.812687 м/с² (вектор (0,0,-g), мировая Z вверх) (formules.txt)
     inline constexpr double kGravityMs2 = 9.812687;
 
+    // §XXX основная частота движка 240 Гц, шаг dt = 1/240 с (formules.txt)
     inline constexpr double kSampleRateHz = 240.0;
     inline constexpr double kSampleDtSec  = 1.0 / kSampleRateHz;
 }
@@ -1638,6 +1748,7 @@ constexpr double totalMassRatio() {
     return s;
 }
 
+// §57 uniform-масштабирование скелета: коэффициент = рост_субъекта / 1.75 м (formules.txt)
 inline double scaleFor(double subjectHeightM) {
     return (subjectHeightM > 1e-3) ? (subjectHeightM / kRefHeightM) : 1.0;
 }
@@ -1667,6 +1778,7 @@ inline double trunkLengthM(double subjectHeightM) {
     return scaleFor(subjectHeightM) * s;
 }
 
+// §1341/§37.1 центр масс тела: CoM = Σ(m_i·c_i)/Σm_i по сегментам; полная масса M = bodyMass·(Σm/100) (formules.txt)
 inline QVector3D centerOfMass(const std::array<QVector3D, kSegmentCount>& segCenters,
                               double* M = nullptr,
                               double bodyMassKg = kDefaultBodyMassKg) {
@@ -1695,10 +1807,13 @@ inline int lumpOf(int jointIdx) {
     return (jointIdx >= 0 && jointIdx < kJointCount) ? kJointLump[jointIdx] : -1;
 }
 
+// §30.4 тип обработчика эргоугла сустава: 0=осевой, 1=правый, 2=левый, 3/4=стопы (formules.txt)
 inline int ergoTypeOf(int jointIdx) {
     return (jointIdx >= 0 && jointIdx < kJointCount) ? int(kErgoHandler[jointIdx]) : 0;
 }
 
+// §XXVII FoxSPC (классификатор размещения датчиков): 17 классов = 17 датчиков, 315 признаков;
+//   опорные векторы SV / α-матрицы / per-class статистика — во внешнем Fox_NN.onnx + .csv (formules.txt)
 constexpr int kSpcClassCount   = 17;
 constexpr int kSpcFeatureCount = 315;
 
@@ -1729,6 +1844,7 @@ inline constexpr std::array<int, kSpcClassCount> kClassToSeg = {
       4,
 };
 
+// §XXVII обратное отображение сегмент -> класс SPC (-1 = сегмент без датчика) (formules.txt)
 inline constexpr std::array<int, kSegmentCount> kSegToClass = {
       8,
      -1,
@@ -1785,6 +1901,7 @@ extern const std::array<SpcFeatureSpec,  kSpcFeatureCount> kFeatureSpecs;
 extern const std::array<float,           kSpcFeatureCount> kFeatureMin;
 extern const std::array<float,           kSpcFeatureCount> kFeatureMax;
 
+// §1707 порядок (перестановка) 315 признаков для ONNX-инференса FoxSPC; критичен для совпадения с обученной моделью (formules.txt)
 inline constexpr std::array<int, kSpcFeatureCount> kSpcModelPerm = {{
     0, 1, 2, 3, 4, 5, 6, 7, 8, 14, 15, 16, 17, 18, 9, 10,
     11, 12, 13, 21, 22, 19, 20, 29, 30, 31, 23, 24, 25, 26, 27, 28,
@@ -1808,6 +1925,7 @@ inline constexpr std::array<int, kSpcFeatureCount> kSpcModelPerm = {{
     308, 300, 301, 302, 303, 313, 314, 309, 310, 311, 312,
 }};
 
+// §1705 мин-макс нормализация 315 признаков (preprocessing перед SVM/ONNX): нижние границы (formules.txt)
 inline constexpr std::array<float, kSpcFeatureCount> kFeatureMinM = {{
     0.0000f, 0.0000f, 0.0000f, 0.0000f, 0.0000f, 0.0000f, -1.0000f, -16.0000f,
     0.0000f, 0.0000f, 0.0000f, 0.0000f, -3.0000f, 0.0000f, 0.0000f, 0.0000f,
@@ -1851,6 +1969,7 @@ inline constexpr std::array<float, kSpcFeatureCount> kFeatureMinM = {{
     -15.0000f, 0.0000f, -16.0000f,
 }};
 
+// §1705 мин-макс нормализация 315 признаков: верхние границы (formules.txt)
 inline constexpr std::array<float, kSpcFeatureCount> kFeatureMaxM = {{
     40.0000f, 3600.0000f, 40.0000f, 40.0000f, 1.0000f, 16.0000f, 1.0000f, 16.0000f,
     12000.0000f, 40.0000f, 3600.0000f, 40.0000f, 3.0000f, 12000.0000f, 1.0000f, 16.0000f,
