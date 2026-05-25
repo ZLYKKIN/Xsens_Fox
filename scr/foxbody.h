@@ -268,6 +268,8 @@ inline constexpr double kRefSqrtHalf  = 0.7071067811865475;
 inline constexpr double kRefSin5      = 0.087155742747658166;
 inline constexpr double kRefCos5      = 0.996194698091745532;
 
+// formules.txt §24.1 (стр. 21106): эталонная T-поза (.xsa npose/tpose, legacy). Совпадает точно:
+// Pelvis 6.34°/+Y, L3 5.83°/−Y, Neck 12.61°/+Y, руки=тождество, ноги RUpperLeg 2.75°/+Y. q_align — §24.5/§174.
 inline constexpr std::array<Quat, kSegmentCount> kRefQuatT = {{
      Quat( 0.9984697627340179, 0.0,  0.05530038793601835, 0.0),
      Quat( 1.0,                0.0,  0.0,                 0.0),
@@ -294,6 +296,8 @@ inline constexpr std::array<Quat, kSegmentCount> kRefQuatT = {{
      Quat( 1.0,                0.0,  0.0,                 0.0),
 }};
 
+// formules.txt §24.2 (стр. 21133): эталонная N-поза. Совпадает точно — отличие от T только в руках:
+// RShoulder 10°/+X (sin5°=0.0871557), RUpperArm/ForeArm/Hand 90°/+X (sin45°=0.7071068); левые — зеркало −X.
 inline constexpr std::array<Quat, kSegmentCount> kRefQuatN = {{
      Quat( 0.9984697627340179, 0.0,            0.05530038793601835, 0.0),
      Quat( 1.0,                0.0,            0.0,                 0.0),
