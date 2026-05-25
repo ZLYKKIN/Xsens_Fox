@@ -1814,8 +1814,8 @@ public:
             const double sl = (rHeelWorld - m_lastHeelR_HS).length();
             const double sh = std::abs(double(rHeelWorld.z() - m_lastHeelR_HS.z()));
             if (m_haveLastHeelR && sl > 0.01 && sl < 2.5) {
-                m_lastStepLengthR = sl;
-                m_lastStepHeightR = sh;
+                m_lastStrideLengthR = sl;
+                m_lastStrideHeightR = sh;
             }
             m_lastHeelR_HS = rHeelWorld;
             m_haveLastHeelR = true;
@@ -1824,8 +1824,8 @@ public:
             const double sl = (lHeelWorld - m_lastHeelL_HS).length();
             const double sh = std::abs(double(lHeelWorld.z() - m_lastHeelL_HS.z()));
             if (m_haveLastHeelL && sl > 0.01 && sl < 2.5) {
-                m_lastStepLengthL = sl;
-                m_lastStepHeightL = sh;
+                m_lastStrideLengthL = sl;
+                m_lastStrideHeightL = sh;
             }
             m_lastHeelL_HS = lHeelWorld;
             m_haveLastHeelL = true;
@@ -1850,10 +1850,10 @@ public:
         }
     }
 
-    double lastStepLengthR() const { return m_lastStepLengthR; }
-    double lastStepLengthL() const { return m_lastStepLengthL; }
-    double lastStepHeightR() const { return m_lastStepHeightR; }
-    double lastStepHeightL() const { return m_lastStepHeightL; }
+    double lastStrideLengthR() const { return m_lastStrideLengthR; }
+    double lastStrideLengthL() const { return m_lastStrideLengthL; }
+    double lastStrideHeightR() const { return m_lastStrideHeightR; }
+    double lastStrideHeightL() const { return m_lastStrideHeightL; }
     double vertCoMOscillationM() const { return m_lastVertCoMOscM; }
     int    heelStrikeCountR() const { return m_heelStrikeR; }
     int    heelStrikeCountL() const { return m_heelStrikeL; }
@@ -1990,10 +1990,10 @@ private:
     QVector3D       m_lastHeelL_HS    {0, 0, 0};
     bool            m_haveLastHeelR   = false;
     bool            m_haveLastHeelL   = false;
-    double          m_lastStepLengthR = 0.0;
-    double          m_lastStepLengthL = 0.0;
-    double          m_lastStepHeightR = 0.0;
-    double          m_lastStepHeightL = 0.0;
+    double          m_lastStrideLengthR = 0.0;
+    double          m_lastStrideLengthL = 0.0;
+    double          m_lastStrideHeightR = 0.0;
+    double          m_lastStrideHeightL = 0.0;
     double          m_comZMin         =  1e9;
     double          m_comZMax         = -1e9;
     bool            m_haveLastCom     = false;
@@ -2244,10 +2244,10 @@ public:
                               << "s  L="
                               << LocomotionClassifier::gaitPhaseName(m_locomotion.gaitPhaseL())
                               << " durL=" << m_locomotion.gaitDurL() << "s  "
-                              << "stepR=" << m_locomotion.lastStepLengthR()
-                              << "m hR=" << m_locomotion.lastStepHeightR() << "m "
-                              << "stepL=" << m_locomotion.lastStepLengthL()
-                              << "m hL=" << m_locomotion.lastStepHeightL() << "m "
+                              << "strideR=" << m_locomotion.lastStrideLengthR()
+                              << "m hR=" << m_locomotion.lastStrideHeightR() << "m "
+                              << "strideL=" << m_locomotion.lastStrideLengthL()
+                              << "m hL=" << m_locomotion.lastStrideHeightL() << "m "
                               << "vertOsc=" << m_locomotion.vertCoMOscillationM() << "m"
                               << "\n";
                     std::cout.flush();
@@ -2270,6 +2270,7 @@ public:
             m_lastBodyMass = bodyMass;
             m_haveCoMPrev  = true;
 
+            // formules §1131 (35653/35657): F_GRF=m·(a+g); стоя → (0,0,+m·g) вверх. Поле g=(0,0,-9.812687) §2673.
             const QVector3D gravityWorld(0.0f, 0.0f,
                 float(fb::constants::kGravityMs2));
             m_lastGRFNewtons =
@@ -5877,6 +5878,7 @@ void MocapReceiver::run()
                 const QVector3D gyrSI(float(phiX * I.freqHz),
                                       float(phiY * I.freqHz),
                                       float(phiZ * I.freqHz));
+                // formules:90106 sensor gyr=rad/s → Fusion ждёт gyr в °/s и acc в g (xio convention).
                 accForFilter = accSI * float(kMs2ToG);
                 gyrForFilter = gyrSI * float(kRadToDeg);
                 fuseReady = true;
@@ -6699,11 +6701,11 @@ static const Tr kTr[] = {
     {"sns_pelvis",         "таз",                               "pelvis"},
     {"sns_t8",             "грудь",                             "chest"},
     {"sns_head",           "голова",                            "head"},
-    {"sns_r_shoulder",     "правое плечо",                      "r shoulder"},
+    {"sns_r_shoulder",     "правая лопатка",                    "r shoulder"},
     {"sns_r_upper_arm",    "правое плечо",                      "r upper arm"},
     {"sns_r_forearm",      "правое предплечье",                 "r forearm"},
     {"sns_r_hand",         "правая кисть",                      "r hand"},
-    {"sns_l_shoulder",     "левое плечо",                       "l shoulder"},
+    {"sns_l_shoulder",     "левая лопатка",                     "l shoulder"},
     {"sns_l_upper_arm",    "левое плечо",                       "l upper arm"},
     {"sns_l_forearm",      "левое предплечье",                  "l forearm"},
     {"sns_l_hand",         "левая кисть",                       "l hand"},
@@ -7129,6 +7131,7 @@ static std::array<int, fox::body::kSpcClassCount> hungarian17(
     return assign;
 }
 
+// formules §1719-1723 (23201): Auto Sensor Localization — на сенсор 315 призн.→17 классов размещения.
 struct PlacementClassifier {
     Ort::Env env{ORT_LOGGING_LEVEL_WARNING, "fox_kfa_spc"};
     std::optional<Ort::Session> session;
@@ -7196,6 +7199,7 @@ struct PlacementReport {
     bool        suitUncertaintyAlarm = false;
 };
 
+// formules §1721 (23495): probs[s]=clf(features[s]); HungarianAssign(probs) (max Σlog p) → сверка с ожидаемым местом.
 static PlacementReport analyzePlacement(
     PlacementClassifier& clf,
     const std::array<NewSessionWizard::RawImuBuf, kXsensSegmentCount>& bufs,
@@ -8715,6 +8719,7 @@ void NewSessionWizard::onCaptureTick()
         const Quat& qRefN = fox::body::kRefQuatN[i];
         const Quat& qRefT = fox::body::kRefQuatT[i];
 
+        // formules §174 (4843): qAlign = q_eta⊗conj(q_S_avg)⊗q_bs; трекинг-инвариант oriented=q_BW⊗K (проверено численно).
         const Quat qAlignN = quat_mult(
             quat_mult(qRefN, qAvgN.conj()),
             q_bs.conj()).normalized();

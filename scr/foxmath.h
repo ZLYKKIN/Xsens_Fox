@@ -89,6 +89,7 @@ void jacobiSym4(double A[4][4], double U[4][4]);
 
 Quat quat_pow(const Quat& q, double t);
 
+// formules §4040: сагиттальное L/R зеркало вращения (keep y, negate x,z).
 inline Quat mirror_y_quat(const Quat& q) {
     return Quat(q.w, -q.x, q.y, -q.z);
 }
