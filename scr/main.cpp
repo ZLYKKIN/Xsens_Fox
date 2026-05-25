@@ -6527,7 +6527,7 @@ Lang& Lang::instance() { static Lang g; return g; }
 
 struct Tr { const char* key; const char* ru; const char* en; };
 static const Tr kTr[] = {
-    {"app_title",          "Fox-Mocap — Beta 0.1",              "Fox-Mocap — Beta 0.1"},
+    {"app_title",          "Fox-Mocap",                         "Fox-Mocap"},
     {"start_new_session",  "Начать новую сессию",               "Start new session"},
     {"welcome_sub",        "Интерактивная mocap-студия для костюмов Xsens Link и Awinda",
                            "Interactive mocap studio for the Xsens Link and Awinda suits"},
@@ -7371,7 +7371,9 @@ NewSessionWizard::NewSessionWizard(MocapReceiver* rx, bool testMode, QWidget* pa
     : QDialog(parent), m_rx(rx), m_test(testMode)
 {
     setModal(true);
-    setWindowTitle(Lang::t("app_title"));
+    setWindowTitle(QString("%1 — %2")
+                       .arg(Lang::t("app_title"))
+                       .arg(QApplication::applicationVersion()));
     setMinimumSize(760, 640);
 
     if (!g_placementClf().ready) {
@@ -8122,7 +8124,9 @@ void NewSessionWizard::refreshPoseImage()
 
 void NewSessionWizard::retranslate()
 {
-    setWindowTitle(Lang::t("app_title"));
+    setWindowTitle(QString("%1 — %2")
+                       .arg(Lang::t("app_title"))
+                       .arg(QApplication::applicationVersion()));
     if (m_welcomeHeading) m_welcomeHeading->setText(Lang::t("start_new_session"));
     if (m_welcomeSub)     m_welcomeSub->setText(Lang::t("welcome_sub"));
     if (m_btnStart)       m_btnStart->setText(Lang::t("start_new_session"));
@@ -12091,7 +12095,9 @@ MainWindow::MainWindow(MocapReceiver* rx,
                        bool testMode)
     : m_setup(wizardResult), m_test(testMode), m_rx(rx)
 {
-    setWindowTitle(Lang::t("app_title"));
+    setWindowTitle(QString("%1 — %2")
+                       .arg(Lang::t("app_title"))
+                       .arg(QApplication::applicationVersion()));
     resize(1360, 820);
 
     setMinimumSize(1100, 720);
@@ -14153,7 +14159,11 @@ int main(int argc, char** argv)
     QApplication app(argc, argv);
     app.setStyleSheet(kStyleSheet);
     app.setApplicationName("Fox-Mocap");
-    app.setApplicationVersion("0.1");
+#ifdef FOX_VERSION_STR
+    app.setApplicationVersion(QStringLiteral(FOX_VERSION_STR));
+#else
+    app.setApplicationVersion(QStringLiteral("dev"));
+#endif
 
     const QIcon foxIcon = makeFoxAppIcon();
     app.setWindowIcon(foxIcon);
