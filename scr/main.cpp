@@ -763,6 +763,7 @@ public:
     bool      stairWalking() const { return m_stairWalking; }
 
 private:
+    // §XXX кольцевой буфер высоты пола 240 кадров = 1 c при базовой частоте 240 Гц (formules.txt)
     static constexpr int kZRingCap = 240;
     std::deque<double> m_accPeakWindow;
     double             m_prevAccNorm   = 0.0;
@@ -2016,6 +2017,7 @@ struct SmootherFrame {
 
 class BatchSmoother {
 public:
+    // §XXX окно сглаживания 240 кадров = 1 c при базовой частоте 240 Гц (formules.txt)
     static constexpr int kWindow = 240;
     BatchSmoother() { m_ring.fill({}); }
     void reset() {
@@ -3689,6 +3691,8 @@ QVector3D LocomotionSolver::update(const Quat& qR,
                     if (lowTicks >= m_lowZTicksRequired) {
                         if (heelLifted) {
 
+                            // engine heuristic (НЕ из formules.txt): плечо рычага носка при
+                            //   подъёме пятки в приседе ≈0.60 длины стопы (детектор контакта/позы).
                             const double bone = 0.60 * m_footLengthM;
                             const double sinp = isRight
                                     ? std::abs(m_footPitchZR)
@@ -4548,6 +4552,8 @@ public:
             if (m_havePendingLeft)  m_stateLeft = m_pendingLeft;
             m_initialised = true;
         }
+        // §XXI перчатка: сглаживание ориентаций пальцев (Калман-бленд). tau=0.08с и R=(1°)² —
+        //   engine heuristic (конкретные значения не из formules.txt; родственно фильтру §XXI).
         const double tau = 0.080;
         const double alpha = 1.0 - std::exp(-dt / std::max(1e-3, tau));
         const double R = (1.0 * 0.017453292519943295) * (1.0 * 0.017453292519943295);
@@ -7030,6 +7036,8 @@ static float computeFeature(
     const std::array<NewSessionWizard::RawImuBuf, kXsensSegmentCount>& bufs,
     const fox::body::SpcFeatureSpec& f)
 {
+    // §XXVII/§1699 FoxSPC: частота анализа окна признаков 60 Гц (маппинг freqBand-полос в бины,
+    //   Найквист 30 Гц). Должна совпадать с частотой заполнения RawImuBuf при калибровке (formules.txt)
     constexpr double kFs = 60.0;
     using fox::body::SpcStat;
     using fox::body::SpcBand;
@@ -8588,6 +8596,7 @@ NewSessionWizard::RawImuBuf::Win detectRaiseWindow(
         g[i] = m;
         if (m > peak) peak = m;
     }
+    // §XXVII/§1699 FoxSPC: частота анализа окна 60 Гц (детект движения в ASL-эпохах) (formules.txt)
     constexpr double kFs = 60.0;
     const int pfx = std::min(n, std::max(5, int(0.5 * kFs)));
     double mu = 0.0;
@@ -9936,6 +9945,9 @@ void MocapViewport::updatePose(const std::array<Quat, kXsensSegmentCount>& orien
     m_havePrevQ = true;
 
     {
+        // engine heuristic (НЕ из formules.txt): рендер-сглаживание ориентаций — адаптивный
+        // фильтр One-Euro (fc=kFcMin+kOeBeta·|ω|; родственно §XXV) + slew-лимит скорости
+        // (budget=max(kBaseRate·dt, kSlewGain·|ω|·dt)). Подобрано под визуализацию ~90 Гц.
         static constexpr double kSlewGain = 1.8;
         static constexpr double kBaseRate = 300.0;
         static constexpr double kDtCapFac = 1.6;
@@ -11641,10 +11653,11 @@ static void hdQuatSmooth(std::vector<RecordedFrame>& fr,
     for (int i = 0; i < N; ++i) fr[i].segQuat = out[i];
 }
 
+// §XXVIII HD-постобработка: финальный LPF корня Butterworth, cutoff=10 Гц (formules.txt §XXVIII)
 static void hdRootLowpass(std::vector<RecordedFrame>& fr, int fps)
 {
     if (fr.size() < 4) return;
-    const double fc = 10.0;
+    const double fc = 10.0;  // §XXVIII частота среза 10 Гц
     const double fs = std::max(30.0, double(fps));
     const double c = std::tan(M_PI * fc / fs);
     const double c2 = c * c;
@@ -12764,6 +12777,11 @@ void MainWindow::onRenderTick()
             if (rf.hasGloves) {
                 rf.rightGloveQ = f.rightGloveQ;
                 rf.leftGloveQ  = f.leftGloveQ;
+                // §XXI защита записи: нормировка кватернионов пальцев (normalized() §1.2 гасит
+                //   не-finite/вырождение -> тождественный), чтобы экспорт BVH/FBX не получил NaN.
+                //   Аналог защиты стрима foxwire.cpp:43 (appendFloatBE).
+                for (Quat& q : rf.rightGloveQ) q = q.normalized();
+                for (Quat& q : rf.leftGloveQ)  q = q.normalized();
             }
             m_recBuffer.push_back(std::move(rf));
             if (!m_recOverflowWarned &&
