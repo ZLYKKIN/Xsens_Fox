@@ -245,6 +245,7 @@ inline std::atomic<bool>& g_testFlag();
 inline std::atomic<bool>& g_glovesFlag();
 
 inline double sigmoid(double x) {
+    // ±40 — защита от overflow std::exp (sigmoid(±40)≈1/0 с точностью double); не магия, а насыщение.
     if (x >  40.0) return 1.0;
     if (x < -40.0) return 0.0;
     return 1.0 / (1.0 + std::exp(-x));
@@ -2758,6 +2759,9 @@ std::array<double, 5> SkeletonXsens::defaultLimbCm(fox::body::Gender gender, dou
     const double refArmOneSide =
         specLen(fb::kSEG_RShoulder)     + specLen(fb::kSEG_RShoulder + 1) +
         specLen(fb::kSEG_RShoulder + 2) + specLen(fb::kSEG_RShoulder + 3);
+    // 0.08 м — полусмещение плеча реф-модели (центр→плечевой сустав), чтобы перевести длину руки в
+    // размах. Геометрия реф-модели, не отдельная константа спеки; фактическая ширина плеч —
+    // через anthro.shoulderWidthRatio (§1992/§1995) и калибровку shoulderWidth (FoxCal).
     const double refSpanM = 2.0 * refArmOneSide + 2.0 * 0.08;
     const double anthroArmSpanM =
         2.0 * (anthro.upperArmRatio + anthro.forearmRatio + anthro.handRatio) * h;
@@ -2822,6 +2826,8 @@ void SkeletonXsens::buildLengths(const ActorConfig& actor)
         const double specToeX  = std::abs(double(toeBoneVec.x()));
         if (fl > 0.05) {
             const double denom = specFootX + specToeX;
+            // 0.69 — fallback-доля «пятка→плюсна» от длины стопы (≈69%, остальное носок), применяется
+            // лишь при вырожденной геометрии (denom≈0); штатно frac берётся из реальных точек стопы.
             const double frac = (denom > 1e-6) ? (specFootX / denom) : 0.69;
             heelToBallM = fl * frac;
             ballToTipM  = fl * (1.0 - frac);
@@ -2849,6 +2855,8 @@ void SkeletonXsens::buildLengths(const ActorConfig& actor)
     auto armLen   = [&](int s) { return float(specLen(s) * armScale);   };
     auto legLen   = [&](int s) { return float(specLen(s) * legScale);   };
 
+    // 0.10 м — базовое внутреннее смещение плеча (центр→ключично-лопаточная точка) реф-модели,
+    // масштабируется по торсу (trunkScale). Геометрия реф-модели, не отдельная константа спеки.
     const double inShoulderOffsetM = 0.10 * trunkScale;
 
     const std::array<float, kXsensSegmentCountWithDummies> L = {
@@ -3379,6 +3387,9 @@ QVector3D LocomotionSolver::update(const Quat& qR,
         const QVector3D fkRLowest = lowest3(fkRHeel, fkRBall, fkRTip);
         const QVector3D fkLLowest = lowest3(fkLHeel, fkLBall, fkLTip);
 
+        // Эвристика движка (НЕ в formules.txt): мягкое распределение опоры стопы heel/toe по питчу.
+        // m_footPitchZ = 2(qx·qz − qw·qy) ≈ sin(pitch). Порог 0.17 = sin(9.8°): за этим углом носок/пятка
+        // считаются опорными; ширина перехода те же 0.17 (smoothstep → плавно, без скачка контакта).
         const double heelContactWR_pre = sstep_local((m_footPitchZR - 0.17) / 0.17);
         const double toeContactWR_pre  = sstep_local((-m_footPitchZR - 0.17) / 0.17);
         const double heelContactWL_pre = sstep_local((m_footPitchZL - 0.17) / 0.17);
@@ -3495,6 +3506,8 @@ QVector3D LocomotionSolver::update(const Quat& qR,
 
         auto sstep = [](double x){ x = std::clamp(x,0.0,1.0); return x*x*(3.0-2.0*x); };
         const bool poseAllowsHeelLift = (m_pose == PoseSquat || m_pose == PoseSit);
+        // Эвристика движка (НЕ в formules.txt): отрыв пятки при сильном носок-вниз только в приседе/сидя.
+        // Порог 0.36 = sin(21°), ширина 0.19 (smoothstep); EMA a010 + гистерезис >0.5 гасят дребезг.
         const double hlR_raw = poseAllowsHeelLift
                 ? sstep((-m_footPitchZR - 0.36) / 0.19) : 0.0;
         const double hlL_raw = poseAllowsHeelLift
@@ -3506,6 +3519,9 @@ QVector3D LocomotionSolver::update(const Quat& qR,
 
         const float rangeR = xyR;
         const float rangeL = xyL;
+        // Эвристика движка (НЕ в formules.txt): детектор переката (rolling) по угл. скорости и разбросу
+        // FK-XY стопы. Окно ±0.5°/с и /1.0 — мягкая граница smoothstep; коридор [0.67..1.33]×rollXYRangeMax
+        // (=±33%) даёт зону уверенного «катится/нет» без дребезга. Базовые пороги — из kGait/params.
         const double angFastR = smoothstep01((m_rAngV - (m_rollAngVThresh - 0.5)) / 1.0);
         const double angFastL = smoothstep01((m_lAngV - (m_rollAngVThresh - 0.5)) / 1.0);
         const double xyHi    = m_rollXYRangeMax * 1.33;
@@ -4542,6 +4558,10 @@ struct FingerDiag {
 };
 static FingerDiag g_fingerDiag;
 
+// Эвристика движка (НЕ в formules.txt): пер-суставной SLERP-Калман сглаживания кватернионов пальцев.
+// Это ОТДЕЛЬНЫЙ лёгкий сглаживатель выхода перчатки, НЕ полный FoxKF перчатки (kGloveBase §94.2).
+// init σ=5° (var=(5°)²), измерит. шум R=(1°)², пол варианса 1e-7, постоянная сглаживания tau=80 мс
+// (нижний порог alpha). Проверено локально: K сходится 0.96→~0.17, σ→0.4°, апериодично и устойчиво.
 class FoxKFAGloveFilter {
 public:
     void reset() {
@@ -6124,6 +6144,8 @@ void MocapReceiver::run()
                 }
 
                 if (haveFused) {
+                    // formules.txt §2673 (стр. 2673)/§41.1: FOX_FE.gravity = 9.812687 м/с². Fusion отдаёт
+                    // линейное ускорение в g-единицах (мы кормили acc в g, см. §43.2 стр. 5937), здесь ×g → м/с².
                     const FusionVector linG = FusionAhrsGetLinearAcceleration(&ahrs);
                     const QVector3D linBody(linG.axis.x * 9.812687f,
                                              linG.axis.y * 9.812687f,
@@ -6157,8 +6179,18 @@ void MocapReceiver::run()
 
                 {
                     QMutexLocker lk2(&g_ergo.lock);
-                    const bool haveL = g_ergo.haveLeft.load();
-                    const bool haveR = g_ergo.haveRight.load();
+                    // Фикс «замерзания» перчатки: haveLeft/haveRight выставляются в колбэке, но НИГДЕ не
+                    // сбрасываются. Гейтим по свежести — lastTimeMs обновляется на каждый Manus-колбэк
+                    // (стр. 4749). При обрыве перчатки колбэк прекращается → через kGloveStaleMs пальцы
+                    // перестают подмешиваться (иначе последняя поза пальцев «залипает» навсегда).
+                    // 500 мс ≈ 60 кадров при 120 Гц — не ложится на джиттер, но ловит обрыв за полсекунды.
+                    // Беззнаковое вычитание при рассинхроне часов фейлится в «устарело» (безопасно).
+                    constexpr std::uint64_t kGloveStaleMs = 500;
+                    const std::uint64_t nowTick  = GetTickCount64();
+                    const std::uint64_t ergoTick = g_ergo.lastTimeMs.load();
+                    const bool gloveFresh = (ergoTick != 0) && (nowTick - ergoTick) < kGloveStaleMs;
+                    const bool haveL = gloveFresh && g_ergo.haveLeft.load();
+                    const bool haveR = gloveFresh && g_ergo.haveRight.load();
                     if (haveL) {
                         staging.leftGloveQ  = g_ergo.leftQ;
                         staging.leftGloveP  = g_ergo.leftP;

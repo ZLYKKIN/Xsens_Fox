@@ -87,8 +87,12 @@ extern const char* kSegmentNames[kXsensSegmentCount];
 
 struct WristAnatomicalCfg {
 
-    double maxFlexRad   = 1.4835298641951802;
-    double maxLatDevRad = 0.5235987755982988;
+    // formules.txt §2415 (стр. 39305)/§1530 (стр. 1530): запястье flex 80°, ext 70°, lateral(uln) 30°.
+    // maxFlexRad приведён к 80° (было 85° — расхождение со спекой). maxLatDevRad=30° совпадает.
+    // ВНИМАНИЕ: эти лимиты сейчас НЕ применяются (констрейнт использует только .enabled); активный
+    // кламп запястья — kJointRom idx 9/13 в foxergo. Значение выровнено по спеке на будущее.
+    double maxFlexRad   = 1.3962634015954636;   // 80°
+    double maxLatDevRad = 0.5235987755982988;   // 30°
     double twistWeight  = 1.0;
     bool   enabled      = true;
 };
