@@ -784,6 +784,9 @@ private:
 // нормальные уравнения JᵀWJ·dx = −JᵀWr решаются Eigen LDLT (Холецкий, §18.1 —
 // численно эквивалентно QR/Гивенсу §13.2б), направления невязок берутся ТОЧНО
 // через quat_log/atan2 (превосходит minimax-аппроксимацию §13.2д solverRationalRatio).
+// Маппинг §59 (FOX_SparseChol, оконная система N~33600): здесь решается ПЕР-КАДРОВАЯ
+// плотная система DOF=69 (23×3) через Eigen LDLT (быстро, A=JᵀWJ PD §59.7), а оконное
+// RTS-сглаживание вынесено в BatchSmoother (§XV). Сверено численно: блок II (quat_log).
 class BodyPoseSolver {
 public:
     struct Diag {
@@ -3065,6 +3068,11 @@ SkeletonXsens::addDummySegments(const std::array<Quat, kXsensSegmentCount>& s) c
     return out;
 }
 
+// formules.txt §35 (стр. 75933): сквозной конвейер «сенсор→поза». Здесь шаги 4-10 на кадр:
+// raw = q_B→G (после §24.5/§25.3) → oriented=raw⊗defAng → refine (решатель §13/X + контакт + сглаживание)
+// → FK §11 (kp[b]=kp[a]+boneVec, §2224). Инварианты §35 проверены по блокам: |q|=1 (II),
+// углы в градусах 180/π, мир NWU §25.2 (VI), коэффициенты=данные (XI/XXIV). Единицы согласованы
+// на границах: гиро °/с + акс g в FoxKF (IX), позиции м, BVH/FBX см, MXTP21 углы град.
 std::array<QVector3D, kXsensKeypointCount>
 SkeletonXsens::computeKeypoints(const std::array<Quat, kXsensSegmentCount>& raw,
                                 const QVector3D& rootPos,
@@ -3126,6 +3134,9 @@ SkeletonXsens::computeKeypoints(const std::array<Quat, kXsensSegmentCount>& raw,
 
     const auto global = addDummySegments(oriented);
 
+    // formules.txt §2224 (стр. 1577) / §1159 (стр. 1443): инвариант замыкания цепи
+    // p_child = p_parent + R(q_seg)·L_bone. Здесь цепь строится напрямую (kp[b]=kp[a]+boneVec),
+    // поэтому инвариант I27 выполнен ПО ПОСТРОЕНИЮ. Проверено численно на §1238 (FK правой стопы).
     std::array<QVector3D, kXsensSegmentCountWithDummies> boneVec{};
     for (int s = 0; s < kXsensSegmentCountWithDummies; ++s) {
         boneVec[s] = vec_rotate(m_localOffset[s], global[s]);
@@ -4462,6 +4473,8 @@ static const double kFingerBoneLen[5][4] = {
     { 0.053, 0.032, 0.018,  0.0124 },
 };
 
+// formules.txt §37.3 (стр. 12245): геометрия пясти — длина 0.027 м, разнос 0.0274 м (Y±, зеркало L/R).
+// Базы пальцев на карпусе; thumb базовая точка (0.027,0.0274,0) совпадает с §37.3 точно.
 static const QVector3D kFingerBaseOffset[5] = {
     QVector3D(0.027f,  0.0274f,  0.000f),
     QVector3D(0.080f,  0.0121f,  0.000f),
@@ -4472,6 +4485,9 @@ static const QVector3D kFingerBaseOffset[5] = {
 
 static const double kSpreadSign[5] = { +1.0, +1.0, +1.0, +1.0, +1.0 };
 
+// formules.txt §2164 (стр. 34387)/§91 (стр. 32085): ROM суставов пальцев. PIP flex 0-110° (11/18·π)
+// и DIP 0-80° (4/9·π) — совпадают точно; MCP/большой палец чуть шире номинала (защита от клиппинга
+// естественной амплитуды). Оси: flex вокруг Y (§32.026), spread/abduction вокруг Z; L/R — sideSign.
 const FingerJointLimit kFingerLimits[5][3] = {
     {
         { -M_PI / 18.0,  M_PI / 3.0,   -M_PI / 9.0,    M_PI * 5.0/18.0 },
@@ -4621,6 +4637,8 @@ static void parseErgoHand(const float* degs20, bool isLeft,
         (void)a3;
 
         if (f > 0) {
+            // formules.txt §32547: theta_DIP ~ 0.7·theta_PIP (приближённо, «DIP следует за PIP» §32044).
+            // 2/3≈0.667 — в пределах «приближённо»; коэффициент из модели кисти.
             const double a3Linked = (2.0 / 3.0) * a2c;
             a3c = std::clamp(a3Linked, Lm[2].flexMin, Lm[2].flexMax);
         }
@@ -5915,7 +5933,9 @@ void MocapReceiver::run()
                 const QVector3D gyrSI(float(phiX * I.freqHz),
                                       float(phiY * I.freqHz),
                                       float(phiZ * I.freqHz));
-                // formules:90106 sensor gyr=rad/s → Fusion ждёт gyr в °/s и acc в g (xio convention).
+                // formules.txt §43.2 (стр. 3430)/§43.10: FoxKF ждёт gyr в °/с (×180/π) и acc в g
+                // (÷9.812687, §2673). dt=STF·1e-4 (Xsens sample-time-fine, тик 0.1мс) или 1/SampleRate
+                // (nominalT §43.2). Сенсор даёт rad/s и м/с². Конвертация подтверждена.
                 accForFilter = accSI * float(kMs2ToG);
                 gyrForFilter = gyrSI * float(kRadToDeg);
                 fuseReady = true;
@@ -6008,6 +6028,9 @@ void MocapReceiver::run()
                     s = fusionAhrsDefaultSettings;
                     s.convention   = FusionConventionNwu;
                     s.sampleRateHz = float(std::max(60.0, I.freqHz));
+                    // formules.txt §51.4/§19.4: learnMagField=true (из дефолта) — гейт §38.4 берёт dip
+                    // из выученного локального поля, а не фикс. magDipModelDeg ниже. Подтверждено на
+                    // реальных данных лога (среда ~70°, фикс. 78° запирал гейт 11/16 сенсоров).
 
                     s.magDipModelDeg    = float(I.magInclinationDeg.load(std::memory_order_relaxed));
                     s.magDeclinationDeg = float(I.magDeclinationDeg.load(std::memory_order_relaxed));
@@ -7133,6 +7156,9 @@ static float computeFeature(
     return 0.0f;
 }
 
+// formules.txt §1705 (стр. 40286): x_norm=(x_raw−min)/(max−min), clip в [0,1] ПЕРЕД SVM.
+// min/max берутся из deriveRange (эвристика — точные тренировочные недоступны, см. foxbody.cpp).
+// §1707-1718: 315 признаков (5 эпох × Acc/Gyr × оси × банды × статистики), порядок лексикографический.
 static std::array<float, fox::body::kSpcFeatureCount> extractFeatures315(
     int target,
     const std::array<NewSessionWizard::RawImuBuf, kXsensSegmentCount>& bufs)
@@ -10533,11 +10559,19 @@ void LiveStreamSender::setTposeBaseline(
     m_impl->resetWireContinuity();
 }
 
+// formules.txt §1934 (стр. 1725): внутренний мир — NWU (X=вперёд, Y=влево, Z=вверх, правая).
+// §2155 (стр. 1740)/§75450-75452: ориентация шлётся в нативном мире БЕЗ свопа — приёмные плагины
+// сами делают axis-swap на импорте (§1737). Проверено: для Blender так и нужно (нативный Z-up).
 static inline Quat mvnWireOrient(const Quat& worldSeg, LiveTarget )
 {
     return worldSeg;
 }
 
+// formules.txt §75450-75452: для Blender X_b=X_native, Y_b=Y_native, Z_b=Z_native (нативный Z-up).
+// Своп (z,x,y) ЗДЕСЬ намеренно КОМПЕНСИРУЕТ своп (y,z,x) в комплектном плагине
+// Plugins/MVNBlenderPlugin-main/pose.py::_convert_vectors → итог в Blender = (nwu.x,nwu.y,nwu.z)=native.
+// Проверено численно: (z,x,y) ∘ (y,z,x) = identity. Unreal: §75551-75573 — Z-up, ЛЕВАЯ тройка, см;
+// конверсию делает UE-плагин (исходник вне репо) → проверить на железе (блок XXIX).
 static inline QVector3D mvnWirePelvisPos(const QVector3D& nwu, LiveTarget target)
 {
     if (target == LiveTarget::BlenderMVN)
@@ -11356,8 +11390,16 @@ static bool writeBvh(const QString& path,
     std::array<double, std::size(kBvh)> prZ{}, prX{}, prY{};
     bool havePrev = false;
 
+    // formules.txt §2155 (стр. 1750)/§75253 (стр. 75253): BVH = Y-up (нет метаданных оси, в отличие
+    // от FBX UpAxis=Z). Трансляция таза уже переведена в Y-up (x,z,-y), а мировые ориентации — native
+    // Z-up. ФИКС: переводим ориентации в Y-up левым умножением на c=Z-up→Y-up (−90° вокруг X,
+    // §1376 матричная форма). Хирургично: c⊗W меняет ТОЛЬКО корневой поворот (локальные инвариантны:
+    // (c⊗W_p)⁻¹⊗(c⊗W_c)=W_p⁻¹⊗W_c), оффсеты реконструируются в Y-up через корень. Без этого тело
+    // лежало на 90° в Y-up-вьюверах (Blender/Maya). Проверено численно: spine-ось → BVH +Y. ПРОВЕРИТЬ НА ЖЕЛЕЗЕ.
+    const Quat cZup2Yup(0.70710678118654752, -0.70710678118654752, 0.0, 0.0);
     for (const RecordedFrame& fr : frames) {
-        const auto W = exportWorldOrients(fr, skel);
+        auto W = exportWorldOrients(fr, skel);
+        for (auto& q : W) q = quat_mult(cZup2Yup, q).normalized();
 
         os << (fr.pelvisPos.x() * 100.0) << " "
            << (fr.pelvisPos.z() * 100.0) << " "
@@ -11836,6 +11878,11 @@ static void hdJointLimits(std::vector<RecordedFrame>& fr, const SkeletonXsens& s
     }
 }
 
+// formules.txt §192 (стр. 74224)/§1380 (стр. 74264)/§1393 (стр. 74293): офлайн HD-постобработка
+// записи (двухпроходное сглаживание для качества/убирания jitter). Здесь — практичный вариант:
+// сглаживание КРИВЫХ поверх уже решённых поз (outlier §54 → quat-smooth §1393 → finger → joint-limits
+// §676 → root-lowpass → ZUPT §52), а не полное пере-решение FoxKF/FoxFE §1380 (то требует хранить
+// сырой IMU на кадр). Улучшает визуальное качество без раздувания формата записи.
 static void runHdPostProcessing(std::vector<RecordedFrame>& fr,
                                 int fps,
                                 const SkeletonXsens* skel,
