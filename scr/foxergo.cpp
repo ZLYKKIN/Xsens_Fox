@@ -10,6 +10,8 @@ namespace {
 
 constexpr double kRad2Deg = 57.29577951308232;
 
+// formules.txt §114.4 (стр. 385): ZYX roll/pitch/yaw из кватerniona (точное
+// совпадение со спекой). Знаки L/R-зеркала — в handlerLeft/handlerFoot (§30).
 inline Euler3 eulerZYX(const Quat& q)
 {
     Euler3 e;

@@ -1612,9 +1612,14 @@ namespace constants {
     inline constexpr double kNLerpA    = 0.2;
     inline constexpr double kNLerpB    = 0.8;
     inline constexpr double kNLerpC    = 1.0 / 3.0;
-    inline constexpr double kSolverC1  = 272332.63;
-    inline constexpr double kSolverC2  = 40680634.23;
-    inline constexpr double kSolverAlpha = 0.25;
+    // formules.txt §13.2д (стр. 10185) / §13 (стр. 10167): коэффициенты решателя.
+    // C1/C2 — единым источником из foxmath.h (не дублируем значения). Alpha=0.25 —
+    // демпфированный шаг Гаусса–Ньютона (§31.2, стр. 13102); Lambda=0.01 — стартовый
+    // демпфер Левенберга–Марквардта. Живой решатель BodyPoseSolver реализует §13.2
+    // ТОЧНО (Eigen LM/GN); это параметры reference-формы, см. --test self-check.
+    inline constexpr double kSolverC1     = ::fox::kSolverC1;
+    inline constexpr double kSolverC2     = ::fox::kSolverC2;
+    inline constexpr double kSolverAlpha  = 0.25;
     inline constexpr double kSolverLambda = 0.01;
 
     inline constexpr double kGravityMs2 = 9.812687;

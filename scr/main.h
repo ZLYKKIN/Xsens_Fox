@@ -52,7 +52,7 @@ constexpr double  kStaleSeconds       = 2.0;
 constexpr int     kCalibrationSamples = 720;
 constexpr int     kCountdownSeconds   = 3;
 
-// Suit hardware sample rates — single source of truth (formules [10105]/[19689]):
+// Suit hardware sample rates — single source of truth (formules.txt §10105/§19689):
 //   Link   = 240 Hz  (Fox_Link, wired USB / 2.4 GHz dongle — full bandwidth)
 //   Awinda =  90 Hz  (Fox_AW / Fox_Wireless — radio bandwidth caps the IMU rate)
 // NB: 90 also happens to be the GUI/processing rate (kRenderFps), but that is a
@@ -570,7 +570,7 @@ public:
 
     void setExpectedRate(double hz);
     // Нативная частота кадров костюма (Link 240 / Awinda 90). Нужна ASL-ресемплеру
-    // для приведения служебного буфера признаков к 60 Гц (formules [1704]/40745).
+    // для приведения служебного буфера признаков к 60 Гц (formules.txt §1704, стр. 40745).
     double expectedRate() const;
 
     void setS2sAlignment(const std::array<Quat, kXsensSegmentCount>& s2s);
@@ -763,7 +763,7 @@ private:
 
     qint64 m_phaseStartMs = 0;
 
-    // PrepMove/CaptureMove — стадии протокола движений ASL (formules [1704]/[1728]):
+    // PrepMove/CaptureMove — стадии протокола движений ASL (formules.txt §1704/§1728):
     // walk + подъёмы Л/П руки и Л/П ноги. Конкретную стадию задаёт m_moveStage.
     enum class CalibPhase { Idle, PrepT, CaptureT, SettleT, PrepN, CaptureN, Settle,
                             PrepMove, CaptureMove, LiveSpc, Done };
