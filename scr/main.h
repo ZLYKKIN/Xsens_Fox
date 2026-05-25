@@ -893,6 +893,8 @@ public:
 
     void setFreezeState(bool frozen);
 
+    void clearLiveDots();   // B-UI-3: мгновенно гасит точки трекеров/пальцев при обрыве костюма
+
     void setActorDefaults(const ActorConfig& a);
 
 signals:
