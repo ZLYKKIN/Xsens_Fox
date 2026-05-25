@@ -43,6 +43,8 @@
 #define KFA_VEL_TAU_S            2.0f
 
 #define KFA_MAG_NORM_REF         1.0f
+// formules.txt §38.4 (стр. 13031)/§19.3: пороги магнитного гейтинга — подсказка принимается,
+// только если ВСЕ три условия: |норма|<0.03, |наклонение|<3.5°, |курс−модель|<6.0°. Совпадает точно.
 #define KFA_MAG_NORM_GATE        0.03f
 #define KFA_MAG_DIP_GATE_DEG     3.5f
 #define KFA_MAG_ANG_GATE_DEG     6.0f
@@ -248,6 +250,7 @@ static void ApplyDeltaX(FusionAhrs *ahrs, const float dx[N15]) {
 const FusionAhrsSettings fusionAhrsDefaultSettings = {
     .convention             = FusionConventionNwu,
     .sampleRateHz           = 240.0f,
+    // formules.txt §37.5 (стр. 12277) e_dip_mag=78°; §19.1/§19.4: склонение D=0° по умолчанию.
     .magDipModelDeg         = 78.0f,
     .magDeclinationDeg      = 0.0f,
     .magNormReferenceLocal  = 0.0f,
