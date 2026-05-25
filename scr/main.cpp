@@ -7146,6 +7146,9 @@ static float computeFeature(
     return 0.0f;
 }
 
+// formules.txt §1705 (стр. 40286): x_norm=(x_raw−min)/(max−min), clip в [0,1] ПЕРЕД SVM.
+// min/max берутся из deriveRange (эвристика — точные тренировочные недоступны, см. foxbody.cpp).
+// §1707-1718: 315 признаков (5 эпох × Acc/Gyr × оси × банды × статистики), порядок лексикографический.
 static std::array<float, fox::body::kSpcFeatureCount> extractFeatures315(
     int target,
     const std::array<NewSessionWizard::RawImuBuf, kXsensSegmentCount>& bufs)

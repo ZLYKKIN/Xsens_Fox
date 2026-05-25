@@ -203,6 +203,13 @@ SpcFeatureSpec parseFeatureName(const char* name) {
     return out;
 }
 
+// formules.txt §1705 (стр. 40286): MinMax-нормировка x∈[0,1] ПЕРЕД SVM (нормализатора в модели нет,
+// см. инспекцию: только SVMClassifier+Cast). §1705 честно говорит: точные feature_min/max обучения
+// НЕ извлечены (даны лишь грубые: Acc 0–4 g, Gyr 0–8 рад/с). Поэтому deriveRange — ЭВРИСТИЧЕСКАЯ
+// реконструкция диапазонов по типу признака (НЕ настоящие min/max обучения). Локально проверено
+// (onnxruntime): SV∈[0,1] mean=0.3979 (=§1705 «≈0.398»), центроиды классов само-классифицируются
+// p≈0.99 → модель функциональна и ждёт [0,1]. Поэтому ASL — СТРОГО рекомендательный (см.
+// finishCalibrationAsl): не переназначает сенсоры и не блокирует калибровку.
 std::pair<float, float> deriveRange(const SpcFeatureSpec& f) {
     const bool isCorr = f.stat == SpcStat::SameAxisInterSensorCorrMax
                      || f.stat == SpcStat::SameAxisInterSensorCorrAbsMax
