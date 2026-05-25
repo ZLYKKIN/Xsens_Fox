@@ -11380,8 +11380,16 @@ static bool writeBvh(const QString& path,
     std::array<double, std::size(kBvh)> prZ{}, prX{}, prY{};
     bool havePrev = false;
 
+    // formules.txt §2155 (стр. 1750)/§75253 (стр. 75253): BVH = Y-up (нет метаданных оси, в отличие
+    // от FBX UpAxis=Z). Трансляция таза уже переведена в Y-up (x,z,-y), а мировые ориентации — native
+    // Z-up. ФИКС: переводим ориентации в Y-up левым умножением на c=Z-up→Y-up (−90° вокруг X,
+    // §1376 матричная форма). Хирургично: c⊗W меняет ТОЛЬКО корневой поворот (локальные инвариантны:
+    // (c⊗W_p)⁻¹⊗(c⊗W_c)=W_p⁻¹⊗W_c), оффсеты реконструируются в Y-up через корень. Без этого тело
+    // лежало на 90° в Y-up-вьюверах (Blender/Maya). Проверено численно: spine-ось → BVH +Y. ПРОВЕРИТЬ НА ЖЕЛЕЗЕ.
+    const Quat cZup2Yup(0.70710678118654752, -0.70710678118654752, 0.0, 0.0);
     for (const RecordedFrame& fr : frames) {
-        const auto W = exportWorldOrients(fr, skel);
+        auto W = exportWorldOrients(fr, skel);
+        for (auto& q : W) q = quat_mult(cZup2Yup, q).normalized();
 
         os << (fr.pelvisPos.x() * 100.0) << " "
            << (fr.pelvisPos.z() * 100.0) << " "
