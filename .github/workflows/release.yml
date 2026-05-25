@@ -159,12 +159,15 @@ jobs:
           } else {
               # Release exists (maintainer pre-populated body & notes).  We
               # only sync the prerelease flag with the tag suffix and leave
-              # the body intact.
-              if ($isPre -and -not $existing.isPrerelease) {
-                  gh release edit $tag --prerelease
-              } elseif (-not $isPre -and $existing.isPrerelease) {
-                  gh release edit $tag --prerelease=false --latest=true
-              }
+              # the body intact.  --draft=false is always set so a release
+              # that ended up in draft state (e.g. because the tag was
+              # deleted-and-re-pushed during a re-tag) gets republished on
+              # the next workflow run instead of silently staying hidden.
+              $editArgs = @('release','edit',$tag,'--draft=false')
+              if ($isPre)         { $editArgs += '--prerelease' }
+              else                { $editArgs += '--prerelease=false'; $editArgs += '--latest=true' }
+              gh @editArgs
+              if ($LASTEXITCODE -ne 0) { throw "gh release edit failed ($LASTEXITCODE)" }
           }
 
           # Upload (or replace) the assets we just built.  --clobber makes
