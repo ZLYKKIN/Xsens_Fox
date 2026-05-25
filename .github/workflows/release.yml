@@ -128,28 +128,58 @@ jobs:
 
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          # Re-upload (or replace) the same assets we built locally — the names
-          # are stable across builds because they come from {ver}, so a re-run
-          # of the workflow just overwrites the existing assets in place.
-          files: |
-            dist/*.exe
-            dist/*.zip
-            dist/*.sha256
-          # Do NOT regenerate / overwrite the release notes that the
-          # maintainer wrote manually when creating the tag — only append
-          # a small "built by CI" footer below them.
-          generate_release_notes: false
-          append_body: true
-          # Pre-release if the tag has a -beta / -rc / -alpha suffix; full
-          # release otherwise.  Keeps the GitHub "Latest" badge on stable
-          # versions while v0.X-beta etc. stay marked as prerelease.
-          prerelease: ${{ contains(github.ref_name, '-beta') || contains(github.ref_name, '-rc') || contains(github.ref_name, '-alpha') || contains(github.ref_name, '-pre') }}
-          make_latest: ${{ !(contains(github.ref_name, '-beta') || contains(github.ref_name, '-rc') || contains(github.ref_name, '-alpha') || contains(github.ref_name, '-pre')) }}
-          draft: false
-          fail_on_unmatched_files: true
-          body: |
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: |
+          $tag    = '${{ github.ref_name }}'
+          $sha    = '${{ github.sha }}'
+          $isPre  = $tag -match '-(beta|rc|alpha|pre)'
 
-            ---
-            *Built and uploaded by GitHub Actions (commit `${{ github.sha }}`).*
+          # Determine if a release already exists for this tag.  `gh release
+          # view` exits with non-zero when there isn't one — we explicitly
+          # capture that instead of treating it as a workflow failure.
+          $existing = $null
+          try {
+              $existing = gh release view $tag --json tagName,body,isPrerelease | ConvertFrom-Json
+          } catch {
+              $existing = $null
+          }
+
+          if (-not $existing) {
+              # No release yet — create one with a minimal body.  The
+              # maintainer typically creates releases manually with rich
+              # notes; this is the fallback for pure tag-push.
+              $preFlag = if ($isPre) { '--prerelease' } else { '--latest' }
+              gh release create $tag `
+                  --title "Fox Mocap $tag" `
+                  --notes "Automated CI build for tag ``$tag`` (commit ``$sha``)." `
+                  $preFlag
+              if ($LASTEXITCODE -ne 0) { throw "gh release create failed ($LASTEXITCODE)" }
+          } else {
+              # Release exists (maintainer pre-populated body & notes).  We
+              # only sync the prerelease flag with the tag suffix and leave
+              # the body intact.
+              if ($isPre -and -not $existing.isPrerelease) {
+                  gh release edit $tag --prerelease
+              } elseif (-not $isPre -and $existing.isPrerelease) {
+                  gh release edit $tag --prerelease=false --latest=true
+              }
+          }
+
+          # Upload (or replace) the assets we just built.  --clobber makes
+          # the upload idempotent: a re-run of the workflow swaps the file
+          # in place instead of failing with "asset already exists".
+          $assets = @(
+              Get-ChildItem dist\*.exe,
+                            dist\*.zip,
+                            dist\*.sha256 -ErrorAction Stop
+          ) | ForEach-Object { $_.FullName }
+          if ($assets.Count -eq 0) { throw "No release assets found in dist\" }
+
+          Write-Host "Uploading $($assets.Count) asset(s) to release $tag :"
+          $assets | ForEach-Object { Write-Host "  $_" }
+          gh release upload $tag @assets --clobber
+          if ($LASTEXITCODE -ne 0) { throw "gh release upload failed ($LASTEXITCODE)" }
+
+          Write-Host "Release $tag published / updated successfully."
