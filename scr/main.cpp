@@ -4468,6 +4468,8 @@ static const double kFingerBoneLen[5][4] = {
     { 0.053, 0.032, 0.018,  0.0124 },
 };
 
+// formules.txt §37.3 (стр. 12245): геометрия пясти — длина 0.027 м, разнос 0.0274 м (Y±, зеркало L/R).
+// Базы пальцев на карпусе; thumb базовая точка (0.027,0.0274,0) совпадает с §37.3 точно.
 static const QVector3D kFingerBaseOffset[5] = {
     QVector3D(0.027f,  0.0274f,  0.000f),
     QVector3D(0.080f,  0.0121f,  0.000f),
@@ -4478,6 +4480,9 @@ static const QVector3D kFingerBaseOffset[5] = {
 
 static const double kSpreadSign[5] = { +1.0, +1.0, +1.0, +1.0, +1.0 };
 
+// formules.txt §2164 (стр. 34387)/§91 (стр. 32085): ROM суставов пальцев. PIP flex 0-110° (11/18·π)
+// и DIP 0-80° (4/9·π) — совпадают точно; MCP/большой палец чуть шире номинала (защита от клиппинга
+// естественной амплитуды). Оси: flex вокруг Y (§32.026), spread/abduction вокруг Z; L/R — sideSign.
 const FingerJointLimit kFingerLimits[5][3] = {
     {
         { -M_PI / 18.0,  M_PI / 3.0,   -M_PI / 9.0,    M_PI * 5.0/18.0 },
@@ -4627,6 +4632,8 @@ static void parseErgoHand(const float* degs20, bool isLeft,
         (void)a3;
 
         if (f > 0) {
+            // formules.txt §32547: theta_DIP ~ 0.7·theta_PIP (приближённо, «DIP следует за PIP» §32044).
+            // 2/3≈0.667 — в пределах «приближённо»; коэффициент из модели кисти.
             const double a3Linked = (2.0 / 3.0) * a2c;
             a3c = std::clamp(a3Linked, Lm[2].flexMin, Lm[2].flexMax);
         }
