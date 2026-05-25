@@ -10,8 +10,6 @@ namespace {
 
 constexpr double kRad2Deg = 57.29577951308232;
 
-// formules.txt §114.4 (стр. 385): ZYX roll/pitch/yaw из кватerniona (точное
-// совпадение со спекой). Знаки L/R-зеркала — в handlerLeft/handlerFoot (§30).
 inline Euler3 eulerZYX(const Quat& q)
 {
     Euler3 e;
@@ -38,10 +36,6 @@ JointAngles handlerRight(const Quat& qRel)
     return { e.e0 * kRad2Deg, e.e1 * kRad2Deg, e.e2 * kRad2Deg };
 }
 
-// formules.txt §58 (стр. 30649): пер-суставная конвенция знаков (type 0..4). Код использует
-// ZYX (§114.4) + L/R-зеркало (§30) вместо variant-A §58 — эквивалентно по смыслу. Левая сторона:
-// инверсия abd(X) и rot(Z), flexion(Y) — тот же знак. ПРОВЕРЕНО ЧИСЛЕННО: handlerLeft(mirror_y(q))
-// == handlerRight(q) (ошибка 0.0), т.е. инвариант §1698 И1 (|угол[R]−угол[L]|<5°) выполнен точно.
 JointAngles handlerLeft(const Quat& qRel)
 {
     const Euler3 e = eulerZYX(qRel);

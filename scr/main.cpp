@@ -245,7 +245,6 @@ inline std::atomic<bool>& g_testFlag();
 inline std::atomic<bool>& g_glovesFlag();
 
 inline double sigmoid(double x) {
-    // ±40 — защита от overflow std::exp (sigmoid(±40)≈1/0 с точностью double); не магия, а насыщение.
     if (x >  40.0) return 1.0;
     if (x < -40.0) return 0.0;
     return 1.0 / (1.0 + std::exp(-x));
@@ -779,15 +778,6 @@ private:
     bool               m_stairWalking = false;
 };
 
-// formules.txt §13 (стр. 10167) РЕШАТЕЛЬ ПОЗЫ — взвешенный нелинейный МНК (§18.1).
-// Это и есть РЕАЛЬНАЯ реализация §13.2: минимизация Σ wᵢ‖rᵢ(поза)‖² методом
-// Гаусса–Ньютона с демпфированием Левенберга–Марквардта (m_lambda, §31.2). Здесь
-// нормальные уравнения JᵀWJ·dx = −JᵀWr решаются Eigen LDLT (Холецкий, §18.1 —
-// численно эквивалентно QR/Гивенсу §13.2б), направления невязок берутся ТОЧНО
-// через quat_log/atan2 (превосходит minimax-аппроксимацию §13.2д solverRationalRatio).
-// Маппинг §59 (FOX_SparseChol, оконная система N~33600): здесь решается ПЕР-КАДРОВАЯ
-// плотная система DOF=69 (23×3) через Eigen LDLT (быстро, A=JᵀWJ PD §59.7), а оконное
-// RTS-сглаживание вынесено в BatchSmoother (§XV). Сверено численно: блок II (quat_log).
 class BodyPoseSolver {
 public:
     struct Diag {
@@ -1362,7 +1352,7 @@ public:
             {
                 const double frac     = fb::kCPelvis[0];
                 const double scale    = fb::kCPelvis[1];
-                const double latPen   = fb::kPelvisLatTiltPenalty;  // Q1: бывш. kCPelvis[2] (не в дампе V[2])
+                const double latPen   = fb::kPelvisLatTiltPenalty;
                 if (std::abs(frac) > 1e-6) {
                     const QVector3D phiPel = quat_log(orient[0]);
                     const double tiltDeg = std::abs(double(phiPel.y())) *
@@ -2281,7 +2271,6 @@ public:
             m_lastBodyMass = bodyMass;
             m_haveCoMPrev  = true;
 
-            // formules §1131 (35653/35657): F_GRF=m·(a+g); стоя → (0,0,+m·g) вверх. Поле g=(0,0,-9.812687) §2673.
             const QVector3D gravityWorld(0.0f, 0.0f,
                 float(fb::constants::kGravityMs2));
             m_lastGRFNewtons =
@@ -2447,12 +2436,6 @@ void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
                       << " s  σ_ori=" << fb::kSkin.sigmaOriDeg
                       << "° σ_pos=" << fb::kSkin.sigmaPosM << " m\n";
 
-            // formules.txt §13.2д (стр. 10185-10188): тождество рациональной формы
-            // ratio = 1 + C₁/(x·s+(C₂−C₁)) == (x·s+C₂)/(x·s+C₂−C₁), s=√(C₂−C₁·b²).
-            // solverRationalRatio/solverDirection — minimax-аппроксимация исходного
-            // движка; точный решатель BodyPoseSolver (§13.2/§18.1) её превосходит.
-            // Здесь хелперы РЕАЛЬНО вызываются и сверяются с замкнутой формой спеки,
-            // чтобы не оставаться «мёртвой магией» (см. решение по §13.2).
             {
                 bool ratOk = true, dirOk = true;
                 for (double b : {0.0, 0.5, 1.0}) {
@@ -2759,9 +2742,6 @@ std::array<double, 5> SkeletonXsens::defaultLimbCm(fox::body::Gender gender, dou
     const double refArmOneSide =
         specLen(fb::kSEG_RShoulder)     + specLen(fb::kSEG_RShoulder + 1) +
         specLen(fb::kSEG_RShoulder + 2) + specLen(fb::kSEG_RShoulder + 3);
-    // 0.08 м — полусмещение плеча реф-модели (центр→плечевой сустав), чтобы перевести длину руки в
-    // размах. Геометрия реф-модели, не отдельная константа спеки; фактическая ширина плеч —
-    // через anthro.shoulderWidthRatio (§1992/§1995) и калибровку shoulderWidth (FoxCal).
     const double refSpanM = 2.0 * refArmOneSide + 2.0 * 0.08;
     const double anthroArmSpanM =
         2.0 * (anthro.upperArmRatio + anthro.forearmRatio + anthro.handRatio) * h;
@@ -2826,8 +2806,6 @@ void SkeletonXsens::buildLengths(const ActorConfig& actor)
         const double specToeX  = std::abs(double(toeBoneVec.x()));
         if (fl > 0.05) {
             const double denom = specFootX + specToeX;
-            // 0.69 — fallback-доля «пятка→плюсна» от длины стопы (≈69%, остальное носок), применяется
-            // лишь при вырожденной геометрии (denom≈0); штатно frac берётся из реальных точек стопы.
             const double frac = (denom > 1e-6) ? (specFootX / denom) : 0.69;
             heelToBallM = fl * frac;
             ballToTipM  = fl * (1.0 - frac);
@@ -2855,8 +2833,6 @@ void SkeletonXsens::buildLengths(const ActorConfig& actor)
     auto armLen   = [&](int s) { return float(specLen(s) * armScale);   };
     auto legLen   = [&](int s) { return float(specLen(s) * legScale);   };
 
-    // 0.10 м — базовое внутреннее смещение плеча (центр→ключично-лопаточная точка) реф-модели,
-    // масштабируется по торсу (trunkScale). Геометрия реф-модели, не отдельная константа спеки.
     const double inShoulderOffsetM = 0.10 * trunkScale;
 
     const std::array<float, kXsensSegmentCountWithDummies> L = {
@@ -2933,10 +2909,6 @@ void SkeletonXsens::buildLengths(const ActorConfig& actor)
         localFor(25, 21, footScaleR), localFor(26, 22, toeScaleR),
     }};
 
-    // Per-bone length overrides ("all bones" mode): a positive actor field pins that
-    // bone's length; 0 leaves the default arm/leg scaling above untouched. Fed the
-    // defaultLimbCm() value it reproduces the default exactly (no regression). Both
-    // m_len and m_localOffset are patched so FK keypoints stay consistent.
     auto overrideBone = [&](int arrayIdx, int origSeg, double cm) {
         if (cm <= 0.0) return;
         const double spec = specLen(origSeg);
@@ -3076,11 +3048,6 @@ SkeletonXsens::addDummySegments(const std::array<Quat, kXsensSegmentCount>& s) c
     return out;
 }
 
-// formules.txt §35 (стр. 75933): сквозной конвейер «сенсор→поза». Здесь шаги 4-10 на кадр:
-// raw = q_B→G (после §24.5/§25.3) → oriented=raw⊗defAng → refine (решатель §13/X + контакт + сглаживание)
-// → FK §11 (kp[b]=kp[a]+boneVec, §2224). Инварианты §35 проверены по блокам: |q|=1 (II),
-// углы в градусах 180/π, мир NWU §25.2 (VI), коэффициенты=данные (XI/XXIV). Единицы согласованы
-// на границах: гиро °/с + акс g в FoxKF (IX), позиции м, BVH/FBX см, MXTP21 углы град.
 std::array<QVector3D, kXsensKeypointCount>
 SkeletonXsens::computeKeypoints(const std::array<Quat, kXsensSegmentCount>& raw,
                                 const QVector3D& rootPos,
@@ -3142,9 +3109,6 @@ SkeletonXsens::computeKeypoints(const std::array<Quat, kXsensSegmentCount>& raw,
 
     const auto global = addDummySegments(oriented);
 
-    // formules.txt §2224 (стр. 1577) / §1159 (стр. 1443): инвариант замыкания цепи
-    // p_child = p_parent + R(q_seg)·L_bone. Здесь цепь строится напрямую (kp[b]=kp[a]+boneVec),
-    // поэтому инвариант I27 выполнен ПО ПОСТРОЕНИЮ. Проверено численно на §1238 (FK правой стопы).
     std::array<QVector3D, kXsensSegmentCountWithDummies> boneVec{};
     for (int s = 0; s < kXsensSegmentCountWithDummies; ++s) {
         boneVec[s] = vec_rotate(m_localOffset[s], global[s]);
@@ -3387,10 +3351,6 @@ QVector3D LocomotionSolver::update(const Quat& qR,
         const QVector3D fkRLowest = lowest3(fkRHeel, fkRBall, fkRTip);
         const QVector3D fkLLowest = lowest3(fkLHeel, fkLBall, fkLTip);
 
-        // formules.txt §49.1 (стр.3961): распределение опоры heel/toe по ГЕОМ. наклону стопы
-        // m_footPitchZ = (pBall.z−pHeel.z)/sep (точки §37.6, считается ниже на стр.3505+).
-        // Порог 0.17 = sin(9.8°) — угол перехода HS/TO (heel-strike/toe-off, §49.1); ширина та же
-        // 0.17 (smoothstep → плавно). >0 ⇒ носок выше пятки ⇒ опора на пятку.
         const double heelContactWR_pre = sstep_local((m_footPitchZR - 0.17) / 0.17);
         const double toeContactWR_pre  = sstep_local((-m_footPitchZR - 0.17) / 0.17);
         const double heelContactWL_pre = sstep_local((m_footPitchZL - 0.17) / 0.17);
@@ -3500,12 +3460,8 @@ QVector3D LocomotionSolver::update(const Quat& qR,
         m_lowZTicksL = (fkL.z() - fkMinZ < float(m_lowZBandM))
                        ? std::min(m_lowZTicksL + 1, 4096) : 0;
 
-        // formules.txt §37.6/§49.1 (стр.12297,3961): наклон опоры стопы из РЕАЛЬНЫХ контактных
-        // точек pHeel/pBall (обе на z=−0.08 в локале стопы ⇒ нулевая база у плоской стопы), а не
-        // из кватернионной проксы. Тождество проверено локально (numpy, расхождение ~1e-16):
-        //   (pBall.z − pHeel.z)/sep ≡ 2(qx·qz − qw·qy) — та же величина, но источник — геометрия §37.6.
-        const QVector3D pHeelL = fb::kFootPointsRight[0].r_local;   // §37.6 пятка (-0.036,0,-0.08)
-        const QVector3D pBallL = fb::kFootPointsRight[3].r_local;   // §37.6 ball  ( 0.140,0,-0.08)
+        const QVector3D pHeelL = fb::kFootPointsRight[0].r_local;
+        const QVector3D pBallL = fb::kFootPointsRight[3].r_local;
         const double footSep = std::max(0.05, double(pBallL.x() - pHeelL.x()));
         const double pzR = double(fox::vec_rotate(pBallL, qR).z()
                                 - fox::vec_rotate(pHeelL, qR).z()) / footSep;
@@ -3516,9 +3472,6 @@ QVector3D LocomotionSolver::update(const Quat& qR,
 
         auto sstep = [](double x){ x = std::clamp(x,0.0,1.0); return x*x*(3.0-2.0*x); };
         const bool poseAllowsHeelLift = (m_pose == PoseSquat || m_pose == PoseSit);
-        // formules.txt §49.1 (стр.3961): отрыв пятки (heel-off, HO) по ГЕОМ. наклону m_footPitchZ
-        // (=(pBall.z−pHeel.z)/sep, точки §37.6) только в приседе/сидя. Порог 0.36 = sin(21°) — угол
-        // HO; ширина 0.19 (smoothstep); EMA a010 + гистерезис >0.5 гасят дребезг. <−0.36 ⇒ носок ниже пятки.
         const double hlR_raw = poseAllowsHeelLift
                 ? sstep((-m_footPitchZR - 0.36) / 0.19) : 0.0;
         const double hlL_raw = poseAllowsHeelLift
@@ -3530,9 +3483,6 @@ QVector3D LocomotionSolver::update(const Quat& qR,
 
         const float rangeR = xyR;
         const float rangeL = xyL;
-        // Эвристика движка (НЕ в formules.txt): детектор переката (rolling) по угл. скорости и разбросу
-        // FK-XY стопы. Окно ±0.5°/с и /1.0 — мягкая граница smoothstep; коридор [0.67..1.33]×rollXYRangeMax
-        // (=±33%) даёт зону уверенного «катится/нет» без дребезга. Базовые пороги — из kGait/params.
         const double angFastR = smoothstep01((m_rAngV - (m_rollAngVThresh - 0.5)) / 1.0);
         const double angFastL = smoothstep01((m_lAngV - (m_rollAngVThresh - 0.5)) / 1.0);
         const double xyHi    = m_rollXYRangeMax * 1.33;
@@ -4492,38 +4442,24 @@ struct FingerBaselineState {
 };
 static FingerBaselineState g_fingerBaseline;
 
-// formules.txt §26.4 (стр.32057)/§91 (стр.32081): реальные длины фаланг из модели
-// fox_definitions.xsb (Прил. E, FoxSkel.{left,right}Hand.segmentsN.points, стр.6052-6534).
-// Структура §91: каждый палец = MC,PP,MP,DP (большой — MC,PP,DP, без MP). Рендер рисует
-// цепочку wrist→slot0→slot1→slot2→slot3 (kFingerChains), т.е. wrist→slot0 = МЕТАКАРПАЛ
-// (его длина заложена в kFingerBaseOffset, позиция MCP), а bone[0..2] = PP,MP,DP.
-// Столбцы: [0]=PP, [1]=MP (DP для большого), [2]=DP (0 для большого), [3]=MC (для
-// трассируемости к xsb; геометрически метакарпал представлен kFingerBaseOffset).
 static const double kFingerBoneLen[5][4] = {
-    { 0.0311, 0.0311, 0.0000,  0.0354318 },  // большой: PP,DP,(нет MP),MC  (xsb seg2-4)
-    { 0.0414, 0.0226, 0.0203,  0.0572504 },  // указат.: PP,MP,DP,MC        (xsb seg5-8)
-    { 0.0453, 0.0268, 0.0213,  0.0555000 },  // средний: PP,MP,DP,MC        (xsb seg9-12)
-    { 0.0430, 0.0255, 0.0215,  0.0538932 },  // безым.:  PP,MP,DP,MC        (xsb seg13-16)
-    { 0.0359, 0.0195, 0.0207,  0.0511957 },  // мизинец: PP,MP,DP,MC        (xsb seg17-20)
+    { 0.0311, 0.0311, 0.0000,  0.0354318 },
+    { 0.0414, 0.0226, 0.0203,  0.0572504 },
+    { 0.0453, 0.0268, 0.0213,  0.0555000 },
+    { 0.0430, 0.0255, 0.0215,  0.0538932 },
+    { 0.0359, 0.0195, 0.0207,  0.0511957 },
 };
 
-// formules.txt §91/§37.3: позиция MCP-сустава в системе кисти (правая) = точка карпуса
-// (xsb seg1, стр.6052/6378) + метакарпал. Ось кода: X=вперёд(к пальцам)=xsb.Y, Y=боковая=
-// xsb.X, Z=вверх. forward = carpus.Y + MC; lateral = carpus.X. Левая кисть — Y-зеркало
-// (mirrorManusL). Проверено локально: кончик среднего пальца ≈0.185 м от запястья (§17.3).
 static const QVector3D kFingerBaseOffset[5] = {
-    QVector3D(0.0628f,  0.0270f,  0.000f),   // большой  (carpus 0.027,0.0274 + MC 0.0354)
-    QVector3D(0.0916f,  0.0121f,  0.000f),   // указат.  (carpus 0.0121,0.0343 + MC 0.0573)
-    QVector3D(0.0917f,  0.0000f,  0.000f),   // средний  (carpus 0,0.0362 + MC 0.0555)
-    QVector3D(0.0882f, -0.0122f,  0.000f),   // безым.   (carpus -0.0122,0.0343 + MC 0.0539)
-    QVector3D(0.0810f, -0.0218f,  0.000f),   // мизинец  (carpus -0.0218,0.0298 + MC 0.0512)
+    QVector3D(0.0628f,  0.0270f,  0.000f),
+    QVector3D(0.0916f,  0.0121f,  0.000f),
+    QVector3D(0.0917f,  0.0000f,  0.000f),
+    QVector3D(0.0882f, -0.0122f,  0.000f),
+    QVector3D(0.0810f, -0.0218f,  0.000f),
 };
 
 static const double kSpreadSign[5] = { +1.0, +1.0, +1.0, +1.0, +1.0 };
 
-// formules.txt §2164 (стр. 34387)/§91 (стр. 32085): ROM суставов пальцев. PIP flex 0-110° (11/18·π)
-// и DIP 0-80° (4/9·π) — совпадают точно; MCP/большой палец чуть шире номинала (защита от клиппинга
-// естественной амплитуды). Оси: flex вокруг Y (§32.026), spread/abduction вокруг Z; L/R — sideSign.
 const FingerJointLimit kFingerLimits[5][3] = {
     {
         { -M_PI / 18.0,  M_PI / 3.0,   -M_PI / 9.0,    M_PI * 5.0/18.0 },
@@ -4578,10 +4514,6 @@ struct FingerDiag {
 };
 static FingerDiag g_fingerDiag;
 
-// Эвристика движка (НЕ в formules.txt): пер-суставной SLERP-Калман сглаживания кватернионов пальцев.
-// Это ОТДЕЛЬНЫЙ лёгкий сглаживатель выхода перчатки, НЕ полный FoxKF перчатки (kGloveBase §94.2).
-// init σ=5° (var=(5°)²), измерит. шум R=(1°)², пол варианса 1e-7, постоянная сглаживания tau=80 мс
-// (нижний порог alpha). Проверено локально: K сходится 0.96→~0.17, σ→0.4°, апериодично и устойчиво.
 class FoxKFAGloveFilter {
 public:
     void reset() {
@@ -4677,8 +4609,6 @@ static void parseErgoHand(const float* degs20, bool isLeft,
         (void)a3;
 
         if (f > 0) {
-            // formules.txt §1101.4/§32547 (стр.32547): theta_DIP ≈ 0.7·theta_PIP («DIP следует
-            // за PIP» §32044). Приведено к точному 0.7 из спеки (было 2/3≈0.667).
             const double a3Linked = 0.7 * a2c;
             a3c = std::clamp(a3Linked, Lm[2].flexMin, Lm[2].flexMax);
         }
@@ -5973,9 +5903,6 @@ void MocapReceiver::run()
                 const QVector3D gyrSI(float(phiX * I.freqHz),
                                       float(phiY * I.freqHz),
                                       float(phiZ * I.freqHz));
-                // formules.txt §43.2 (стр. 3430)/§43.10: FoxKF ждёт gyr в °/с (×180/π) и acc в g
-                // (÷9.812687, §2673). dt=STF·1e-4 (Xsens sample-time-fine, тик 0.1мс) или 1/SampleRate
-                // (nominalT §43.2). Сенсор даёт rad/s и м/с². Конвертация подтверждена.
                 accForFilter = accSI * float(kMs2ToG);
                 gyrForFilter = gyrSI * float(kRadToDeg);
                 fuseReady = true;
@@ -6068,9 +5995,6 @@ void MocapReceiver::run()
                     s = fusionAhrsDefaultSettings;
                     s.convention   = FusionConventionNwu;
                     s.sampleRateHz = float(std::max(60.0, I.freqHz));
-                    // formules.txt §51.4/§19.4: learnMagField=true (из дефолта) — гейт §38.4 берёт dip
-                    // из выученного локального поля, а не фикс. magDipModelDeg ниже. Подтверждено на
-                    // реальных данных лога (среда ~70°, фикс. 78° запирал гейт 11/16 сенсоров).
 
                     s.magDipModelDeg    = float(I.magInclinationDeg.load(std::memory_order_relaxed));
                     s.magDeclinationDeg = float(I.magDeclinationDeg.load(std::memory_order_relaxed));
@@ -6164,8 +6088,6 @@ void MocapReceiver::run()
                 }
 
                 if (haveFused) {
-                    // formules.txt §2673 (стр. 2673)/§41.1: FOX_FE.gravity = 9.812687 м/с². Fusion отдаёт
-                    // линейное ускорение в g-единицах (мы кормили acc в g, см. §43.2 стр. 5937), здесь ×g → м/с².
                     const FusionVector linG = FusionAhrsGetLinearAcceleration(&ahrs);
                     const QVector3D linBody(linG.axis.x * 9.812687f,
                                              linG.axis.y * 9.812687f,
@@ -6199,12 +6121,6 @@ void MocapReceiver::run()
 
                 {
                     QMutexLocker lk2(&g_ergo.lock);
-                    // Фикс «замерзания» перчатки: haveLeft/haveRight выставляются в колбэке, но НИГДЕ не
-                    // сбрасываются. Гейтим по свежести — lastTimeMs обновляется на каждый Manus-колбэк
-                    // (стр. 4749). При обрыве перчатки колбэк прекращается → через kGloveStaleMs пальцы
-                    // перестают подмешиваться (иначе последняя поза пальцев «залипает» навсегда).
-                    // 500 мс ≈ 60 кадров при 120 Гц — не ложится на джиттер, но ловит обрыв за полсекунды.
-                    // Беззнаковое вычитание при рассинхроне часов фейлится в «устарело» (безопасно).
                     constexpr std::uint64_t kGloveStaleMs = 500;
                     const std::uint64_t nowTick  = GetTickCount64();
                     const std::uint64_t ergoTick = g_ergo.lastTimeMs.load();
@@ -6664,7 +6580,6 @@ static const Tr kTr[] = {
     {"calib_n_prepare",    "Теперь N-поза — приготовьтесь (12с неподвижно)…", "Now N-pose — prepare (12s still)…"},
     {"calib_n_capture",    "N-поза — не двигайтесь 12с",        "N-pose — hold still 12s"},
 
-    // --- ASL: стадии движений (formules [1704]/[1728], стр. 23375) ---
     {"calib_walk_prepare", "Авто-проверка датчиков: приготовьтесь пройти ~5 м вперёд…",
                            "Sensor auto-check: get ready to walk ~5 m forward…"},
     {"calib_walk_capture", "Идите вперёд ~5 м обычным шагом",   "Walk forward ~5 m at a normal pace"},
@@ -7096,8 +7011,6 @@ static float computeFeature(
     const std::array<NewSessionWizard::RawImuBuf, kXsensSegmentCount>& bufs,
     const fox::body::SpcFeatureSpec& f)
 {
-    // formules [1704] (40745): признаки ASL считаются на 60 Гц (буфер ресемплится
-    // с нативной частоты костюма в onCaptureTick). Определяет частотные полосы FFT.
     constexpr double kFs = 60.0;
     using fox::body::SpcStat;
     using fox::body::SpcBand;
@@ -7208,11 +7121,6 @@ static float computeFeature(
     return 0.0f;
 }
 
-// formules.txt §1705 (стр.40286): x_norm=(x−min)/(max−min), clip[0,1] ПЕРЕД SVM, в ПОРЯДКЕ МОДЕЛИ.
-// out[m] — m-я позиция МОДЕЛИ (= sorted() ASCII, §1707; ДОКАЗАНО из структуры опорных векторов). Спека
-// берётся через kSpcModelPerm (kFeatureSpecs идёт в порядке kFeatureNames = case-insensitive), нормировка —
-// точными kFeatureMinM/MaxM (порядок модели). Прежде вектор строился в порядке КОДА (208/315 позиций
-// неверны) + эвристика deriveRange (неверна для 85/315, maxIdx губила в [0,1]) → ASL получал мусор.
 static std::array<float, fox::body::kSpcFeatureCount> extractFeatures315(
     int target,
     const std::array<NewSessionWizard::RawImuBuf, kXsensSegmentCount>& bufs)
@@ -7274,7 +7182,6 @@ static std::array<int, fox::body::kSpcClassCount> hungarian17(
     return assign;
 }
 
-// formules §1719-1723 (23201): Auto Sensor Localization — на сенсор 315 призн.→17 классов размещения.
 struct PlacementClassifier {
     Ort::Env env{ORT_LOGGING_LEVEL_WARNING, "fox_kfa_spc"};
     std::optional<Ort::Session> session;
@@ -7342,7 +7249,6 @@ struct PlacementReport {
     bool        suitUncertaintyAlarm = false;
 };
 
-// formules §1721 (23495): probs[s]=clf(features[s]); HungarianAssign(probs) (max Σlog p) → сверка с ожидаемым местом.
 static PlacementReport analyzePlacement(
     PlacementClassifier& clf,
     const std::array<NewSessionWizard::RawImuBuf, kXsensSegmentCount>& bufs,
@@ -7919,10 +7825,6 @@ void NewSessionWizard::buildPages()
                     if (k == v.k) lab->setText(QString::number(v.m * 100.0, 'f', 1) + " cm");
             }
         };
-        // Pre-fills the per-bone fields with the selected gender's height-scaled
-        // defaults (same numbers buildLengths uses). Reset on gender or height
-        // change per the "reset to gender defaults" UX; signals blocked so this
-        // does not recurse through the per-bone valueChanged handlers.
         auto fillLimbDefaults = [this, updateBreakdown]() {
             const fox::body::Gender g =
                 (m_gender && m_gender->currentIndex() == 1)
@@ -8065,11 +7967,9 @@ void NewSessionWizard::buildPages()
         connect(m_btnCalibBegin, &QPushButton::clicked,
                 this, &NewSessionWizard::onCalibrationBegin);
 
-        // Опц. протокол движений ASL (проверка размещения датчиков), выкл по умолчанию.
-        // На трекинг не влияет; добавляет ~40с (ходьба + подъёмы рук/ног).
         m_chkSensorCheck = new QCheckBox(p);
         m_chkSensorCheck->setChecked(false);
-        m_chkSensorCheck->setEnabled(m_liveSpcEnabled);   // нет модели → проверка недоступна
+        m_chkSensorCheck->setEnabled(m_liveSpcEnabled);
         m_chkSensorCheck->setStyleSheet("color:#9B9B9B; font-size:9pt;");
         connect(m_chkSensorCheck, &QCheckBox::toggled,
                 this, [this](bool on) { m_doSensorCheck = on; });
@@ -8388,8 +8288,6 @@ void NewSessionWizard::goNext()
         m_result.gender = (m_gender && m_gender->currentIndex() == 1)
                               ? fox::body::GenderFemale : fox::body::GenderMale;
 
-        // Per-bone lengths drive the skeleton directly; the aggregate arm/leg
-        // span inputs are superseded, so leave them at 0 (auto).
         m_result.armSpanCm        = 0.0;
         m_result.legLengthCm      = 0.0;
         m_result.upperArmCm       = m_upperArm ? m_upperArm->value() : 0.0;
@@ -8527,7 +8425,7 @@ void NewSessionWizard::onCalibrationBegin()
     m_lastSampleCtr = -1;
     m_havePrev = false;
     m_countdownBar->setValue(0);
-    if (m_readyBar) {                       // сброс после возможного режима "%p%" стадий движений
+    if (m_readyBar) {
         m_readyBar->setRange(0, kCalibrationSamples);
         m_readyBar->setValue(0);
         m_readyBar->setFormat("%v / %m");
@@ -8570,8 +8468,6 @@ void NewSessionWizard::onCalibrationBegin()
         buf.epochLeftLeg      = RawImuBuf::Win{-1, -1};
         buf.epochRightLeg     = RawImuBuf::Win{-1, -1};
     }
-    // formules [1704] (40745): вход ASL = 60 Гц. Шаг ресемплера = нативная/60
-    // (Link 240→4.0, Awinda 90→1.5). Основной мокап остаётся на нативной частоте.
     {
         const double nativeHz = (m_rx ? m_rx->expectedRate() : 240.0);
         m_aslResStep = std::max(1.0, (nativeHz > 1.0 ? nativeHz : 240.0) / 60.0);
@@ -8639,7 +8535,6 @@ void NewSessionWizard::onCountdownTick()
                 m_calibStatus->setText(Lang::t("calib_n_capture"));
         } else if (m_phase == CalibPhase::PrepMove) {
             m_phase = CalibPhase::CaptureMove;
-            // окно текущей стадии движения начинается с этого индекса 60-Гц буфера
             m_moveStageStartIdx = m_aslOutCount;
             static const char* kCap[5] = {
                 "calib_walk_capture", "calib_larm_capture", "calib_rarm_capture",
@@ -8655,15 +8550,9 @@ void NewSessionWizard::onCountdownTick()
 }
 
 namespace {
-// formules [1728] (23375): walk ~5 м; подъёмы конечностей до ~90°. Длительности стадий
-// захвата (сек) — в formules численно не заданы, подобраны и проверены локально.
 constexpr double kAslWalkCaptureSec  = 6.0;
 constexpr double kAslRaiseCaptureSec = 5.0;
 
-// formules [1704] (40263): окно эпохи подъёма вырезается между точками подъёма/опускания
-// по кривой Gyr.Normxyz опорного датчика (сигма-фильтр). Базовая линия — по тихому
-// префиксу 0.5 с; порог = max(mu+3·sd, mu+0.15·(peak−mu)). Параметры проверены локально
-// в Python (устойчивы к амплитуде и шуму). При отсутствии движения → всё окно стадии.
 NewSessionWizard::RawImuBuf::Win detectRaiseWindow(
     const std::vector<QVector3D>& gyr, int from, int to)
 {
@@ -8680,7 +8569,7 @@ NewSessionWizard::RawImuBuf::Win detectRaiseWindow(
         g[i] = m;
         if (m > peak) peak = m;
     }
-    constexpr double kFs = 60.0;                       // formules [1704] (40745)
+    constexpr double kFs = 60.0;
     const int pfx = std::min(n, std::max(5, int(0.5 * kFs)));
     double mu = 0.0;
     for (int i = 0; i < pfx; ++i) mu += g[i];
@@ -8700,7 +8589,7 @@ NewSessionWizard::RawImuBuf::Win detectRaiseWindow(
     w.end   = from + std::min(n, last + 1 + pad);
     return w;
 }
-}  // namespace
+}
 
 void NewSessionWizard::onCaptureTick()
 {
@@ -8729,9 +8618,6 @@ void NewSessionWizard::onCaptureTick()
     constexpr double kStillRad = 0.025;
     const bool still = second < kStillRad;
 
-    // formules [1704] (40745): фазовый ресемплер служебного буфера признаков ASL
-    // до ровно 60 Гц (downsample с нативной частоты костюма). ТОЛЬКО вход
-    // классификатора; основной мокап и q_align идут на нативной частоте костюма.
     const bool aslCapturing = m_liveSpcEnabled && m_doSensorCheck
         && (m_phase == CalibPhase::CaptureT
          || m_phase == CalibPhase::CaptureN
@@ -8771,8 +8657,6 @@ void NewSessionWizard::onCaptureTick()
         m_aslHavePrev = true;
     }
 
-    // formules [1704]/[1728]: стадия движений (walk + подъёмы рук/ног) — прогресс по
-    // времени, затем фиксация окна эпохи и переход к следующей стадии или к ASL.
     if (m_phase == CalibPhase::CaptureMove) {
         const qint64 elapsedMs = (m_phaseStartMs > 0)
             ? (QDateTime::currentMSecsSinceEpoch() - m_phaseStartMs) : 0;
@@ -8792,9 +8676,6 @@ void NewSessionWizard::onCaptureTick()
 
         m_captureTimer.stop();
         if (m_moveStage >= 1) {
-            // formules [1704] (40263): окно подъёма по Gyr.Normxyz опорного датчика.
-            // Опорные сегменты (kClassToSeg): LeftUpperArm=12, RightUpperArm=8,
-            // LeftUpperLeg=19, RightUpperLeg=15. Одно окно — на все датчики.
             static const int kRefSeg[5] = { -1, 12, 8, 19, 15 };
             const int ref = kRefSeg[m_moveStage];
             const RawImuBuf::Win wWin =
@@ -9024,19 +8905,6 @@ void NewSessionWizard::onCaptureTick()
         const Quat& qRefN = fox::body::kRefQuatN[i];
         const Quat& qRefT = fox::body::kRefQuatT[i];
 
-        // formules.txt §174/§1160 ШАГ4 (стр. 4843): qAlign = q_eta ⊗ conj(q_S_avg) ⊗ q_bs.
-        // ОТЛИЧИЕ КОДА ОТ БУКВАЛЬНОЙ СПЕКИ (зафиксировано, проверено):
-        //  • код умножает на conj(q_bs), а не на q_bs (стр.9017);
-        //  • невязка ниже (9041) = угол(qAlign⊗q_bs), а §174 ШАГ5 (стр.4847) = 2·acos(|q_align.w−q_bs.w|).
-        // ПРИЧИНА НЕ в «инвертированном хранении» q_bs: хранимый kSensorToBone[10].q_bs =
-        // (0.692346,0.147448,0.046195,-0.704828) ПОБАЙТОВО совпадает с formules стр.6382/21299
-        // (sensor→bone), q_bs НЕ инвертирован. Отличие связано с тем, что qAlign применяется в
-        // рантайме НЕ умножением ориентации, а pre-rotation измерений acc/gyr/mag на s2sInv
-        // ПЕРЕД фьюжном (см. стр.6019-6024) — фьюжн сразу выдаёт ориентацию кости.
-        // СТАТУС: эта конвенция самосогласована (qResid=qAlign⊗q_bs≈1 ⇒ residDeg≈0, см. 9041-9045),
-        // но требует подтверждения на железе через self-check «--test» (печать «[calib §174.6]»,
-        // 9047): residDeg всех сегментов ≤5° (§174 ШАГ5). НЕ менять формулу на «⊗ q_bs» до тех пор,
-        // пока self-check на реальных данных не покажет расхождение — иначе риск сломать калибровку.
         const Quat qAlignN = quat_mult(
             quat_mult(qRefN, qAvgN.conj()),
             q_bs.conj()).normalized();
@@ -9158,10 +9026,6 @@ void NewSessionWizard::onCaptureTick()
         std::cout.flush();
     }
 
-    // q_align решён и применён — основная калибровка завершена. Протокол движений ASL
-    // (5 эпох, formules [1704]/[1728]: walk + подъёмы Л/П руки и Л/П ноги) запускается
-    // ТОЛЬКО по галочке m_doSensorCheck — он нужен лишь для проверки размещения датчиков
-    // и на трекинг не влияет. Иначе сразу финал (без прогона классификатора).
     if (m_doSensorCheck && m_liveSpcEnabled && g_placementClf().ready) {
         m_moveStage = 0;
         beginMoveStage();
@@ -9170,14 +9034,10 @@ void NewSessionWizard::onCaptureTick()
     finishCalibrationAsl();
 }
 
-// formules §1721 (23495): probs[s]=clf(features[s]); HungarianAssign → сверка с ожидаемым
-// местом. Вызывается после того, как все 5 эпох (calibration+walk, 4 подъёма) заполнены.
 void NewSessionWizard::finishCalibrationAsl()
 {
     if (m_placementInfo) {
         if (!m_doSensorCheck) {
-            // протокол движений не выполнялся → классификатор не гоняем (иначе из пустых
-            // эпох вышли бы недостоверные предупреждения). Калибровка q_align при этом валидна.
             m_placementInfo->setText(Lang::t("asl_skipped"));
             m_placementInfo->setStyleSheet("color:#9B9B9B;");
         } else if (!m_liveSpcEnabled || !g_placementClf().ready) {
@@ -9186,17 +9046,12 @@ void NewSessionWizard::finishCalibrationAsl()
         } else {
             const spc::PlacementReport rep = spc::analyzePlacement(
                 g_placementClf(), m_imuBuf, m_test);
-            // Проверка размещения — ТОЛЬКО рекомендательная (на трекинг/калибровку
-            // не влияет). Нормализация признаков (deriveRange) теоретическая и может
-            // не совпадать с обучением модели (в репо нет тренера), поэтому низкую
-            // уверенность трактуем как «неинформативно», а несовпадение — как справку,
-            // без алармирующих цветов. formules.txt §1705 (стр. 40286), §1721 (стр. 5692).
             QString msg;
-            QString style = "color:#9B9B9B;";          // нейтральный (рекомендательный)
+            QString style = "color:#9B9B9B;";
             if (!rep.haveData) {
                 msg   = Lang::t("asl_no_data");
             } else if (rep.suitUncertaintyAlarm || rep.avgMaxP < 0.35f) {
-                msg   = Lang::t("asl_low_confidence"); // неинформативно → нейтральный цвет
+                msg   = Lang::t("asl_low_confidence");
             } else if (rep.mismatches.isEmpty()) {
                 msg   = Lang::t("asl_ok").arg(rep.verified).arg(rep.total);
                 style = "color:#2EC25A; font-weight:700;";
@@ -9211,7 +9066,6 @@ void NewSessionWizard::finishCalibrationAsl()
                 if (rep.mismatches.size() > 1) {
                     msg += QString(" (+%1)").arg(rep.mismatches.size() - 1);
                 }
-                // справочно (advisory) → нейтральный цвет, без алармирующего bold
             }
             m_placementInfo->setText(msg);
             m_placementInfo->setStyleSheet(style);
@@ -9650,9 +9504,6 @@ void SensorIndicatorsPanel::setSuitLive(bool live, const QString& )
 
 void SensorIndicatorsPanel::clearLiveDots()
 {
-    // B-UI-3: при обрыве костюма гасим все точки трекеров/пальцев СРАЗУ. Иначе updateFromPose
-    // держит их «живыми» до таймаута ~2с (последний кадр ещё «свежий») — оператор видит ложный
-    // live. Индикатор самого костюма гасит setSuitLive(false).
     for (auto& t : m_trackers) if (t.dot) setDot(t.dot, false);
     for (auto& g : m_fingers)  if (g.dot) setDot(g.dot, false);
 }
@@ -10628,19 +10479,11 @@ void LiveStreamSender::setTposeBaseline(
     m_impl->resetWireContinuity();
 }
 
-// formules.txt §1934 (стр. 1725): внутренний мир — NWU (X=вперёд, Y=влево, Z=вверх, правая).
-// §2155 (стр. 1740)/§75450-75452: ориентация шлётся в нативном мире БЕЗ свопа — приёмные плагины
-// сами делают axis-swap на импорте (§1737). Проверено: для Blender так и нужно (нативный Z-up).
 static inline Quat mvnWireOrient(const Quat& worldSeg, LiveTarget )
 {
     return worldSeg;
 }
 
-// formules.txt §75450-75452: для Blender X_b=X_native, Y_b=Y_native, Z_b=Z_native (нативный Z-up).
-// Своп (z,x,y) ЗДЕСЬ намеренно КОМПЕНСИРУЕТ своп (y,z,x) в комплектном плагине
-// Plugins/MVNBlenderPlugin-main/pose.py::_convert_vectors → итог в Blender = (nwu.x,nwu.y,nwu.z)=native.
-// Проверено численно: (z,x,y) ∘ (y,z,x) = identity. Unreal: §75551-75573 — Z-up, ЛЕВАЯ тройка, см;
-// конверсию делает UE-плагин (исходник вне репо) → проверить на железе (блок XXIX).
 static inline QVector3D mvnWirePelvisPos(const QVector3D& nwu, LiveTarget target)
 {
     if (target == LiveTarget::BlenderMVN)
@@ -11459,12 +11302,6 @@ static bool writeBvh(const QString& path,
     std::array<double, std::size(kBvh)> prZ{}, prX{}, prY{};
     bool havePrev = false;
 
-    // formules.txt §2155 (стр. 1750)/§75253 (стр. 75253): BVH = Y-up (нет метаданных оси, в отличие
-    // от FBX UpAxis=Z). Трансляция таза уже переведена в Y-up (x,z,-y), а мировые ориентации — native
-    // Z-up. ФИКС: переводим ориентации в Y-up левым умножением на c=Z-up→Y-up (−90° вокруг X,
-    // §1376 матричная форма). Хирургично: c⊗W меняет ТОЛЬКО корневой поворот (локальные инвариантны:
-    // (c⊗W_p)⁻¹⊗(c⊗W_c)=W_p⁻¹⊗W_c), оффсеты реконструируются в Y-up через корень. Без этого тело
-    // лежало на 90° в Y-up-вьюверах (Blender/Maya). Проверено численно: spine-ось → BVH +Y. ПРОВЕРИТЬ НА ЖЕЛЕЗЕ.
     const Quat cZup2Yup(0.70710678118654752, -0.70710678118654752, 0.0, 0.0);
     for (const RecordedFrame& fr : frames) {
         auto W = exportWorldOrients(fr, skel);
@@ -11488,8 +11325,6 @@ static bool writeBvh(const QString& path,
         havePrev = true;
         os << "\n";
     }
-    // B-UI-2: ловим сбой записи В ПРОЦЕССЕ (диск полон / I/O), а не только сбой открытия.
-    // Без этого QTextStream/QFile тихо проглатывают ошибку и finishRecording покажет «сохранено».
     os.flush();
     if (os.status() != QTextStream::Ok || f.error() != QFileDevice::NoError)
         return false;
@@ -11690,7 +11525,6 @@ static bool writeFbxAscii(const QString& path,
            << ",\"" << prop << "\"\n";
     }
     os << "}\n";
-    // B-UI-2: см. writeBvh — ловим сбой записи в процессе (диск полон / I/O), не только открытия.
     os.flush();
     if (os.status() != QTextStream::Ok || f.error() != QFileDevice::NoError)
         return false;
@@ -11956,11 +11790,6 @@ static void hdJointLimits(std::vector<RecordedFrame>& fr, const SkeletonXsens& s
     }
 }
 
-// formules.txt §192 (стр. 74224)/§1380 (стр. 74264)/§1393 (стр. 74293): офлайн HD-постобработка
-// записи (двухпроходное сглаживание для качества/убирания jitter). Здесь — практичный вариант:
-// сглаживание КРИВЫХ поверх уже решённых поз (outlier §54 → quat-smooth §1393 → finger → joint-limits
-// §676 → root-lowpass → ZUPT §52), а не полное пере-решение FoxKF/FoxFE §1380 (то требует хранить
-// сырой IMU на кадр). Улучшает визуальное качество без раздувания формата записи.
 static void runHdPostProcessing(std::vector<RecordedFrame>& fr,
                                 int fps,
                                 const SkeletonXsens* skel,
@@ -12479,7 +12308,7 @@ void MainWindow::onConnStatusChanged(int status, const QString& )
     const ConnStatus s = (ConnStatus)status;
     const bool streaming = (s == ConnStatus::Streaming);
     m_panel->setSuitLive(streaming, {});
-    if (!streaming) m_panel->clearLiveDots();   // B-UI-3: гасим точки сразу, не ждём таймаут 2с
+    if (!streaming) m_panel->clearLiveDots();
 
     if (!streaming && m_sessionRunning)      onPauseSession();
     else if (streaming && !m_sessionRunning) onResumeSession();
@@ -12488,9 +12317,6 @@ void MainWindow::onConnStatusChanged(int status, const QString& )
 
 void MainWindow::onGloveStatus(bool on)
 {
-    // B-UI-1: «живой» статус перчаток в сессии оператор видит по точкам пальцев панели
-    // (SensorIndicatorsPanel::updateFromPose гейтит их по f.hasGloves, стр. ~9678). Здесь
-    // выделенный сигнал был пустым — логируем событие connect/disconnect для диагностики.
     logTest(std::string("[gloves] ") + (on ? "connected" : "disconnected"));
 }
 
@@ -12597,10 +12423,6 @@ void MainWindow::onRenderTick()
             s_lastRaw[i] = raw[i];
             s_haveRaw[i] = true;
         } else if (s_haveRaw[i]) {
-            // formules.txt §2185 (стр. 3279): при потере пакетов сенсор замораживается
-            // (state hold) — здесь это удержание последнего кватerniona. Полный recovery
-            // §2185 (Δq-бленд 500 мс при возобновлении) отдельно не реализован: повторный
-            // захват сглаживается jump-reject ниже (kJumpDetect) + восстановлением AHRS.
             raw[i] = s_lastRaw[i];
         } else {
             raw[i] = s_refWorld[i];
@@ -13532,9 +13354,6 @@ void MainWindow::onResumeSession()
 {
     m_sessionRunning = true;
     if (m_panel) m_panel->setSessionRunning(true);
-    // B-UI-4: при возобновлении сбрасываем заморозку координат. Иначе после
-    // кратковременного обрыва/реконнекта сцена остаётся замороженной (кнопка
-    // re-enabled, но m_frozen/m_freezeXY сохранялись), и оператор не видит движения.
     if (m_panel)    m_panel->setFreezeState(false);
     if (m_viewport) m_viewport->setFreezeXY(false);
     logTest("[session] resumed");
