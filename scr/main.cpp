@@ -6142,6 +6142,7 @@ void MocapReceiver::run()
                     api.dataPacketContainsPacketCounter(pkt))
                     staging.sampleCounter = api.dataPacketPacketCounter(pkt);
                 staging.recvTime = monotonicSec();
+                staging.nativeHz = I.freqHz;   // §2035 разрешённая частота железа -> обработка (formules.txt)
 
                 {
                     QMutexLocker lk2(&g_ergo.lock);
@@ -6796,8 +6797,8 @@ static const Tr kTr[] = {
                            "\xF0\x9F\x94\x8C  COM port — USB / Awinda dongle"},
     {"transport_wifi",     "\xF0\x9F\x93\xA1  WiFi / Ethernet — по сети (Link / Awinda)",
                            "\xF0\x9F\x93\xA1  WiFi / Ethernet — network (Link / Awinda)"},
-    {"suit_awinda",        "\xF0\x9F\x9F\xA0  Xsens Awinda — 90 Гц",
-                           "\xF0\x9F\x9F\xA0  Xsens Awinda — 90 Hz"},
+    {"suit_awinda",        "\xF0\x9F\x9F\xA0  Xsens Awinda — 60 Гц",
+                           "\xF0\x9F\x9F\xA0  Xsens Awinda — 60 Hz"},
     {"suit_link",          "\xF0\x9F\x9F\xA3  Xsens Link — 240 Гц",
                            "\xF0\x9F\x9F\xA3  Xsens Link — 240 Hz"},
 
@@ -12414,6 +12415,15 @@ void MainWindow::onRenderTick()
     if (m_panel) m_panel->updateFromPose(f);
     if (!m_sessionRunning) return;
 
+    // §2035 подстройка частоты обработки под РЕАЛЬНУЮ частоту железа (deviceUpdateRate):
+    //   Awinda 60 / Link 240 / прочие модели 100/120. Обновляет пороги локомоции (ticksFor/
+    //   rateAdjustAlpha в setProcRate) и базу кэпа записи (m_procRateHz·60·60). Срабатывает один раз
+    //   при старте потока (I.freqHz стабильна). Без подстройки пороги считались бы для константы. (formules.txt)
+    if (f.nativeHz > 1.0 && std::abs(f.nativeHz - m_procRateHz) > 1.0) {
+        m_procRateHz = f.nativeHz;
+        if (m_viewport) m_viewport->setProcRate(m_procRateHz);
+    }
+
     static const MainWindow* s_owner = nullptr;
     static bool s_stateReady = false;
 
@@ -14071,7 +14081,7 @@ CliArgs parseCli(int argc, char** argv)
         }
         else if (a == "-h" || a == "--help") {
             std::cout <<
-                "Fox Mocap — MVN-style Xsens client (Link 240 Hz / Awinda 90 Hz)\n"
+                "Fox Mocap — MVN-style Xsens client (Link 240 Hz / Awinda 60 Hz)\n"
                 "Usage:\n"
                 "  fox_mocap [-test] [--gloves] [--link|--awinda]\n"
                 "\n"
@@ -14083,9 +14093,9 @@ CliArgs parseCli(int argc, char** argv)
                 "             when launched from Explorer.\n"
                 "  --gloves   Reserve space in the session for Manus finger data.\n"
                 "  --link     Xsens Link suit — 240 Hz update rate (default for -test).\n"
-                "  --awinda   Xsens Awinda suit — 90 Hz update rate (default).\n"
+                "  --awinda   Xsens Awinda suit — 60 Hz update rate (default).\n"
                 "             --link/--awinda override -test's default in ANY order,\n"
-                "             so `-test -gloves -awinda` runs the 90 Hz Awinda suit.\n"
+                "             so `-test -gloves -awinda` runs the 60 Hz Awinda suit.\n"
                 "  --lang RU|EN  Force UI language without touching the user preference.\n";
             std::exit(0);
         }
@@ -14176,7 +14186,7 @@ int main(int argc, char** argv)
     NewSessionWizard wiz(rx, cli.test);
 
     testLog(std::string("[boot] suit = ")
-            + (cli.suit == SuitType::Link ? "Xsens Link (240 Hz)" : "Xsens Awinda (90 Hz)"),
+            + (cli.suit == SuitType::Link ? "Xsens Link (240 Hz)" : "Xsens Awinda (60 Hz)"),
             cli.test);
     wiz.preselectSuit(cli.suit);
     if (cli.gloves) {
