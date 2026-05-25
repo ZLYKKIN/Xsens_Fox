@@ -3,7 +3,6 @@
 
 namespace fox {
 
-// formules.txt §112 (стр. 266) / §2.1 (стр. 117): произведение Гамильтона q=a⊗b. Проверено численно.
 Quat quat_mult(const Quat& a, const Quat& b)
 {
 
@@ -14,7 +13,6 @@ Quat quat_mult(const Quat& a, const Quat& b)
         a.w*b.z + a.x*b.y - a.y*b.x + a.z*b.w);
 }
 
-// formules.txt §113 (стр. 302) / §6.1 (стр. 237): поворот вектора q⊗(0,v)⊗conj(q) (форма Родрига §113.4). Проверено численно.
 QVector3D vec_rotate(const QVector3D& v, const Quat& q)
 {
 
@@ -56,7 +54,6 @@ static Quat axis_quat(char axis, double ang)
     return Quat(1, 0, 0, 0);
 }
 
-// formules.txt §4.2 (стр. 185) / §124 (стр. 459): сборка кватерниона из осевых поворотов q(o1)⊗q(o2)⊗q(o3). Проверено численно (ZYX).
 Quat euler_to_quat(double a, double b, double c, const char* seq)
 {
 
@@ -78,7 +75,6 @@ Quat yaw_only_quat(const Quat& q)
     return Quat(w * n, 0.0, 0.0, z * n);
 }
 
-// formules.txt §8 (стр. 247) / §121 (стр. 402): SLERP с выбором кратчайшего пути и NLERP-веткой при малом sinΩ. Проверено численно.
 Quat slerp_quat(const Quat& a, const Quat& b, double t)
 {
     double dot = a.w*b.w + a.x*b.x + a.y*b.y + a.z*b.z;
@@ -108,7 +104,6 @@ double quat_angle_deg(const Quat& q)
     return 2.0 * std::acos(w) * 180.0 / M_PI;
 }
 
-// formules.txt §5.1 (стр. 213) / §1276 (стр. 534): exp-map (вектор поворота → кватернион). Проверено численно (совпадает с Тейлором при малых углах).
 Quat quat_exp_rotvec(double phix, double phiy, double phiz)
 {
 
@@ -122,10 +117,6 @@ Quat quat_exp_rotvec(double phix, double phiy, double phiz)
 
 QVector3D quat_log(const Quat& qin)
 {
-    // formules.txt §1277 (стр. 589): случай 3 — каноникализация w<0 ПЕРЕД log.
-    // Иначе при относительном повороте >180° возвращается «длинный путь» (угол в
-    // (π,2π)) → всплеск в штрафах/связках решателя (callers main.cpp §13.2/§18.1,
-    // напр. quat_log(qRel).length()). Для w≥0 поведение не меняется.
     const Quat q = (qin.w < 0.0)
         ? Quat(-qin.w, -qin.x, -qin.y, -qin.z) : qin;
     const double vn2 = q.x*q.x + q.y*q.y + q.z*q.z;
@@ -140,7 +131,6 @@ QVector3D quat_log(const Quat& qin)
     return QVector3D(float(k*q.x), float(k*q.y), float(k*q.z));
 }
 
-// formules.txt §3.1 (стр. 147) / §113.5 (стр. 333): кватернион → матрица поворота 3×3. Проверено численно.
 Matrix3 quat_to_matrix(const Quat& q)
 {
 
@@ -155,9 +145,6 @@ Matrix3 quat_to_matrix(const Quat& q)
     return R;
 }
 
-// formules.txt §114 (стр. 345): извлечение углов Эйлера из R(q).
-// Вариант A — ТОЧНЫЙ обратный для интринсик-порядка XZY (проверено численно,
-// невязка ~1e-16). Сейчас не вызывается; оставлен как готовый XZY-экстрактор.
 Euler3 matrix_to_euler_A(const Matrix3& R)
 {
 
@@ -168,10 +155,6 @@ Euler3 matrix_to_euler_A(const Matrix3& R)
     return e;
 }
 
-// formules.txt §114 (стр. 345) / §30 (эргоуглы стопы): анатомическое извлечение
-// (e0≈ось Y, e1≈ось X через asin(R21), e2≈ось Z). НЕ строгий Tait-Bryan для больших
-// углов; используется ТОЛЬКО в foxergo handlerFoot (малый ROM стопы, результат
-// клампится по kJointRom) — в рабочем диапазоне точно (проверено численно).
 Euler3 matrix_to_euler_B(const Matrix3& R)
 {
 
@@ -182,7 +165,6 @@ Euler3 matrix_to_euler_B(const Matrix3& R)
     return e;
 }
 
-// formules.txt §3.2 (стр. 156) / §123 (стр. 423): матрица → кватернион (Шеппард, выбор наибольшей опоры). Проверено численно.
 Quat matrix_to_quat_sheppard(const Matrix3& R)
 {
 
@@ -232,7 +214,6 @@ Quat quat_pow(const Quat& q, double t)
     return quat_exp_rotvec(t * double(phi.x()), t * double(phi.y()), t * double(phi.z()));
 }
 
-// formules.txt §1842 (стр. 630): угловая скорость из Δq через log-map с каноникализацией w<0. Проверено численно.
 QVector3D angular_velocity_from_quat(const Quat& dq, double dtSec)
 {
 
@@ -298,7 +279,6 @@ void jacobiSym4(double A[4][4], double U[4][4])
     }
 }
 
-// formules.txt §1824 (стр. 605): усреднение кватернионов (Markley) — собств. вектор макс. собств. числа M=Σq·qᵀ. Проверено численно.
 Quat quat_avg_markley(const std::vector<Quat>& samples)
 {
     if (samples.empty()) return Quat(1, 0, 0, 0);

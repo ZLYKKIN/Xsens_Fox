@@ -20,10 +20,6 @@ constexpr double kDeg = 0.017453292519943295;
 
 constexpr Quat kIdent = Quat(1, 0, 0, 0);
 
-// formules.txt §24 (стр. 21097): эталонные позы N/T-pose (точные числа). legacy* — §24.1 (стр. 21106,
-// T-поза) / §24.2 (стр. 21133, N-поза, отличие только в руках). Гендерные male*/female* — §1369
-// (стр. 22364, q_align по мужской модели) / §1672 (стр. 22765, точные q_eta Male N-pose): Pelvis
-// male = 9.0°/+Y → (0.99691733,0,0.0784591,0) и т.д. Все значения сверены grep'ом по formules.txt.
 inline Quat legacySpine(int seg) {
     switch (seg) {
         case 0:  return Quat(0.9984697627340179, 0, 0.05530038793601835, 0);
@@ -207,13 +203,6 @@ SpcFeatureSpec parseFeatureName(const char* name) {
     return out;
 }
 
-// formules.txt §1705 (стр. 40286): MinMax-нормировка x∈[0,1] ПЕРЕД SVM (нормализатора в модели нет,
-// см. инспекцию: только SVMClassifier+Cast). §1705 честно говорит: точные feature_min/max обучения
-// НЕ извлечены (даны лишь грубые: Acc 0–4 g, Gyr 0–8 рад/с). Поэтому deriveRange — ЭВРИСТИЧЕСКАЯ
-// реконструкция диапазонов по типу признака (НЕ настоящие min/max обучения). Локально проверено
-// (onnxruntime): SV∈[0,1] mean=0.3979 (=§1705 «≈0.398»), центроиды классов само-классифицируются
-// p≈0.99 → модель функциональна и ждёт [0,1]. Поэтому ASL — СТРОГО рекомендательный (см.
-// finishCalibrationAsl): не переназначает сенсоры и не блокирует калибровку.
 std::pair<float, float> deriveRange(const SpcFeatureSpec& f) {
     const bool isCorr = f.stat == SpcStat::SameAxisInterSensorCorrMax
                      || f.stat == SpcStat::SameAxisInterSensorCorrAbsMax

@@ -47,17 +47,11 @@ constexpr int     kXsensSegmentCount  = 23;
 constexpr int     kXsensKeypointCount = 28;
 constexpr int     kXsensSegmentCountWithDummies = 27;
 constexpr int     kFingerSegmentsHand = 20;
-constexpr double  kRenderFps          = 90.0;   // GUI/processing rate, NOT a sensor rate
+constexpr double  kRenderFps          = 90.0;
 constexpr double  kStaleSeconds       = 2.0;
 constexpr int     kCalibrationSamples = 720;
 constexpr int     kCountdownSeconds   = 3;
 
-// Suit hardware sample rates — single source of truth (formules.txt §10105/§19689):
-//   Link   = 240 Hz  (Fox_Link, wired USB / 2.4 GHz dongle — full bandwidth)
-//   Awinda =  90 Hz  (Fox_AW / Fox_Wireless — radio bandwidth caps the IMU rate)
-// NB: 90 also happens to be the GUI/processing rate (kRenderFps), but that is a
-// separate concept — do NOT hardcode 60/90/240 for the sensor rate anywhere; always
-// go through nativeRateHz(suit).
 enum class SuitType { Awinda, Link };
 constexpr double nativeRateHz(SuitType s) { return s == SuitType::Link ? 240.0 : 90.0; }
 
@@ -87,12 +81,8 @@ extern const char* kSegmentNames[kXsensSegmentCount];
 
 struct WristAnatomicalCfg {
 
-    // formules.txt §2415 (стр. 39305)/§1530 (стр. 1530): запястье flex 80°, ext 70°, lateral(uln) 30°.
-    // maxFlexRad приведён к 80° (было 85° — расхождение со спекой). maxLatDevRad=30° совпадает.
-    // ВНИМАНИЕ: эти лимиты сейчас НЕ применяются (констрейнт использует только .enabled); активный
-    // кламп запястья — kJointRom idx 9/13 в foxergo. Значение выровнено по спеке на будущее.
-    double maxFlexRad   = 1.3962634015954636;   // 80°
-    double maxLatDevRad = 0.5235987755982988;   // 30°
+    double maxFlexRad   = 1.3962634015954636;
+    double maxLatDevRad = 0.5235987755982988;
     double twistWeight  = 1.0;
     bool   enabled      = true;
 };
@@ -461,10 +451,6 @@ public:
     const std::array<int, kXsensSegmentCountWithDummies>& endPts()   const { return m_end; }
     const std::array<float, kXsensSegmentCountWithDummies>& lengths() const { return m_len; }
 
-    // Default per-limb bone lengths in cm for the given gender/height, computed with
-    // the same arm/leg scaling buildLengths() uses. Order: {upperArm, forearm, hand,
-    // thigh, shank}. Single source of truth for UI pre-fill so an unedited field
-    // reproduces the default skeleton exactly.
     static std::array<double, 5> defaultLimbCm(fox::body::Gender gender, double heightCm);
 
     const std::array<QVector3D, kXsensSegmentCountWithDummies>& localOffsets() const { return m_localOffset; }
@@ -573,8 +559,6 @@ public:
     void setTransport(Transport t);
 
     void setExpectedRate(double hz);
-    // Нативная частота кадров костюма (Link 240 / Awinda 90). Нужна ASL-ресемплеру
-    // для приведения служебного буфера признаков к 60 Гц (formules.txt §1704, стр. 40745).
     double expectedRate() const;
 
     void setS2sAlignment(const std::array<Quat, kXsensSegmentCount>& s2s);
@@ -749,7 +733,7 @@ private:
     class QProgressBar*  m_countdownBar = nullptr;
     class QProgressBar*  m_readyBar     = nullptr;
     class QPushButton*   m_btnCalibBegin = nullptr;
-    class QCheckBox*     m_chkSensorCheck = nullptr;   // опц. протокол движений ASL (выкл по умолч.)
+    class QCheckBox*     m_chkSensorCheck = nullptr;
     class QLabel*        m_calibStatus   = nullptr;
 
     QTimer m_countTimer;
@@ -767,8 +751,6 @@ private:
 
     qint64 m_phaseStartMs = 0;
 
-    // PrepMove/CaptureMove — стадии протокола движений ASL (formules.txt §1704/§1728):
-    // walk + подъёмы Л/П руки и Л/П ноги. Конкретную стадию задаёт m_moveStage.
     enum class CalibPhase { Idle, PrepT, CaptureT, SettleT, PrepN, CaptureN, Settle,
                             PrepMove, CaptureMove, LiveSpc, Done };
     CalibPhase m_phase = CalibPhase::Idle;
@@ -827,22 +809,17 @@ private:
     std::array<RawImuBuf, kXsensSegmentCount> m_imuBuf{};
     bool m_liveSpcEnabled = true;
 
-    // --- ASL: фазовый ресемплер служебного буфера признаков до ровно 60 Гц ---
-    // formules [1704] (40745): признаки классификатора считаются на 60 Гц (downsample
-    // с нативной частоты костюма). НЕ влияет на основной мокап — это отдельный буфер.
-    double m_aslResStep    = 4.0;    // = nativeRate/60 (Link 4.0, Awinda 1.5)
-    double m_aslResNextOut = 0.0;    // позиция следующего выхода в input-сэмплах
-    int    m_aslResInIdx   = -1;     // индекс текущего входного кадра
+    double m_aslResStep    = 4.0;
+    double m_aslResNextOut = 0.0;
+    int    m_aslResInIdx   = -1;
     bool   m_aslHavePrev   = false;
-    int    m_aslOutCount   = 0;      // общее число эмитнутых 60-Гц сэмплов (== длине буфера)
+    int    m_aslOutCount   = 0;
     std::array<QVector3D, kXsensSegmentCount> m_aslPrevAcc{};
     std::array<QVector3D, kXsensSegmentCount> m_aslPrevGyr{};
 
-    // --- ASL: протокол движений 5 эпох (после N-позы) ---
-    // 0=walk(→epochCalibration), 1=LArm, 2=RArm, 3=LLeg, 4=RLeg.
     int  m_moveStage         = 0;
-    int  m_moveStageStartIdx = 0;    // m_aslOutCount на старте текущей стадии движения
-    bool m_doSensorCheck     = false; // запускать протокол движений (по галочке, выкл по умолч.)
+    int  m_moveStageStartIdx = 0;
+    bool m_doSensorCheck     = false;
 
     class QLabel*        m_readyTitle = nullptr;
     class QLabel*        m_readySummary = nullptr;
@@ -859,8 +836,6 @@ private:
 
     void logCalibPhaseTransition(const char* tag);
 
-    // ASL-протокол движений: запустить очередную стадию (countdown + инструкция),
-    // и финальный шаг — прогон классификатора по заполненным эпохам + завершение.
     void beginMoveStage();
     void finishCalibrationAsl();
 
@@ -893,7 +868,7 @@ public:
 
     void setFreezeState(bool frozen);
 
-    void clearLiveDots();   // B-UI-3: мгновенно гасит точки трекеров/пальцев при обрыве костюма
+    void clearLiveDots();
 
     void setActorDefaults(const ActorConfig& a);
 
