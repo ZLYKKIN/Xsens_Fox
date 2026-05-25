@@ -1003,6 +1003,9 @@ struct EstimatorWeights {
     double gyrBiasStdMaxDeg;
     double multiLevelZhcClipVert;
 };
+// formules.txt §38.7 (стр. 13057)/§55.2 (стр. 20183): веса оценщика и заморозка маргинализации.
+// Совпадают точно: sd_int_acc_to_vel=[2,2,1,4,4,2,8], sd_int_vel_to_pos=1e-5, sd_lump=0.025,
+// stdOriFreeze=0.01 рад, stdPosFreeze=1e-4 м, stdOriLocalBodyStillPoseDeg=1.5°.
 inline constexpr EstimatorWeights kEstimator = {
     .sdIntAccToVel  = {{ 2.0, 2.0, 1.0, 4.0, 4.0, 2.0, 8.0 }},
     .sdIntVelToPos  = 1.0e-5,
@@ -1146,6 +1149,8 @@ struct OutlierRej {
     double jointResWin1;
     double jointResWin2;
 };
+// formules.txt §54.1 (стр. 20120)/§54.3: каскад отбраковки выбросов χ² — th1/2/3=100/10/2.5
+// (th3=2.5 — мягкий для пола cZeroHeight); jointResTh1..6 и footSliding 0.3/0.07/0.9. Совпадает точно.
 inline constexpr OutlierRej kOutlierRej = {
     .outRejTh1    = 100.0,
     .outRejTh2    = 10.0,
