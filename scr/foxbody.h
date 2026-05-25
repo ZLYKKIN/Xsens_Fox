@@ -1287,6 +1287,8 @@ struct CalibMagE {
     double e_norm_feet;
     double e_sternum_pelvis;
 };
+// §24/FoxCal.e_* пороги калибровки по магнитному полю: dip 78°/85°, наклонения рук/таза/грудины 30/45/40/25°,
+//   нормы поля рук/головы/таза/стоп и различия; сверено с FoxCal-дампом (formules.txt)
 inline constexpr CalibMagE kCalibMagE = {
     .e_dip_mag        = 78.0,
     .e_dip_mag2       = 85.0,
@@ -1309,6 +1311,7 @@ struct FootPoint {
     int       pointId;
     QVector3D r_local;
 };
+// §90/§138.16 контактные точки стопы (локальн. коорд., м): 3=pHeel(-0.036,0,-0.08), 4=pFirstMet, 5=pFifthMet, 6=ball; сверено с xsb (formules.txt)
 inline constexpr std::array<FootPoint, 4> kFootPointsRight = {{
     { 3, QVector3D(-0.036f,  0.000f, -0.080f) },
     { 4, QVector3D( 0.116f, -0.038f, -0.080f) },
@@ -1322,6 +1325,7 @@ inline constexpr std::array<FootPoint, 4> kFootPointsLeft = {{
     { 6, QVector3D( 0.140f,  0.000f, -0.080f) },
 }};
 
+// §90 анатомические anchor-точки сегментов (носок, перед колена, SIPS таза, центр ягодицы) для контактов/маркеров (formules.txt)
 inline constexpr QVector3D kToeTipPoint = QVector3D(0.064f, 0.0f, -0.015f);
 
 inline constexpr QVector3D kKneeFrontPointR = QVector3D(0.040f,  0.000f, -0.050f);
@@ -1338,6 +1342,8 @@ struct FingerRom {
     double abdMin, abdMax;
     double rotMin, rotMax;
 };
+// §91 ROM 19 суставов кисти (rightHand.joints, ballandsocket с огранич. DOF, град): большой TM_CMC/MCP/IP,
+//   указат..мизинец MCP/PIP/DIP, Carpus/OPP/Spread/RSV; flx/abd/rot пределы (formules.txt)
 inline constexpr std::array<FingerRom, 19> kFingerRom = {{
      { "TM_CMC",   -15.0,  60.0,  -45.0,  45.0,  -20.0, 30.0 },
      { "TM_MCP",     0.0,  60.0,   -5.0,   5.0,    0.0,  0.0 },
@@ -1360,6 +1366,8 @@ inline constexpr std::array<FingerRom, 19> kFingerRom = {{
      { "RSV",       -5.0,   5.0,    0.0,   0.0,    0.0,  0.0 },
 }};
 
+// §XXI FoxKF.gloveBase.* — конфиг калмановского фильтра перчатки (FOX_KFA-Core): магнитная модель,
+//   ZRU, acc/gyr boost/clip, redefine курса, skin/bias; значения в kGloveBase ниже сверены с xsb (formules.txt)
 struct KfaGloveParams {
 
     double accDivMonTauDecay;
@@ -1502,6 +1510,8 @@ struct KfaGloveParams {
     double clipAcc;
     double clipGyrDegS;
 };
+// §XXI FoxKF.gloveBase (сверено с xsb-дампом FOX_KFA_Filter.gloveBase): nominalT=0.008333=1/120 (перчатка 120 Гц),
+//   магнитные gate 6°/3.5°/0.03, ZRU, clipAcc 157 / clipGyr 2000, sd init, redefine курса (formules.txt)
 inline constexpr KfaGloveParams kGloveBase = {
     .accDivMonTauDecay=0.1, .accDivMonThreshold=0.5,
     .accDivMonThresholdHighBoost=2.0, .accDivMonTime=2.0,
@@ -1568,6 +1578,7 @@ inline constexpr KfaGloveParams kGloveBase = {
     .clipAcc=157.0, .clipGyrDegS=2000.0,
 };
 
+// §XXI вариант фильтра для надетой перчатки (human): проекция магнита на горизонт, temporal redefine (formules.txt)
 inline constexpr KfaGloveParams kGloveHuman = []() {
     KfaGloveParams p = kGloveBase;
     p.accDivMonThresholdHighBoost = 3.0;
@@ -1581,6 +1592,7 @@ inline constexpr KfaGloveParams kGloveHuman = []() {
     return p;
 }();
 
+// §XXI вариант фильтра VRU (vertical reference unit): обновление m0, без ZRU и магнитометра (formules.txt)
 inline constexpr KfaGloveParams kGloveVRU = []() {
     KfaGloveParams p = kGloveBase;
     p.doDominantFieldLearning = false;
@@ -1595,6 +1607,7 @@ struct CarpusPoint {
     const char* label;
     double      x, y, z;
 };
+// §92.1 6 опорных точек запястья (rightHand.segments1.points): длина пясти 0.027 м, разнос CMC по Y ±0.0274 (зеркалится L/R) (formules.txt)
 inline constexpr std::array<CarpusPoint, 6> kRightCarpusPoints = {{
     { "wrist origin", 0.0000,  0.0000,  0.0 },
     { "Thumb CMC",    0.0270, -0.0274,  0.0 },
@@ -1617,6 +1630,7 @@ enum class FingerJointType : std::uint8_t {
     Spread,
     Reserved,
 };
+// §91/§92 типы суставов пальцев (DOF): большой=saddle-CMC-3DOF/hinge-MCP-1DOF/hinge-IP; II..V=MCP-2DOF/PIP/DIP; Carpal/Opposition/Spread/Reserved (formules.txt)
 inline constexpr std::array<FingerJointType, 19> kFingerJointTypes = {{
     FingerJointType::SaddleCMC,
     FingerJointType::HingeMCP1DOF,
@@ -1655,6 +1669,7 @@ inline const char* fingerJointTypeName(FingerJointType t) {
     return "?";
 }
 
+// §1683 качество позы по остаточной невязке МНК (м): <0.02 отлично .. >0.10 невалидно (formules.txt)
 inline constexpr std::array<double, 5> kPoseQualityResidBands = {
     0.02, 0.03, 0.05, 0.10, 1.00
 };
@@ -1674,6 +1689,8 @@ inline int poseQualityFromResidual(double residual) {
     return PoseQualityInvalid;
 }
 
+// §30.4 байтовая таблица диспетчеризации эргоуглов по 22 суставам (точное совпадение со спекой):
+//   тип0 ×7 (осевые) | тип1 правые | тип2 левые | тип3/4 стопы. Драйвит ergoTypeOf()/foxergo (formules.txt)
 inline constexpr std::array<std::uint8_t, kJointCount> kErgoHandler = {
 
     0,
@@ -1701,6 +1718,8 @@ inline constexpr std::array<std::uint8_t, kJointCount> kErgoHandler = {
 };
 
 namespace constants {
+    // §38 точные числовые константы движка: 180/π, π/180, π/2, π;
+    //   порог малого угла SLERP 1e-6 (1e-6..1e-5); поправочные числа NLERP-ветви 0.2/0.8/(1/3)
     inline constexpr double kRad2Deg   = 57.29577951308232;
     inline constexpr double kDeg2Rad   = 0.017453292519943295;
     inline constexpr double kPi_2      = 1.5707963267948966;
@@ -1709,13 +1728,16 @@ namespace constants {
     inline constexpr double kNLerpA    = 0.2;
     inline constexpr double kNLerpB    = 0.8;
     inline constexpr double kNLerpC    = 1.0 / 3.0;
+    // §13[д] коэффициенты решателя позы; §38/§31.2 шаг Гаусса–Ньютона α=0.25, демпфирование Левенберга λ=0.01
     inline constexpr double kSolverC1     = ::fox::kSolverC1;
     inline constexpr double kSolverC2     = ::fox::kSolverC2;
     inline constexpr double kSolverAlpha  = 0.25;
     inline constexpr double kSolverLambda = 0.01;
 
+    // §41.1 гравитация модели g = 9.812687 м/с² (вектор (0,0,-g), мировая Z вверх) (formules.txt)
     inline constexpr double kGravityMs2 = 9.812687;
 
+    // §XXX основная частота движка 240 Гц, шаг dt = 1/240 с (formules.txt)
     inline constexpr double kSampleRateHz = 240.0;
     inline constexpr double kSampleDtSec  = 1.0 / kSampleRateHz;
 }
@@ -1726,6 +1748,7 @@ constexpr double totalMassRatio() {
     return s;
 }
 
+// §57 uniform-масштабирование скелета: коэффициент = рост_субъекта / 1.75 м (formules.txt)
 inline double scaleFor(double subjectHeightM) {
     return (subjectHeightM > 1e-3) ? (subjectHeightM / kRefHeightM) : 1.0;
 }
@@ -1755,6 +1778,7 @@ inline double trunkLengthM(double subjectHeightM) {
     return scaleFor(subjectHeightM) * s;
 }
 
+// §1341/§37.1 центр масс тела: CoM = Σ(m_i·c_i)/Σm_i по сегментам; полная масса M = bodyMass·(Σm/100) (formules.txt)
 inline QVector3D centerOfMass(const std::array<QVector3D, kSegmentCount>& segCenters,
                               double* M = nullptr,
                               double bodyMassKg = kDefaultBodyMassKg) {
@@ -1783,10 +1807,13 @@ inline int lumpOf(int jointIdx) {
     return (jointIdx >= 0 && jointIdx < kJointCount) ? kJointLump[jointIdx] : -1;
 }
 
+// §30.4 тип обработчика эргоугла сустава: 0=осевой, 1=правый, 2=левый, 3/4=стопы (formules.txt)
 inline int ergoTypeOf(int jointIdx) {
     return (jointIdx >= 0 && jointIdx < kJointCount) ? int(kErgoHandler[jointIdx]) : 0;
 }
 
+// §XXVII FoxSPC (классификатор размещения датчиков): 17 классов = 17 датчиков, 315 признаков;
+//   опорные векторы SV / α-матрицы / per-class статистика — во внешнем Fox_NN.onnx + .csv (formules.txt)
 constexpr int kSpcClassCount   = 17;
 constexpr int kSpcFeatureCount = 315;
 
@@ -1817,6 +1844,7 @@ inline constexpr std::array<int, kSpcClassCount> kClassToSeg = {
       4,
 };
 
+// §XXVII обратное отображение сегмент -> класс SPC (-1 = сегмент без датчика) (formules.txt)
 inline constexpr std::array<int, kSegmentCount> kSegToClass = {
       8,
      -1,
@@ -1873,6 +1901,7 @@ extern const std::array<SpcFeatureSpec,  kSpcFeatureCount> kFeatureSpecs;
 extern const std::array<float,           kSpcFeatureCount> kFeatureMin;
 extern const std::array<float,           kSpcFeatureCount> kFeatureMax;
 
+// §1707 порядок (перестановка) 315 признаков для ONNX-инференса FoxSPC; критичен для совпадения с обученной моделью (formules.txt)
 inline constexpr std::array<int, kSpcFeatureCount> kSpcModelPerm = {{
     0, 1, 2, 3, 4, 5, 6, 7, 8, 14, 15, 16, 17, 18, 9, 10,
     11, 12, 13, 21, 22, 19, 20, 29, 30, 31, 23, 24, 25, 26, 27, 28,
@@ -1896,6 +1925,7 @@ inline constexpr std::array<int, kSpcFeatureCount> kSpcModelPerm = {{
     308, 300, 301, 302, 303, 313, 314, 309, 310, 311, 312,
 }};
 
+// §1705 мин-макс нормализация 315 признаков (preprocessing перед SVM/ONNX): нижние границы (formules.txt)
 inline constexpr std::array<float, kSpcFeatureCount> kFeatureMinM = {{
     0.0000f, 0.0000f, 0.0000f, 0.0000f, 0.0000f, 0.0000f, -1.0000f, -16.0000f,
     0.0000f, 0.0000f, 0.0000f, 0.0000f, -3.0000f, 0.0000f, 0.0000f, 0.0000f,
@@ -1939,6 +1969,7 @@ inline constexpr std::array<float, kSpcFeatureCount> kFeatureMinM = {{
     -15.0000f, 0.0000f, -16.0000f,
 }};
 
+// §1705 мин-макс нормализация 315 признаков: верхние границы (formules.txt)
 inline constexpr std::array<float, kSpcFeatureCount> kFeatureMaxM = {{
     40.0000f, 3600.0000f, 40.0000f, 40.0000f, 1.0000f, 16.0000f, 1.0000f, 16.0000f,
     12000.0000f, 40.0000f, 3600.0000f, 40.0000f, 3.0000f, 12000.0000f, 1.0000f, 16.0000f,
