@@ -373,6 +373,8 @@ struct ActiveContact {
     double    z_floor;
 };
 
+// §XIV/§52 детектор контакта стопы с полом и ZUPT-якорей: вероятностная модель
+//   (contactParameters §138) + перекат пятка->носок (§49), multiLevel-лестница (§XIV) (formules.txt)
 class ContactDetector {
 public:
     struct FrameInput {
@@ -1762,6 +1764,8 @@ inline const char* locomotionPhaseName(LocomotionPhase p) {
     }
 }
 
+// §29/§1543 классификация активности (стоит/идёт/бежит/сидит/прыжок/акробатика) и §49 фазы походки
+//   HS->FF->HO->TO->SW; пороги в fb::kGait/fb::kJumpDetect (§foxbody) (formules.txt)
 class LocomotionClassifier {
 public:
     enum class GaitPhase : std::uint8_t {
@@ -2068,6 +2072,9 @@ private:
     int m_count = 0;
 };
 
+// §X FoxFE — фьюжн тела (разрежённый взвешенный МНК §13): объединяет ориентации датчиков в согласованную позу
+//   скелета с биомех-связями (§XI: спина §1098.8, лопаточно-плечевой ритм §46, колено §1300, стопа §48/§49),
+//   контактами/ZUPT (§XIV/§52/§XIII), локомоцией (§29) и skin-моделью (§XI). (formules.txt)
 class PoseRefiner {
 public:
     void reset() {
@@ -2098,6 +2105,8 @@ public:
         double                                          dt;
     };
 
+    // §X/§30 главный шаг фьюжна тела на кадр: детект контактов -> разрежённый МНК-решатель (§13)
+    //   с биомех-связями и подсказками -> уточнённые ориентации сегментов orient (formules.txt)
     BodyPoseSolver::Diag refine(std::array<Quat, fb::kSegmentCount>& orient,
                                 const FrameContext& ctx,
                                 ContactDetector::Result* outContacts = nullptr) {
@@ -3048,6 +3057,8 @@ SkeletonXsens::addDummySegments(const std::array<Quat, kXsensSegmentCount>& s) c
     return out;
 }
 
+// §V/§1158/§1159 прямая кинематика (FK) от корня: oriented[i]=raw⊗m_defAng[i] (поза §24),
+//   уточнение позы PoseRefiner (§X), затем обход скелета kp[b]=kp[a]+R(global)·L_bone -> 28 keypoints (formules.txt)
 std::array<QVector3D, kXsensKeypointCount>
 SkeletonXsens::computeKeypoints(const std::array<Quat, kXsensSegmentCount>& raw,
                                 const QVector3D& rootPos,
@@ -5451,6 +5462,8 @@ bool MocapReceiver::hasGloves() const
     return m_impl->frame.hasGloves;
 }
 
+// §XXX сквозной конвейер на датчик->поза (поток приёма): сырые acc/gyr/mag -> нормировка/смещения/s2s ->
+//   FoxKF (§IX FusionAhrs) -> ориентации сегментов + перчатка -> публикация кадра staging (formules.txt)
 void MocapReceiver::run()
 {
     using namespace xda;
@@ -10497,6 +10510,8 @@ static inline QVector3D mvnWirePelvisPos(const QVector3D& nwu, LiveTarget target
     return nwu;
 }
 
+// §XXIX стрим тела MXTP02 (23 сегмента) к Blender/Unreal: per-target ремап осей (§VI: Blender Z-up/-Y,
+//   Unreal Z-up/X, q_swap) + непрерывность полушария; foxwire-сериализация big-endian (formules.txt)
 void LiveStreamSender::pushFrame(quint32 sample,
     const std::array<Quat, kXsensSegmentCount>& segQuat,
     const QVector3D& pelvisPos)
@@ -10586,6 +10601,8 @@ void LiveStreamSender::pushFrame(quint32 sample,
     }
 }
 
+// §XXIX/§XXI стрим тела+пальцев MXTP02 (63 сегмента: 23 тела + по 20 пальцев на руку);
+//   пальцы через emitFinger с baseline калибровки и непрерывностью (formules.txt)
 void LiveStreamSender::pushFrameWithGloves(quint32 sample,
     const std::array<Quat, kXsensSegmentCount>& segQuat,
     const QVector3D& pelvisPos,
@@ -11242,6 +11259,7 @@ static inline Quat exportLocalRot(int j,
     return quat_mult(W[parentSeg].inv(), W[ownSeg]).normalized();
 }
 
+// §719/§1354/§2042 экспорт BVH: иерархия HIERARCHY + MOTION, углы Эйлера (порядок каналов BVH), см, система координат BVH (formules.txt)
 static bool writeBvh(const QString& path,
                      const std::vector<RecordedFrame>& frames,
                      int fps,
@@ -11337,6 +11355,7 @@ static bool writeBvh(const QString& path,
     return true;
 }
 
+// §717/§720/§1355 экспорт FBX (ASCII): узлы Model/AnimationCurve, локальные повороты сегментов, см (formules.txt)
 static bool writeFbxAscii(const QString& path,
                           const std::vector<RecordedFrame>& frames,
                           int fps,
