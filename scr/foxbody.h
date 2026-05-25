@@ -969,6 +969,8 @@ struct SkinParams {
     double tauMotionRefRad;
     double linAccRefMps2;
 };
+// formules.txt §38.5 (стр. 13038)/§31.3: «вязкость» мягких тканей (skin artifact) — процесс
+// Гаусса–Маркова с τ=0.15 с. Совпадает точно (sigmaSAOri0=3.0°, sigmaSAPos0=0.02 м).
 inline constexpr SkinParams kSkin = {
     .tauSec                       = 0.15,
     .sigmaOriDeg                  = 3.0,
@@ -996,6 +998,8 @@ struct FilterParams {
     double tauM0AvgMedium;
     double tauM0AvgSlow;
 };
+// formules.txt §38.6 (стр. 13051)/§1085 (стр. 39366): постоянные времени фильтра — tauAcc=10 с
+// (LPA lpaTau, b=exp(−dt/10)), tauFGyrLpfDynamic=6 с. Совпадает точно. SLERP/LM-демпфер — §31 (блок III).
 inline constexpr FilterParams kFilter = {
     .tauAcc            = 10.0,
     .tauFGyrLpfDynamic = 6.0,
