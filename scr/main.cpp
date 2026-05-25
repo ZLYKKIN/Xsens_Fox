@@ -3387,9 +3387,10 @@ QVector3D LocomotionSolver::update(const Quat& qR,
         const QVector3D fkRLowest = lowest3(fkRHeel, fkRBall, fkRTip);
         const QVector3D fkLLowest = lowest3(fkLHeel, fkLBall, fkLTip);
 
-        // Эвристика движка (НЕ в formules.txt): мягкое распределение опоры стопы heel/toe по питчу.
-        // m_footPitchZ = 2(qx·qz − qw·qy) ≈ sin(pitch). Порог 0.17 = sin(9.8°): за этим углом носок/пятка
-        // считаются опорными; ширина перехода те же 0.17 (smoothstep → плавно, без скачка контакта).
+        // formules.txt §49.1 (стр.3961): распределение опоры heel/toe по ГЕОМ. наклону стопы
+        // m_footPitchZ = (pBall.z−pHeel.z)/sep (точки §37.6, считается ниже на стр.3505+).
+        // Порог 0.17 = sin(9.8°) — угол перехода HS/TO (heel-strike/toe-off, §49.1); ширина та же
+        // 0.17 (smoothstep → плавно). >0 ⇒ носок выше пятки ⇒ опора на пятку.
         const double heelContactWR_pre = sstep_local((m_footPitchZR - 0.17) / 0.17);
         const double toeContactWR_pre  = sstep_local((-m_footPitchZR - 0.17) / 0.17);
         const double heelContactWL_pre = sstep_local((m_footPitchZL - 0.17) / 0.17);
@@ -3499,15 +3500,25 @@ QVector3D LocomotionSolver::update(const Quat& qR,
         m_lowZTicksL = (fkL.z() - fkMinZ < float(m_lowZBandM))
                        ? std::min(m_lowZTicksL + 1, 4096) : 0;
 
-        const double pzR = 2.0 * (qR.x * qR.z - qR.w * qR.y);
-        const double pzL = 2.0 * (qL.x * qL.z - qL.w * qL.y);
+        // formules.txt §37.6/§49.1 (стр.12297,3961): наклон опоры стопы из РЕАЛЬНЫХ контактных
+        // точек pHeel/pBall (обе на z=−0.08 в локале стопы ⇒ нулевая база у плоской стопы), а не
+        // из кватернионной проксы. Тождество проверено локально (numpy, расхождение ~1e-16):
+        //   (pBall.z − pHeel.z)/sep ≡ 2(qx·qz − qw·qy) — та же величина, но источник — геометрия §37.6.
+        const QVector3D pHeelL = fb::kFootPointsRight[0].r_local;   // §37.6 пятка (-0.036,0,-0.08)
+        const QVector3D pBallL = fb::kFootPointsRight[3].r_local;   // §37.6 ball  ( 0.140,0,-0.08)
+        const double footSep = std::max(0.05, double(pBallL.x() - pHeelL.x()));
+        const double pzR = double(fox::vec_rotate(pBallL, qR).z()
+                                - fox::vec_rotate(pHeelL, qR).z()) / footSep;
+        const double pzL = double(fox::vec_rotate(pBallL, qL).z()
+                                - fox::vec_rotate(pHeelL, qL).z()) / footSep;
         m_footPitchZR = (1.0 - a030) * m_footPitchZR + a030 * pzR;
         m_footPitchZL = (1.0 - a030) * m_footPitchZL + a030 * pzL;
 
         auto sstep = [](double x){ x = std::clamp(x,0.0,1.0); return x*x*(3.0-2.0*x); };
         const bool poseAllowsHeelLift = (m_pose == PoseSquat || m_pose == PoseSit);
-        // Эвристика движка (НЕ в formules.txt): отрыв пятки при сильном носок-вниз только в приседе/сидя.
-        // Порог 0.36 = sin(21°), ширина 0.19 (smoothstep); EMA a010 + гистерезис >0.5 гасят дребезг.
+        // formules.txt §49.1 (стр.3961): отрыв пятки (heel-off, HO) по ГЕОМ. наклону m_footPitchZ
+        // (=(pBall.z−pHeel.z)/sep, точки §37.6) только в приседе/сидя. Порог 0.36 = sin(21°) — угол
+        // HO; ширина 0.19 (smoothstep); EMA a010 + гистерезис >0.5 гасят дребезг. <−0.36 ⇒ носок ниже пятки.
         const double hlR_raw = poseAllowsHeelLift
                 ? sstep((-m_footPitchZR - 0.36) / 0.19) : 0.0;
         const double hlL_raw = poseAllowsHeelLift
@@ -4481,22 +4492,31 @@ struct FingerBaselineState {
 };
 static FingerBaselineState g_fingerBaseline;
 
+// formules.txt §26.4 (стр.32057)/§91 (стр.32081): реальные длины фаланг из модели
+// fox_definitions.xsb (Прил. E, FoxSkel.{left,right}Hand.segmentsN.points, стр.6052-6534).
+// Структура §91: каждый палец = MC,PP,MP,DP (большой — MC,PP,DP, без MP). Рендер рисует
+// цепочку wrist→slot0→slot1→slot2→slot3 (kFingerChains), т.е. wrist→slot0 = МЕТАКАРПАЛ
+// (его длина заложена в kFingerBaseOffset, позиция MCP), а bone[0..2] = PP,MP,DP.
+// Столбцы: [0]=PP, [1]=MP (DP для большого), [2]=DP (0 для большого), [3]=MC (для
+// трассируемости к xsb; геометрически метакарпал представлен kFingerBaseOffset).
 static const double kFingerBoneLen[5][4] = {
-    { 0.046, 0.031, 0.025,  0.000 },
-    { 0.068, 0.039, 0.022,  0.0156 },
-    { 0.064, 0.045, 0.026,  0.0166 },
-    { 0.058, 0.040, 0.025,  0.0156 },
-    { 0.053, 0.032, 0.018,  0.0124 },
+    { 0.0311, 0.0311, 0.0000,  0.0354318 },  // большой: PP,DP,(нет MP),MC  (xsb seg2-4)
+    { 0.0414, 0.0226, 0.0203,  0.0572504 },  // указат.: PP,MP,DP,MC        (xsb seg5-8)
+    { 0.0453, 0.0268, 0.0213,  0.0555000 },  // средний: PP,MP,DP,MC        (xsb seg9-12)
+    { 0.0430, 0.0255, 0.0215,  0.0538932 },  // безым.:  PP,MP,DP,MC        (xsb seg13-16)
+    { 0.0359, 0.0195, 0.0207,  0.0511957 },  // мизинец: PP,MP,DP,MC        (xsb seg17-20)
 };
 
-// formules.txt §37.3 (стр. 12245): геометрия пясти — длина 0.027 м, разнос 0.0274 м (Y±, зеркало L/R).
-// Базы пальцев на карпусе; thumb базовая точка (0.027,0.0274,0) совпадает с §37.3 точно.
+// formules.txt §91/§37.3: позиция MCP-сустава в системе кисти (правая) = точка карпуса
+// (xsb seg1, стр.6052/6378) + метакарпал. Ось кода: X=вперёд(к пальцам)=xsb.Y, Y=боковая=
+// xsb.X, Z=вверх. forward = carpus.Y + MC; lateral = carpus.X. Левая кисть — Y-зеркало
+// (mirrorManusL). Проверено локально: кончик среднего пальца ≈0.185 м от запястья (§17.3).
 static const QVector3D kFingerBaseOffset[5] = {
-    QVector3D(0.027f,  0.0274f,  0.000f),
-    QVector3D(0.080f,  0.0121f,  0.000f),
-    QVector3D(0.083f,  0.000f,   0.000f),
-    QVector3D(0.080f, -0.0121f,  0.000f),
-    QVector3D(0.075f, -0.0274f,  0.000f),
+    QVector3D(0.0628f,  0.0270f,  0.000f),   // большой  (carpus 0.027,0.0274 + MC 0.0354)
+    QVector3D(0.0916f,  0.0121f,  0.000f),   // указат.  (carpus 0.0121,0.0343 + MC 0.0573)
+    QVector3D(0.0917f,  0.0000f,  0.000f),   // средний  (carpus 0,0.0362 + MC 0.0555)
+    QVector3D(0.0882f, -0.0122f,  0.000f),   // безым.   (carpus -0.0122,0.0343 + MC 0.0539)
+    QVector3D(0.0810f, -0.0218f,  0.000f),   // мизинец  (carpus -0.0218,0.0298 + MC 0.0512)
 };
 
 static const double kSpreadSign[5] = { +1.0, +1.0, +1.0, +1.0, +1.0 };
@@ -4657,9 +4677,9 @@ static void parseErgoHand(const float* degs20, bool isLeft,
         (void)a3;
 
         if (f > 0) {
-            // formules.txt §32547: theta_DIP ~ 0.7·theta_PIP (приближённо, «DIP следует за PIP» §32044).
-            // 2/3≈0.667 — в пределах «приближённо»; коэффициент из модели кисти.
-            const double a3Linked = (2.0 / 3.0) * a2c;
+            // formules.txt §1101.4/§32547 (стр.32547): theta_DIP ≈ 0.7·theta_PIP («DIP следует
+            // за PIP» §32044). Приведено к точному 0.7 из спеки (было 2/3≈0.667).
+            const double a3Linked = 0.7 * a2c;
             a3c = std::clamp(a3Linked, Lm[2].flexMin, Lm[2].flexMax);
         }
 
@@ -9004,14 +9024,19 @@ void NewSessionWizard::onCaptureTick()
         const Quat& qRefN = fox::body::kRefQuatN[i];
         const Quat& qRefT = fox::body::kRefQuatT[i];
 
-        // formules.txt §174 (стр. 4843): qAlign = q_eta ⊗ conj(q_S_avg) ⊗ q_bs.
-        // В КОДЕ умножаем на q_bs.conj(), а НЕ на q_bs: kSensorToBone.q_bs хранится в
-        // обратном (bone→sensor) смысле относительно спеки, поэтому корректная пара —
-        // conj(q_bs). Проверено численно (seg=RUpperArm): при штатном монтаже
-        // qAvgN ≈ kRefQuatN ⇒ qAlign ≈ conj(q_bs) ⇒ невязка qResid = qAlign⊗q_bs ≈ 1
-        // (residDeg ≈ 0, см. стр. 8942). Литеральное «⊗ q_bs» дало бы ~160° ошибки.
-        // Решатель и метрика невязки согласованы на этой конвенции — НЕ менять на
-        // «⊗ q_bs» без перекалибровки на железе (formules.txt §174 стр. 4847).
+        // formules.txt §174/§1160 ШАГ4 (стр. 4843): qAlign = q_eta ⊗ conj(q_S_avg) ⊗ q_bs.
+        // ОТЛИЧИЕ КОДА ОТ БУКВАЛЬНОЙ СПЕКИ (зафиксировано, проверено):
+        //  • код умножает на conj(q_bs), а не на q_bs (стр.9017);
+        //  • невязка ниже (9041) = угол(qAlign⊗q_bs), а §174 ШАГ5 (стр.4847) = 2·acos(|q_align.w−q_bs.w|).
+        // ПРИЧИНА НЕ в «инвертированном хранении» q_bs: хранимый kSensorToBone[10].q_bs =
+        // (0.692346,0.147448,0.046195,-0.704828) ПОБАЙТОВО совпадает с formules стр.6382/21299
+        // (sensor→bone), q_bs НЕ инвертирован. Отличие связано с тем, что qAlign применяется в
+        // рантайме НЕ умножением ориентации, а pre-rotation измерений acc/gyr/mag на s2sInv
+        // ПЕРЕД фьюжном (см. стр.6019-6024) — фьюжн сразу выдаёт ориентацию кости.
+        // СТАТУС: эта конвенция самосогласована (qResid=qAlign⊗q_bs≈1 ⇒ residDeg≈0, см. 9041-9045),
+        // но требует подтверждения на железе через self-check «--test» (печать «[calib §174.6]»,
+        // 9047): residDeg всех сегментов ≤5° (§174 ШАГ5). НЕ менять формулу на «⊗ q_bs» до тех пор,
+        // пока self-check на реальных данных не покажет расхождение — иначе риск сломать калибровку.
         const Quat qAlignN = quat_mult(
             quat_mult(qRefN, qAvgN.conj()),
             q_bs.conj()).normalized();
