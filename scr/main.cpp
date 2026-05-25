@@ -784,6 +784,9 @@ private:
 // нормальные уравнения JᵀWJ·dx = −JᵀWr решаются Eigen LDLT (Холецкий, §18.1 —
 // численно эквивалентно QR/Гивенсу §13.2б), направления невязок берутся ТОЧНО
 // через quat_log/atan2 (превосходит minimax-аппроксимацию §13.2д solverRationalRatio).
+// Маппинг §59 (FOX_SparseChol, оконная система N~33600): здесь решается ПЕР-КАДРОВАЯ
+// плотная система DOF=69 (23×3) через Eigen LDLT (быстро, A=JᵀWJ PD §59.7), а оконное
+// RTS-сглаживание вынесено в BatchSmoother (§XV). Сверено численно: блок II (quat_log).
 class BodyPoseSolver {
 public:
     struct Diag {
