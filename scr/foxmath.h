@@ -26,6 +26,7 @@ struct Quat {
             && std::isfinite(y) && std::isfinite(z);
     }
 
+    // §1.2/§1148 нормировка кватерниона; вырождение |q|^2<1e-24 -> тождественный (formules.txt)
     Quat normalized() const {
         const double n2 = w*w + x*x + y*y + z*z;
         if (!std::isfinite(n2) || n2 < 1e-24) return Quat(1, 0, 0, 0);
@@ -35,6 +36,7 @@ struct Quat {
 
     Quat conj() const { return Quat(w, -x, -y, -z); }
 
+    // §2092 обратный кватернион q^-1 = conj(q)/|q|^2; вырождение |q|^2<1e-12 -> тождественный (formules.txt)
     Quat inv() const {
         const double n2 = w*w + x*x + y*y + z*z;
         if (!std::isfinite(n2) || n2 < 1e-12) return Quat(1, 0, 0, 0);
@@ -57,6 +59,7 @@ Quat slerp_quat(const Quat& a, const Quat& b, double t);
 
 double quat_angle_deg(const Quat& q);
 
+// §115/§1280 безопасный asin/acos с зажимом аргумента в [-1,1] (formules.txt)
 inline double clamp_asin(double x) {
     if (x <= -1.0) return -M_PI_2;
     if (x >=  1.0) return  M_PI_2;
@@ -93,6 +96,9 @@ inline Quat mirror_y_quat(const Quat& q) {
     return Quat(q.w, -q.x, q.y, -q.z);
 }
 
+// §13[д]/§38 устойчивая рациональная форма решателя позы (взвеш. МНК):
+//   s = sqrt(C2 - C1*b^2); ratio = (x*s + C2)/(x*s + C2 - C1) = 1 + C1/(x*s + C2 - C1);
+//   dir = b / sqrt(b^2 + d^2*ratio^2). C2-C1 = 40408301.6 (formules.txt §13, §38)
 constexpr double kSolverC1 = 272332.63;
 constexpr double kSolverC2 = 40680634.23;
 inline double solverRationalRatio(double x, double b) {
@@ -110,6 +116,7 @@ inline double solverDirection(double x, double b, double d) {
     return (denom < 1e-18) ? 0.0 : b / denom;
 }
 
+// §1.3/§1149 каноникализация знака (непрерывность полушария): инверсия при dot(q,prev)<0 (formules.txt)
 inline Quat hemisphereContinuous(const Quat& q, const Quat& prev) {
     const double dot = q.w*prev.w + q.x*prev.x + q.y*prev.y + q.z*prev.z;
     return (dot < 0.0) ? Quat(-q.w, -q.x, -q.y, -q.z) : q;
