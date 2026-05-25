@@ -5933,7 +5933,9 @@ void MocapReceiver::run()
                 const QVector3D gyrSI(float(phiX * I.freqHz),
                                       float(phiY * I.freqHz),
                                       float(phiZ * I.freqHz));
-                // formules:90106 sensor gyr=rad/s → Fusion ждёт gyr в °/s и acc в g (xio convention).
+                // formules.txt §43.2 (стр. 3430)/§43.10: FoxKF ждёт gyr в °/с (×180/π) и acc в g
+                // (÷9.812687, §2673). dt=STF·1e-4 (Xsens sample-time-fine, тик 0.1мс) или 1/SampleRate
+                // (nominalT §43.2). Сенсор даёт rad/s и м/с². Конвертация подтверждена.
                 accForFilter = accSI * float(kMs2ToG);
                 gyrForFilter = gyrSI * float(kRadToDeg);
                 fuseReady = true;
