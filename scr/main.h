@@ -16,6 +16,7 @@
 #include <QtGui/QVector2D>
 #include <QtGui/QVector3D>
 #include <QtOpenGLWidgets/QOpenGLWidget>
+#include <QtWidgets/QCheckBox>
 #include <QtWidgets/QComboBox>
 #include <QtWidgets/QDialog>
 #include <QtWidgets/QDoubleSpinBox>
@@ -640,10 +641,17 @@ public:
     struct Result {
         bool     useGloves = false;
         SuitType suit      = SuitType::Awinda;
+        fox::body::Gender gender = fox::body::GenderMale;
         double heightCm = 175.0;
         double footLengthCm = 26.0;
         double armSpanCm = 0.0;
         double legLengthCm = 0.0;
+
+        double upperArmCm = 0.0;
+        double forearmCm  = 0.0;
+        double handCm     = 0.0;
+        double thighCm    = 0.0;
+        double shankCm    = 0.0;
 
         double hipWidthCm      = 0.0;
         double shoulderWidthCm = 0.0;

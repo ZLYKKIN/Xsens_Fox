@@ -11,29 +11,27 @@
 
 ---
 
-> ⚠️ **Work in progress — not stable yet, needs a lot of work.**
-> This version still has rough edges and known bugs across calibration,
-> tracking, streaming and recording. It is usable for experimentation,
-> but it is **not production-ready** and needs serious further development.
+> ⚠️ **Beta test — unstable, work in progress.**
+> Fox Mocap is currently in **beta testing** and does **not work reliably yet**.
+> Expect crashes, drift, mis-calibrations, streaming glitches and missing features
+> across calibration, tracking, streaming and recording. Use it only for
+> experimentation — **it is not production-ready**.
+>
+> Bug reports → Telegram: [**@ZLYKKIN_FOX**](https://t.me/ZLYKKIN_FOX).
 >
 > **Free forever — and free for everyone.** Fox Mocap is free now and will always stay
 > free; it will never become paid software.
 >
-> **I'd be very glad for help.** If you can contribute — bug fixes,
-> calibration/streaming improvements, testing, ideas — please open an
-> issue or a pull request. Any help moving the project forward is welcome.
+> ⚠️ **Бета-тест — нестабильно, в разработке.**
+> Fox Mocap сейчас находится в **бета-тестировании** и **работает нестабильно**.
+> Возможны крэши, дрейф, ошибки калибровки, сбои стриминга и недостающие функции
+> в калибровке, трекинге, стриминге и записи. Используйте только для
+> экспериментов — **проект не готов для продакшена**.
 >
-> ⚠️ **В разработке — пока не стабильна, требует больших доработок.**
-> В этой версии остаются шероховатости и известные баги в калибровке,
-> трекинге, стриминге и записи. Ею можно пользоваться для экспериментов,
-> но она **не готова для продакшена** и требует серьёзной доработки.
+> Сообщения о багах → Telegram: [**@ZLYKKIN_FOX**](https://t.me/ZLYKKIN_FOX).
 >
 > **Бесплатна навсегда — и для всех.** Fox Mocap бесплатна сейчас и останется бесплатной
 > всегда; платной она не станет никогда.
->
-> **Буду очень рад помощи.** Если можете помочь с доработкой — исправления
-> багов, улучшения калибровки/стриминга, тестирование, идеи — открывайте
-> issue или pull request. Любая помощь в развитии проекта приветствуется.
 
 ---
 
@@ -191,18 +189,8 @@ Each is the vendor's own signed installer — Fox Mocap just runs them.
 
 ---
 
-## Maintainer note
+## Contact / Контакт
 
-> Real life keeps me from giving Fox Mocap as much time as it deserves
-> right now, so the project moves in slow bursts rather than a steady
-> stream. If you stumble on a bug or quirk — please still open an issue
-> or, even better, a small focused pull request with a fix. I read
-> everything and merge solid contributions even when I cannot drive new
-> features myself. Thank you for understanding!
-
----
-
-## Contact
-
+- Telegram (preferred for bug reports / предпочтительно для багрепортов):
+  [**@ZLYKKIN_FOX**](https://t.me/ZLYKKIN_FOX)
 - GitHub issues / PRs: [ZLYKKIN/Xsens_Fox](https://github.com/ZLYKKIN/Xsens_Fox/issues)
-- Telegram: [**@ZLYKKIN_FOX**](https://t.me/ZLYKKIN_FOX) — quick questions, mocap-rig advice, bug reports that don't fit a GitHub issue

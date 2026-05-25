@@ -3324,6 +3324,7 @@ QVector3D LocomotionSolver::update(const Quat& qR,
                                        const QVector3D& fkLTip,
                                        double t)
     {
+        namespace fb = fox::body;
 
         const double dt = m_haveLast ? std::clamp(t - m_lastT, 1e-3, 0.1) : 0.01;
 
