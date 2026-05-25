@@ -8634,6 +8634,7 @@ void NewSessionWizard::onCaptureTick()
     }
     m_prevSnap = snap; m_havePrev = true;
 
+    // §XIII/§XVII порог неподвижности при сборе калибровочной позы (движение сегмента < 0.025 рад)
     constexpr double kStillRad = 0.025;
     const bool still = second < kStillRad;
 
@@ -9073,6 +9074,7 @@ void NewSessionWizard::finishCalibrationAsl()
             QString style = "color:#9B9B9B;";
             if (!rep.haveData) {
                 msg   = Lang::t("asl_no_data");
+            // §XXVII тревога SPC: средняя макс. вероятность класса < 0.35 -> неуверенное размещение датчиков
             } else if (rep.suitUncertaintyAlarm || rep.avgMaxP < 0.35f) {
                 msg   = Lang::t("asl_low_confidence");
             } else if (rep.mismatches.isEmpty()) {
