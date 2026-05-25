@@ -89,11 +89,17 @@ void jacobiSym4(double A[4][4], double U[4][4]);
 
 Quat quat_pow(const Quat& q, double t);
 
-// formules §4040: сагиттальное L/R зеркало вращения (keep y, negate x,z).
+// formules.txt (стр. 4040): сагиттальная L/R-симметрия. Для кватерниона поворота —
+// зеркало через плоскость XZ: keep w,y, negate x,z (вектор позиции: Y-lateral инверт.).
 inline Quat mirror_y_quat(const Quat& q) {
     return Quat(q.w, -q.x, q.y, -q.z);
 }
 
+// formules.txt §13.2д (стр. 10185-10192): устойчивая рациональная форма решателя
+// (minimax-аппроксимация неэлементарной функции; C1/C2 «подогнаны», стр. 13099).
+// Живой решатель BodyPoseSolver (§13.2/§18.1) считает направление/угол ТОЧНО через
+// quat_log/atan2 и эту аппроксимацию НЕ использует; функции прогоняются как
+// self-check (--test) на тождество ratio=(x·s+C2)/(x·s+C2−C1)=1+C1/(x·s+C2−C1).
 constexpr double kSolverC1 = 272332.63;
 constexpr double kSolverC2 = 40680634.23;
 inline double solverRationalRatio(double x, double b) {

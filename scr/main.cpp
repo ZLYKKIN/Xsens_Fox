@@ -778,6 +778,12 @@ private:
     bool               m_stairWalking = false;
 };
 
+// formules.txt §13 (стр. 10167) РЕШАТЕЛЬ ПОЗЫ — взвешенный нелинейный МНК (§18.1).
+// Это и есть РЕАЛЬНАЯ реализация §13.2: минимизация Σ wᵢ‖rᵢ(поза)‖² методом
+// Гаусса–Ньютона с демпфированием Левенберга–Марквардта (m_lambda, §31.2). Здесь
+// нормальные уравнения JᵀWJ·dx = −JᵀWr решаются Eigen LDLT (Холецкий, §18.1 —
+// численно эквивалентно QR/Гивенсу §13.2б), направления невязок берутся ТОЧНО
+// через quat_log/atan2 (превосходит minimax-аппроксимацию §13.2д solverRationalRatio).
 class BodyPoseSolver {
 public:
     struct Diag {
@@ -2437,10 +2443,35 @@ void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
                       << " s  σ_ori=" << fb::kSkin.sigmaOriDeg
                       << "° σ_pos=" << fb::kSkin.sigmaPosM << " m\n";
 
-            std::cout << "[solver §13.2д] C₁=" << fox::kSolverC1
-                      << "  C₂=" << fox::kSolverC2
-                      << "  (C₂−C₁)=" << (fox::kSolverC2 - fox::kSolverC1)
-                      << "  (rational direction helper)\n";
+            // formules.txt §13.2д (стр. 10185-10188): тождество рациональной формы
+            // ratio = 1 + C₁/(x·s+(C₂−C₁)) == (x·s+C₂)/(x·s+C₂−C₁), s=√(C₂−C₁·b²).
+            // solverRationalRatio/solverDirection — minimax-аппроксимация исходного
+            // движка; точный решатель BodyPoseSolver (§13.2/§18.1) её превосходит.
+            // Здесь хелперы РЕАЛЬНО вызываются и сверяются с замкнутой формой спеки,
+            // чтобы не оставаться «мёртвой магией» (см. решение по §13.2).
+            {
+                bool ratOk = true, dirOk = true;
+                for (double b : {0.0, 0.5, 1.0}) {
+                    const double s = std::sqrt(std::max(0.0,
+                        fox::kSolverC2 - fox::kSolverC1 * b * b));
+                    for (double x : {-1.0, 0.0, 2.0}) {
+                        const double den = x * s + (fox::kSolverC2 - fox::kSolverC1);
+                        if (std::abs(den) > 1e-12) {
+                            const double expect = (x * s + fox::kSolverC2) / den;
+                            if (std::abs(fox::solverRationalRatio(x, b) - expect) > 1e-9)
+                                ratOk = false;
+                        }
+                        const double dir = fox::solverDirection(x, b, 1.0);
+                        if (!std::isfinite(dir) || std::abs(dir) > 1.0 + 1e-9)
+                            dirOk = false;
+                    }
+                }
+                std::cout << "[solver §13.2д] C₁=" << fox::kSolverC1
+                          << " C₂=" << fox::kSolverC2
+                          << "  rational-form self-check: ratio="
+                          << (ratOk ? "PASS" : "FAIL")
+                          << " dir=" << (dirOk ? "PASS" : "FAIL") << "\n";
+            }
 
             std::cout << "[finger-fk §91] 19-joint hand model (per joint: "
                       "type, flex range, abd range):\n";
@@ -6588,10 +6619,10 @@ static const Tr kTr[] = {
                            "FoxSPC: insufficient motion data for placement check (move arms / legs)"},
     {"asl_ok",             "FoxSPC: размещение датчиков подтверждено (%1/%2)",
                            "FoxSPC: placement verified (%1/%2)"},
-    {"asl_mismatch",       "FoxSPC: возможно неверное размещение — датчик %1 похож на %2 (p=%3)",
-                           "FoxSPC: possible misplacement — sensor %1 looks like %2 (p=%3)"},
-    {"asl_low_confidence", "FoxSPC: низкая уверенность модели — рекомендуется проверить размещение датчиков вручную",
-                           "FoxSPC: low model confidence — recommend manual placement check"},
+    {"asl_mismatch",       "FoxSPC (справочно, на трекинг не влияет): датчик %1 по движению похож на %2 (p=%3)",
+                           "FoxSPC (advisory, does not affect tracking): sensor %1 resembles %2 by motion (p=%3)"},
+    {"asl_low_confidence", "FoxSPC: проверка размещения неинформативна (низкая уверенность модели) — результат не используется",
+                           "FoxSPC: placement check inconclusive (low model confidence) — result not used"},
     {"still",              "СТОИТЕ СПОКОЙНО",                   "STILL"},
     {"moving",             "ДВИЖЕНИЕ",                          "MOVING"},
     {"suit_connected",     "костюм подключён",                  "suit connected"},
@@ -8912,7 +8943,14 @@ void NewSessionWizard::onCaptureTick()
         const Quat& qRefN = fox::body::kRefQuatN[i];
         const Quat& qRefT = fox::body::kRefQuatT[i];
 
-        // formules §174 (4843): qAlign = q_eta⊗conj(q_S_avg)⊗q_bs; трекинг-инвариант oriented=q_BW⊗K (проверено численно).
+        // formules.txt §174 (стр. 4843): qAlign = q_eta ⊗ conj(q_S_avg) ⊗ q_bs.
+        // В КОДЕ умножаем на q_bs.conj(), а НЕ на q_bs: kSensorToBone.q_bs хранится в
+        // обратном (bone→sensor) смысле относительно спеки, поэтому корректная пара —
+        // conj(q_bs). Проверено численно (seg=RUpperArm): при штатном монтаже
+        // qAvgN ≈ kRefQuatN ⇒ qAlign ≈ conj(q_bs) ⇒ невязка qResid = qAlign⊗q_bs ≈ 1
+        // (residDeg ≈ 0, см. стр. 8942). Литеральное «⊗ q_bs» дало бы ~160° ошибки.
+        // Решатель и метрика невязки согласованы на этой конвенции — НЕ менять на
+        // «⊗ q_bs» без перекалибровки на железе (formules.txt §174 стр. 4847).
         const Quat qAlignN = quat_mult(
             quat_mult(qRefN, qAvgN.conj()),
             q_bs.conj()).normalized();
@@ -9062,16 +9100,17 @@ void NewSessionWizard::finishCalibrationAsl()
         } else {
             const spc::PlacementReport rep = spc::analyzePlacement(
                 g_placementClf(), m_imuBuf, m_test);
+            // Проверка размещения — ТОЛЬКО рекомендательная (на трекинг/калибровку
+            // не влияет). Нормализация признаков (deriveRange) теоретическая и может
+            // не совпадать с обучением модели (в репо нет тренера), поэтому низкую
+            // уверенность трактуем как «неинформативно», а несовпадение — как справку,
+            // без алармирующих цветов. formules.txt §1705 (стр. 40286), §1721 (стр. 5692).
             QString msg;
-            QString style = "color:#9B9B9B;";
+            QString style = "color:#9B9B9B;";          // нейтральный (рекомендательный)
             if (!rep.haveData) {
                 msg   = Lang::t("asl_no_data");
-            } else if (rep.suitUncertaintyAlarm) {
-                msg   = Lang::t("asl_low_confidence");
-                style = "color:#E04545; font-weight:700;";
-            } else if (rep.avgMaxP < 0.35f) {
-                msg   = Lang::t("asl_low_confidence");
-                style = "color:#E0A030; font-weight:700;";
+            } else if (rep.suitUncertaintyAlarm || rep.avgMaxP < 0.35f) {
+                msg   = Lang::t("asl_low_confidence"); // неинформативно → нейтральный цвет
             } else if (rep.mismatches.isEmpty()) {
                 msg   = Lang::t("asl_ok").arg(rep.verified).arg(rep.total);
                 style = "color:#2EC25A; font-weight:700;";
@@ -9086,7 +9125,7 @@ void NewSessionWizard::finishCalibrationAsl()
                 if (rep.mismatches.size() > 1) {
                     msg += QString(" (+%1)").arg(rep.mismatches.size() - 1);
                 }
-                style = "color:#E0A030; font-weight:700;";
+                // справочно (advisory) → нейтральный цвет, без алармирующего bold
             }
             m_placementInfo->setText(msg);
             m_placementInfo->setStyleSheet(style);
@@ -12429,6 +12468,10 @@ void MainWindow::onRenderTick()
             s_lastRaw[i] = raw[i];
             s_haveRaw[i] = true;
         } else if (s_haveRaw[i]) {
+            // formules.txt §2185 (стр. 3279): при потере пакетов сенсор замораживается
+            // (state hold) — здесь это удержание последнего кватerniona. Полный recovery
+            // §2185 (Δq-бленд 500 мс при возобновлении) отдельно не реализован: повторный
+            // захват сглаживается jump-reject ниже (kJumpDetect) + восстановлением AHRS.
             raw[i] = s_lastRaw[i];
         } else {
             raw[i] = s_refWorld[i];

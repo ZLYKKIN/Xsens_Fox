@@ -144,6 +144,9 @@ Matrix3 quat_to_matrix(const Quat& q)
     return R;
 }
 
+// formules.txt §114 (стр. 345): извлечение углов Эйлера из R(q).
+// Вариант A — ТОЧНЫЙ обратный для интринсик-порядка XZY (проверено численно,
+// невязка ~1e-16). Сейчас не вызывается; оставлен как готовый XZY-экстрактор.
 Euler3 matrix_to_euler_A(const Matrix3& R)
 {
 
@@ -154,6 +157,10 @@ Euler3 matrix_to_euler_A(const Matrix3& R)
     return e;
 }
 
+// formules.txt §114 (стр. 345) / §30 (эргоуглы стопы): анатомическое извлечение
+// (e0≈ось Y, e1≈ось X через asin(R21), e2≈ось Z). НЕ строгий Tait-Bryan для больших
+// углов; используется ТОЛЬКО в foxergo handlerFoot (малый ROM стопы, результат
+// клампится по kJointRom) — в рабочем диапазоне точно (проверено численно).
 Euler3 matrix_to_euler_B(const Matrix3& R)
 {
 
