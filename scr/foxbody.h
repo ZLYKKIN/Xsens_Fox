@@ -1898,8 +1898,6 @@ struct SpcFeatureSpec {
 
 extern const std::array<const char*,     kSpcFeatureCount> kFeatureNames;
 extern const std::array<SpcFeatureSpec,  kSpcFeatureCount> kFeatureSpecs;
-extern const std::array<float,           kSpcFeatureCount> kFeatureMin;
-extern const std::array<float,           kSpcFeatureCount> kFeatureMax;
 
 // §1707 порядок (перестановка) 315 признаков для ONNX-инференса FoxSPC; критичен для совпадения с обученной моделью (formules.txt)
 inline constexpr std::array<int, kSpcFeatureCount> kSpcModelPerm = {{
@@ -1925,7 +1923,10 @@ inline constexpr std::array<int, kSpcFeatureCount> kSpcModelPerm = {{
     308, 300, 301, 302, 303, 313, 314, 309, 310, 311, 312,
 }};
 
-// §1705 мин-макс нормализация 315 признаков (preprocessing перед SVM/ONNX): нижние границы (formules.txt)
+// §1705 мин-макс нормализация 315 признаков (preprocessing перед SVM/ONNX): нижние границы (formules.txt).
+//   ЕДИНСТВЕННЫЙ источник нормализации (из Fox_NN.csv). Порядок — МОДЕЛЬНЫЙ (индекс m), парный к
+//   kFeatureSpecs[kSpcModelPerm[m]] в main.cpp:extractFeatures315. Выравнивание с kSpcModelPerm
+//   проверено локально: 0 нарушений знака в модельном порядке (против 37 при порядке по имени).
 inline constexpr std::array<float, kSpcFeatureCount> kFeatureMinM = {{
     0.0000f, 0.0000f, 0.0000f, 0.0000f, 0.0000f, 0.0000f, -1.0000f, -16.0000f,
     0.0000f, 0.0000f, 0.0000f, 0.0000f, -3.0000f, 0.0000f, 0.0000f, 0.0000f,

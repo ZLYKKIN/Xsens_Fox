@@ -3,7 +3,6 @@
 
 #include <cstring>
 #include <string>
-#include <utility>
 
 namespace fox::body {
 
@@ -212,86 +211,14 @@ SpcFeatureSpec parseFeatureName(const char* name) {
     return out;
 }
 
-// §1705 мин-макс диапазоны нормировки признака по типу статистики: корреляции ±1/±16, skew ±3,
-//   kurtosis -3..30, gyr/acc scalarMax (15/25/40/50/80), var=scalarMax², sum×окно 300 (formules.txt)
-std::pair<float, float> deriveRange(const SpcFeatureSpec& f) {
-    const bool isCorr = f.stat == SpcStat::SameAxisInterSensorCorrMax
-                     || f.stat == SpcStat::SameAxisInterSensorCorrAbsMax
-                     || f.stat == SpcStat::SameAxisInterSensorCorrSum
-                     || f.stat == SpcStat::SameAxisInterSensorCorrAbsSum
-                     || f.stat == SpcStat::SameSensorInterAxisCorrMax
-                     || f.stat == SpcStat::SameSensorInterAxisCorrAbsMax
-                     || f.stat == SpcStat::SameSensorInterAxisCorrSum
-                     || f.stat == SpcStat::SameSensorInterAxisCorrAbsSum;
-    if (isCorr) {
-
-        const bool isSum = f.stat == SpcStat::SameAxisInterSensorCorrSum
-                        || f.stat == SpcStat::SameAxisInterSensorCorrAbsSum;
-        const bool isAbsSum  = f.stat == SpcStat::SameAxisInterSensorCorrAbsSum;
-        const bool isInterAxisSum = f.stat == SpcStat::SameSensorInterAxisCorrSum
-                                 || f.stat == SpcStat::SameSensorInterAxisCorrAbsSum;
-        const bool isAbsMax = f.stat == SpcStat::SameAxisInterSensorCorrAbsMax
-                           || f.stat == SpcStat::SameSensorInterAxisCorrAbsMax;
-        if (isSum)        return isAbsSum ? std::pair{0.0f, 16.0f} : std::pair{-16.0f, 16.0f};
-        if (isInterAxisSum) return std::pair{-2.0f, 2.0f};
-        return isAbsMax ? std::pair{0.0f, 1.0f} : std::pair{-1.0f, 1.0f};
-    }
-    if (f.stat == SpcStat::MaxIdx) {
-
-        return {0.0f, 1.0f};
-    }
-    if (f.stat == SpcStat::Skew) {
-        return {-3.0f, 3.0f};
-    }
-    if (f.stat == SpcStat::Kurtosis) {
-        return {-3.0f, 30.0f};
-    }
-
-    const bool isGyr     = (f.signal == SpcSignal::Gyr);
-    const bool isNorm    = (f.axis   == SpcAxis::Normxyz);
-    const bool isAbs     = (f.axis   == SpcAxis::XAbs || f.axis == SpcAxis::YAbs
-                                                     || f.axis == SpcAxis::ZAbs);
-    const bool isSigned  = !isNorm && !isAbs;
-    const bool isFreq    = (f.band != SpcBand::None);
-
-    constexpr float kWin = 300.0f;
-    float scalarMax = 0.0f;
-    if (isGyr) {
-        scalarMax = isFreq ? 25.0f : 15.0f;
-    } else {
-        scalarMax = isFreq ? 50.0f : 40.0f;
-        if (f.stat == SpcStat::Max && isNorm) scalarMax = 80.0f;
-    }
-    float lo = isSigned ? -scalarMax : 0.0f;
-    float hi = scalarMax;
-    if (f.stat == SpcStat::Sum) {
-        lo *= kWin; hi *= kWin;
-    }
-    if (f.stat == SpcStat::Std || f.stat == SpcStat::Var) {
-        lo = 0.0f;
-        hi = (f.stat == SpcStat::Var) ? scalarMax * scalarMax : scalarMax;
-    }
-    return {lo, hi};
-}
-
+// §1707 FoxSPC: спецификации 315 признаков из их имён (epoch_signal_axis_band_stat).
+// ПРИМ.: мин-макс нормализация берётся ТОЛЬКО из kFeatureMinM/kFeatureMaxM (foxbody.h, §1705,
+//   из Fox_NN.csv). Прежний эвристический deriveRange() удалён — давал приближённые/неверные
+//   значения (maxIdx, scalarMax) и в инференсе (main.cpp computeFeature) не использовался.
 std::array<SpcFeatureSpec, kSpcFeatureCount> buildSpecs() {
     std::array<SpcFeatureSpec, kSpcFeatureCount> out{};
     for (int i = 0; i < kSpcFeatureCount; ++i) {
         out[i] = parseFeatureName(::fox::body::kFeatureNames[i]);
-    }
-    return out;
-}
-std::array<float, kSpcFeatureCount> buildRangeLo() {
-    std::array<float, kSpcFeatureCount> out{};
-    for (int i = 0; i < kSpcFeatureCount; ++i) {
-        out[i] = deriveRange(::fox::body::kFeatureSpecs[i]).first;
-    }
-    return out;
-}
-std::array<float, kSpcFeatureCount> buildRangeHi() {
-    std::array<float, kSpcFeatureCount> out{};
-    for (int i = 0; i < kSpcFeatureCount; ++i) {
-        out[i] = deriveRange(::fox::body::kFeatureSpecs[i]).second;
     }
     return out;
 }
@@ -618,7 +545,5 @@ const std::array<const char*, kSpcFeatureCount> kFeatureNames = {{
 }};
 
 const std::array<SpcFeatureSpec, kSpcFeatureCount> kFeatureSpecs = buildSpecs();
-const std::array<float,          kSpcFeatureCount> kFeatureMin   = buildRangeLo();
-const std::array<float,          kSpcFeatureCount> kFeatureMax   = buildRangeHi();
 
 }

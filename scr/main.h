@@ -81,6 +81,8 @@ extern const char* kSegmentNames[kXsensSegmentCount];
 
 struct WristAnatomicalCfg {
 
+    // §XIX/§5 кисть YXZ: предел сгибания запястья ±80° (1.3963 рад), локтевое/лучевое
+    //   отклонение ±30° (0.5236 рад) (formules.txt стр.645, 1530)
     double maxFlexRad   = 1.3962634015954636;
     double maxLatDevRad = 0.5235987755982988;
     double twistWeight  = 1.0;
@@ -237,6 +239,10 @@ private:
     Side      m_support     = RIGHT;
     QVector3D m_anchor      {0, 0, 0};
 
+    // НАСТРОЙКИ ДЕТЕКТОРА КОНТАКТА/ПОЗЫ (этот блок и блок m_fkxyStableRange.. ниже):
+    //   engine heuristics — эмпирически подобранный конечный автомат foot-lock/позы для рендера.
+    //   Тематически родственны §XIV (контакт с полом, ZUPT) и §XXIII (активности: стоя/сидя/
+    //   присед/лёжа/полёт), но конкретные пороги/скорости/тики НЕ взяты 1:1 из formules.txt.
     double m_stillRad     = 3.00;
     double m_heightMargin = 0.03;
     int    m_latchTicks   = 3;
@@ -296,6 +302,8 @@ private:
         bool      m_heelLiftR          = false;
         bool      m_heelLiftL          = false;
 
+        // §57 длина стопы по умолчанию 0.26 м (≈ footRatio 0.152 × рост 1.75; уточняется
+        //   калибровкой footSize §2006). Используется в геометрии контакта стопы (formules.txt)
         double    m_footLengthM        = 0.26;
 
         double    m_pelvisZVel         = 0.0;
