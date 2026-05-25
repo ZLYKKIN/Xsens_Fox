@@ -878,6 +878,9 @@ struct ImuChipNoise {
     float gainErrorAcc;
     float gainErrorGyr;
 };
+// formules.txt §43.10 (стр. 3658): R_acc/R_gyr/R_mag из спецификации чипа.
+// dynRange 157 м/с² / 2000°/с и gainError 0.004 — совпадают точно (все чипы).
+// W2/X2: s_gyr=0.20° и s_mag=0.028 совпадают с §43.10 (ndCoefficient 0.004·√50≈0.028).
 inline constexpr ImuChipNoise kImuChipNoiseW2 = {
     .sigmaAccMs2     = 0.0232f,
     .sigmaGyrDegS    = 0.20f,
@@ -896,6 +899,10 @@ inline constexpr ImuChipNoise kImuChipNoiseX2 = {
     .gainErrorAcc    = 0.004f,
     .gainErrorGyr    = 0.004f,
 };
+// formules.txt §43.10 (стр. 3675): X3 — «improved precision» (§1699), acc/gyro точнее (отсюда
+// меньшие s_acc/s_gyr из замеров X3). ОТКЛОНЕНИЕ: §43.10 выводит s_mag≈ndCoefficient·√50=0.25·7.07≈1.77,
+// а здесь 0.2215 (≈8× меньше). Это нельзя сверить через эталон без даташита X3 → НЕ меняю
+// (риск over-reject магнита). Рычаг: если на X3 виден дрейф курса — поднять sigmaMagNorm к ~1.77.
 inline constexpr ImuChipNoise kImuChipNoiseX3 = {
     .sigmaAccMs2     = 0.00899f,
     .sigmaGyrDegS    = 0.075f,

@@ -6,6 +6,11 @@
 
 #define KFA_GRAVITY_MS2          9.812687f
 
+// formules.txt §43 (стр. 3394): FoxKF — error-state EKF ориентации одного сенсора.
+// Константы ниже сверены с эталоном и совпадают: §43.10 (стр. 3681) s_acc~0.05, s_gyr~0.2°,
+// s_mag~0.028 (FOX_IMU_w2); §43.1 (стр. 3414) init SD 3.0°/0.4°/0.10/0.20/2.0;
+// §43.3 (стр. 3461) sQvAccLowPass=0.04, sQvMagRandomWalk=0.01; §43.8 (стр. 3600) границы
+// биаса гиро 0.005°/0.07°, magResThresh=0.03, времена 0.6/3.0 с. Адаптация sBg — см. ниже §43.8.
 #define KFA_SIGMA_ACC_MS2        0.05f
 #define KFA_SIGMA_GYR_DEG_S      0.20f
 #define KFA_SIGMA_MAG_NORM       0.028f
@@ -716,6 +721,8 @@ static void ApplyMagUpdate(FusionAhrs *ahrs, FusionVector m, float dt) {
     ApplyDeltaX(ahrs, dx);
     Joseph_3x15(ahrs->P, H, K, Rdiag);
 
+    // formules.txt §43.8 (стр. 3600): адаптивный s_bg от магнит-резидуала.
+    // f = 0.15 + 0.85·min((r_mag/0.03)²,1); s_bg = max(min, max·f). Совпадает точно.
     const float ratio = ahrs->magResidualNorm / KFA_MAG_RES_THRESH;
     const float clamped = ratio > 1.0f ? 1.0f : ratio;
     const float f = 0.15f + 0.85f * clamped * clamped;
