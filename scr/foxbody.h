@@ -88,6 +88,8 @@ inline constexpr const AnthroProportions& anthroFor(Gender g)
     }
 }
 
+// formules.txt §101 (стр. 31774)/§1753 (стр. 31817): 13 конфигураций костюма.
+// FullBody=17 датчиков (§101.1) — соответствует kSensorPresent ниже (без L5/L3/T12/Neck/Toes).
 enum class ConfigurationLabel : std::uint8_t {
     FullBody = 0,
     FullBodyNoSternum,
