@@ -20,6 +20,10 @@ constexpr double kDeg = 0.017453292519943295;
 
 constexpr Quat kIdent = Quat(1, 0, 0, 0);
 
+// formules.txt §24 (стр. 21097): эталонные позы N/T-pose (точные числа). legacy* — §24.1 (стр. 21106,
+// T-поза) / §24.2 (стр. 21133, N-поза, отличие только в руках). Гендерные male*/female* — §1369
+// (стр. 22364, q_align по мужской модели) / §1672 (стр. 22765, точные q_eta Male N-pose): Pelvis
+// male = 9.0°/+Y → (0.99691733,0,0.0784591,0) и т.д. Все значения сверены grep'ом по formules.txt.
 inline Quat legacySpine(int seg) {
     switch (seg) {
         case 0:  return Quat(0.9984697627340179, 0, 0.05530038793601835, 0);
