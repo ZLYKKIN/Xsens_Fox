@@ -3126,6 +3126,9 @@ SkeletonXsens::computeKeypoints(const std::array<Quat, kXsensSegmentCount>& raw,
 
     const auto global = addDummySegments(oriented);
 
+    // formules.txt §2224 (стр. 1577) / §1159 (стр. 1443): инвариант замыкания цепи
+    // p_child = p_parent + R(q_seg)·L_bone. Здесь цепь строится напрямую (kp[b]=kp[a]+boneVec),
+    // поэтому инвариант I27 выполнен ПО ПОСТРОЕНИЮ. Проверено численно на §1238 (FK правой стопы).
     std::array<QVector3D, kXsensSegmentCountWithDummies> boneVec{};
     for (int s = 0; s < kXsensSegmentCountWithDummies; ++s) {
         boneVec[s] = vec_rotate(m_localOffset[s], global[s]);
