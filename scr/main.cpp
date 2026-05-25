@@ -1564,6 +1564,7 @@ public:
                 const QVector3D r = quat_log(
                     quat_mult(targetFoot, orient[foot].conj()).normalized());
 
+                // §X/§XI σ билатеральной связи ног 0.05 рад -> вес w=1/σ² в МНК (formules.txt)
                 const double sdLegBi = 0.05;
                 const double w_leg = 1.0 / (sdLegBi * sdLegBi);
                 const int rowF = foot * 3;
@@ -2234,6 +2235,7 @@ public:
                                           rFootPitchZ, lFootPitchZ,
                                           rFootVelZ, lFootVelZ, dt);
 
+            // §90/§138.16 точка пятки pHeel (= fb::kFootPointsRight[0].r_local) для CoM/детекции heel-strike
             const QVector3D rHeelW = (*ctx.segCenter)[fb::kSEG_RFoot]
                 + vec_rotate(QVector3D(-0.036f, 0.0f, -0.080f),
                               orient[fb::kSEG_RFoot]);
@@ -2369,7 +2371,7 @@ void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
         static bool antropDumped = false;
         if (!antropDumped) {
             antropDumped = true;
-            const double H = 1.75;
+            const double H = 1.75;  // §57 эталонный рост (= fb::kRefHeightM), только для диагностического дампа
             const double hStand = fb::pelvisStandHeightM(H);
             const double hSit   = fb::pelvisSitHeightM(H);
             const double tLen   = fb::trunkLengthM(H);
@@ -2790,6 +2792,7 @@ void SkeletonXsens::buildLengths(const ActorConfig& actor)
         specLen(fb::kSEG_RShoulder + 1) +
         specLen(fb::kSEG_RShoulder + 2) +
         specLen(fb::kSEG_RShoulder + 3);
+    // §57 полуширина лопаток 0.08 м — опорный размах рук для антропометрической подгонки armSpan
     const double refScapHalfY = 0.08;
     const double refSpanM = 2.0 * refArmOneSide + 2.0 * refScapHalfY;
     const double anthroArmSpanM = 2.0 * (anthro.upperArmRatio + anthro.forearmRatio + anthro.handRatio) * h;
@@ -2842,6 +2845,7 @@ void SkeletonXsens::buildLengths(const ActorConfig& actor)
     auto armLen   = [&](int s) { return float(specLen(s) * armScale);   };
     auto legLen   = [&](int s) { return float(specLen(s) * legScale);   };
 
+    // §57/§XVIII анатомический инсет плеча внутрь от ширины плеч (0.10·trunkScale)
     const double inShoulderOffsetM = 0.10 * trunkScale;
 
     const std::array<float, kXsensSegmentCountWithDummies> L = {
