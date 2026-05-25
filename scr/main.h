@@ -1017,6 +1017,11 @@ public:
     QVector3D sceneShift() const { return m_sceneShift; }
     float sceneYaw() const { return m_sceneYaw; }
     QVector3D freezeAnchor() const { return m_freezeAnchor; }
+    // §35 пин корня по XY в МИРОВОЙ системе при включённой заморозке — общий для вьюпорта/стрима/записи (formules.txt)
+    QVector3D lockPelvisIfFrozen(const QVector3D& worldPelvis) const {
+        if (!m_freezeXY) return worldPelvis;
+        return QVector3D(m_freezeAnchor.x(), m_freezeAnchor.y(), worldPelvis.z());
+    }
 
     const std::array<QVector3D, kXsensKeypointCount>& lastRenderedKeypoints() const { return m_lastRenderedKp; }
     float    lastFloorClamp() const { return m_lastFloorClamp; }
@@ -1049,6 +1054,7 @@ private:
     bool      m_freezeXY   = false;
     QVector3D m_freezeAnchor{0, 0, 0};
     QVector3D m_lastRenderedPelvis{0, 0, 0};
+    QVector3D m_lastWorldPelvis{0, 0, 0};   // §35 таз в мире (до камеры/заморозки) — якорь заморозки
     QVector3D m_lastLocoOffset{0, 0, 0};
 
     std::array<QVector3D, kXsensKeypointCount> m_lastRenderedKp{};
