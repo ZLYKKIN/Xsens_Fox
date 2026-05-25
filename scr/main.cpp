@@ -11860,6 +11860,11 @@ static void hdJointLimits(std::vector<RecordedFrame>& fr, const SkeletonXsens& s
     }
 }
 
+// formules.txt §192 (стр. 74224)/§1380 (стр. 74264)/§1393 (стр. 74293): офлайн HD-постобработка
+// записи (двухпроходное сглаживание для качества/убирания jitter). Здесь — практичный вариант:
+// сглаживание КРИВЫХ поверх уже решённых поз (outlier §54 → quat-smooth §1393 → finger → joint-limits
+// §676 → root-lowpass → ZUPT §52), а не полное пере-решение FoxKF/FoxFE §1380 (то требует хранить
+// сырой IMU на кадр). Улучшает визуальное качество без раздувания формата записи.
 static void runHdPostProcessing(std::vector<RecordedFrame>& fr,
                                 int fps,
                                 const SkeletonXsens* skel,
