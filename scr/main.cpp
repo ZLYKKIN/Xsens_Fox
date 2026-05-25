@@ -1814,8 +1814,8 @@ public:
             const double sl = (rHeelWorld - m_lastHeelR_HS).length();
             const double sh = std::abs(double(rHeelWorld.z() - m_lastHeelR_HS.z()));
             if (m_haveLastHeelR && sl > 0.01 && sl < 2.5) {
-                m_lastStepLengthR = sl;
-                m_lastStepHeightR = sh;
+                m_lastStrideLengthR = sl;
+                m_lastStrideHeightR = sh;
             }
             m_lastHeelR_HS = rHeelWorld;
             m_haveLastHeelR = true;
@@ -1824,8 +1824,8 @@ public:
             const double sl = (lHeelWorld - m_lastHeelL_HS).length();
             const double sh = std::abs(double(lHeelWorld.z() - m_lastHeelL_HS.z()));
             if (m_haveLastHeelL && sl > 0.01 && sl < 2.5) {
-                m_lastStepLengthL = sl;
-                m_lastStepHeightL = sh;
+                m_lastStrideLengthL = sl;
+                m_lastStrideHeightL = sh;
             }
             m_lastHeelL_HS = lHeelWorld;
             m_haveLastHeelL = true;
@@ -1850,10 +1850,10 @@ public:
         }
     }
 
-    double lastStepLengthR() const { return m_lastStepLengthR; }
-    double lastStepLengthL() const { return m_lastStepLengthL; }
-    double lastStepHeightR() const { return m_lastStepHeightR; }
-    double lastStepHeightL() const { return m_lastStepHeightL; }
+    double lastStrideLengthR() const { return m_lastStrideLengthR; }
+    double lastStrideLengthL() const { return m_lastStrideLengthL; }
+    double lastStrideHeightR() const { return m_lastStrideHeightR; }
+    double lastStrideHeightL() const { return m_lastStrideHeightL; }
     double vertCoMOscillationM() const { return m_lastVertCoMOscM; }
     int    heelStrikeCountR() const { return m_heelStrikeR; }
     int    heelStrikeCountL() const { return m_heelStrikeL; }
@@ -1990,10 +1990,10 @@ private:
     QVector3D       m_lastHeelL_HS    {0, 0, 0};
     bool            m_haveLastHeelR   = false;
     bool            m_haveLastHeelL   = false;
-    double          m_lastStepLengthR = 0.0;
-    double          m_lastStepLengthL = 0.0;
-    double          m_lastStepHeightR = 0.0;
-    double          m_lastStepHeightL = 0.0;
+    double          m_lastStrideLengthR = 0.0;
+    double          m_lastStrideLengthL = 0.0;
+    double          m_lastStrideHeightR = 0.0;
+    double          m_lastStrideHeightL = 0.0;
     double          m_comZMin         =  1e9;
     double          m_comZMax         = -1e9;
     bool            m_haveLastCom     = false;
@@ -2244,10 +2244,10 @@ public:
                               << "s  L="
                               << LocomotionClassifier::gaitPhaseName(m_locomotion.gaitPhaseL())
                               << " durL=" << m_locomotion.gaitDurL() << "s  "
-                              << "stepR=" << m_locomotion.lastStepLengthR()
-                              << "m hR=" << m_locomotion.lastStepHeightR() << "m "
-                              << "stepL=" << m_locomotion.lastStepLengthL()
-                              << "m hL=" << m_locomotion.lastStepHeightL() << "m "
+                              << "strideR=" << m_locomotion.lastStrideLengthR()
+                              << "m hR=" << m_locomotion.lastStrideHeightR() << "m "
+                              << "strideL=" << m_locomotion.lastStrideLengthL()
+                              << "m hL=" << m_locomotion.lastStrideHeightL() << "m "
                               << "vertOsc=" << m_locomotion.vertCoMOscillationM() << "m"
                               << "\n";
                     std::cout.flush();
@@ -6699,11 +6699,11 @@ static const Tr kTr[] = {
     {"sns_pelvis",         "таз",                               "pelvis"},
     {"sns_t8",             "грудь",                             "chest"},
     {"sns_head",           "голова",                            "head"},
-    {"sns_r_shoulder",     "правое плечо",                      "r shoulder"},
+    {"sns_r_shoulder",     "правая лопатка",                    "r shoulder"},
     {"sns_r_upper_arm",    "правое плечо",                      "r upper arm"},
     {"sns_r_forearm",      "правое предплечье",                 "r forearm"},
     {"sns_r_hand",         "правая кисть",                      "r hand"},
-    {"sns_l_shoulder",     "левое плечо",                       "l shoulder"},
+    {"sns_l_shoulder",     "левая лопатка",                     "l shoulder"},
     {"sns_l_upper_arm",    "левое плечо",                       "l upper arm"},
     {"sns_l_forearm",      "левое предплечье",                  "l forearm"},
     {"sns_l_hand",         "левая кисть",                       "l hand"},
