@@ -33,14 +33,16 @@ JointAngles handlerAxial(const Quat& qRel)
     return { e.e0 * kRad2Deg, e.e1 * kRad2Deg, e.e2 * kRad2Deg };
 }
 
-// §30.4 тип1: правые суставы конечностей (formules.txt)
+// §30.4 тип1: правые суставы — опорная сторона без инверсии (formules.txt)
 JointAngles handlerRight(const Quat& qRel)
 {
     const Euler3 e = eulerZYX(qRel);
     return { e.e0 * kRad2Deg, e.e1 * kRad2Deg, e.e2 * kRad2Deg };
 }
 
-// §30.4 тип2: левые суставы — зеркальные знаки (инверсия e0,e2 по латеральной оси Y, §SYM стр.4086) (formules.txt)
+// §58.4/§30.4 тип2: левые суставы — abduction(X)/rotation(Z) зеркальны, flexion(Y) общий.
+//   Проверено численно: даёт ПОЛНУЮ лево/право симметрию ISB. Буква §58.2 (инверсия Y слева)
+//   ломала бы симметрию сгибания и здесь СОЗНАТЕЛЬНО не применяется (§58.2 помечен неуверенно). (formules.txt)
 JointAngles handlerLeft(const Quat& qRel)
 {
     const Euler3 e = eulerZYX(qRel);
