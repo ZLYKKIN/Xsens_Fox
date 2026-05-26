@@ -13,6 +13,13 @@
 #define KFA_SIGMA_GYR_DEG_S      0.20f
 #define KFA_SIGMA_MAG_NORM       0.028f
 
+// §IX/§43 полно-ориентационная гравитационная коррекция (эталон Ozonised/Kalman-AHRS):
+//   ширина доверия по |a|≈g; σ невязки (рад) для статики/динамики; пол диагонали P ориентации.
+#define KFA_ACC_TRUST_WIDTH      0.10f      // доля g: |a| в пределах ±10% g => «статика»
+#define KFA_ACC_SIG_STATIC_RAD   0.05f      // статика: малая σ => быстрое выравнивание по гравитации
+#define KFA_ACC_SIG_DYN_RAD      5.0f       // динамика: большая σ => акселерометр почти игнорируется
+#define KFA_ACC_P_ORIENT_FLOOR   1.218e-3f  // (2°)² рад²: держит усиление коррекции живым
+
 // §IX начальные СКО состояния (диагональ P0): ориент. 3°, смещ. гиро 0.4°, смещ. акс. 0.10 м/с², mag 0.20, скорость 2 м/с
 #define KFA_INIT_SD_ORIENT_DEG   3.0f
 #define KFA_INIT_SD_GYRBIAS_DEG  0.4f
@@ -485,82 +492,76 @@ static void UpdateLPAAndDivMon(FusionAhrs *ahrs, FusionVector aSensorMs2, float 
     else                                                        ahrs->tauM0 = KFA_TAU_M0_MED_S;
 }
 
-// §IX шаг КОРРЕКЦИИ FoxKF по акселерометру: измерение гравитации R(q)·(0,0,-g), невязка, усиление Калмана (formules.txt)
+// §IX/§43 шаг КОРРЕКЦИИ FoxKF по акселерометру — ПОЛНО-ОРИЕНТАЦИОННАЯ коррекция гравитации.
+//   Невязка = поворот, совмещающий ПРЕДСКАЗАННОЕ направление гравитации с ИЗМЕРЕННЫМ; он определён
+//   вплоть до 180°, поэтому «перевёрнутая» оценка ВЫРАВНИВАЕТСЯ обратно, а не залипает. Прежняя
+//   линеаризованная невязка r=a−R(q)⁻¹g с H=skew(hAcc) при ошибке ~180° вырождалась (невязка
+//   становилась радиальной, в нуль-пространстве H) — сегмент «кувыркался» и держал accErr≈2g всю
+//   сцену. Доверие к акселерометру задаётся по |a|≈g (статика ⇒ доверяем, динамика ⇒ ведёт гироскоп),
+//   что отвергает линейное ускорение без жёсткого гейта. (Эталон: Ozonised/Kalman-AHRS.) (formules.txt §43)
 static void ApplyAccUpdate(FusionAhrs *ahrs, FusionVector aSensorMs2) {
-    if (ahrs->dAccHighTime > KFA_ACCDIV_HIGH_HOLD_S) {
-        // Anti-deadlock recovery. The gate exists to reject *dynamic* acceleration, but a
-        //   merely wrong orientation also inflates dAcc, which then keeps the gate shut so
-        //   the accelerometer can never re-level it — a permanent lock-out. Distinguish the
-        //   two by the specific-force magnitude: if |a| ~= g the segment is (quasi-)static
-        //   and the large residual is orientation error, not motion, so re-open the gate and
-        //   let the (now bias-free) gravity update pull the orientation back to level.
-        const float aN = FusionVectorNorm(aSensorMs2);
-        if (fabsf(aN - KFA_GRAVITY_MS2) < 0.15f * KFA_GRAVITY_MS2) {
-            ahrs->dAccHighTime = 0.0f;
-        } else {
-            ahrs->accUsedThisFrame = false;
-            return;
-        }
-    }
-
-    const FusionVector gWorld  = { .axis = { 0.0f, 0.0f, +KFA_GRAVITY_MS2 } };
-    FusionVector hAcc    = RotByQInv(ahrs->q, gWorld);
-    const float skinAng = ahrs->skinPhiScalar;
-    if (fabsf(skinAng) > 1e-6f) {
-        const float c = cosf(skinAng);
-        const float s = sinf(skinAng);
-        const float gx = hAcc.axis.x;
-        const float gy = hAcc.axis.y;
-        const float invXy = 1.0f / sqrtf(gx * gx + gy * gy + 1e-12f);
-        const float ax = -gy * invXy;
-        const float ay = +gx * invXy;
-        const float az = 0.0f;
-        const FusionVector hRot = {{
-            (c + ax * ax * (1.0f - c))             * hAcc.axis.x
-              + (ax * ay * (1.0f - c) - az * s)    * hAcc.axis.y
-              + (ax * az * (1.0f - c) + ay * s)    * hAcc.axis.z,
-            (ay * ax * (1.0f - c) + az * s)        * hAcc.axis.x
-              + (c + ay * ay * (1.0f - c))         * hAcc.axis.y
-              + (ay * az * (1.0f - c) - ax * s)    * hAcc.axis.z,
-            (az * ax * (1.0f - c) - ay * s)        * hAcc.axis.x
-              + (az * ay * (1.0f - c) + ax * s)    * hAcc.axis.y
-              + (c + az * az * (1.0f - c))         * hAcc.axis.z,
-        }};
-        hAcc = hRot;
-    }
-    const FusionVector aCorr   = {{
+    const FusionVector aCorr = {{
         aSensorMs2.axis.x - ahrs->b_a.axis.x,
         aSensorMs2.axis.y - ahrs->b_a.axis.y,
         aSensorMs2.axis.z - ahrs->b_a.axis.z,
     }};
-    const float r[3] = {
-        aCorr.axis.x - hAcc.axis.x,
-        aCorr.axis.y - hAcc.axis.y,
-        aCorr.axis.z - hAcc.axis.z,
-    };
+    const float aN = FusionVectorNorm(aCorr);
+    if (aN < 1e-6f) { ahrs->accUsedThisFrame = false; return; }
 
+    // предсказанное (gHat) и измеренное (aHat) направление гравитации в системе датчика
+    const FusionVector zUp = {{ 0.0f, 0.0f, 1.0f }};
+    FusionVector gHat = RotByQInv(ahrs->q, zUp);
+    const float gHatN = FusionVectorNorm(gHat);
+    if (gHatN < 1e-6f) { ahrs->accUsedThisFrame = false; return; }
+    gHat.axis.x /= gHatN; gHat.axis.y /= gHatN; gHat.axis.z /= gHatN;
+    const float invAN = 1.0f / aN;
+    const FusionVector aHat = {{ aCorr.axis.x * invAN,
+                                 aCorr.axis.y * invAN,
+                                 aCorr.axis.z * invAN }};
+
+    // поворот gHat→aHat (ось/угол); коррекция тела = его обратный (−ось*угол), валидно и при 180°
+    //   (антипараллельно — поворот π вокруг любой перпендикулярной к gHat оси).
+    const FusionVector cr = {{
+        gHat.axis.y * aHat.axis.z - gHat.axis.z * aHat.axis.y,
+        gHat.axis.z * aHat.axis.x - gHat.axis.x * aHat.axis.z,
+        gHat.axis.x * aHat.axis.y - gHat.axis.y * aHat.axis.x,
+    }};
+    const float sn = sqrtf(cr.axis.x * cr.axis.x + cr.axis.y * cr.axis.y + cr.axis.z * cr.axis.z);
+    const float dotga = gHat.axis.x * aHat.axis.x + gHat.axis.y * aHat.axis.y + gHat.axis.z * aHat.axis.z;
+    FusionVector axis = zUp; float angle = 0.0f;
+    if (sn < 1e-7f) {
+        if (dotga <= 0.0f) {                       // 180°: ось — любой перпендикуляр к gHat
+            FusionVector t = {{ 1.0f, 0.0f, 0.0f }};
+            if (fabsf(gHat.axis.x) > 0.9f) { t.axis.x = 0.0f; t.axis.y = 1.0f; }
+            FusionVector p = {{
+                gHat.axis.y * t.axis.z - gHat.axis.z * t.axis.y,
+                gHat.axis.z * t.axis.x - gHat.axis.x * t.axis.z,
+                gHat.axis.x * t.axis.y - gHat.axis.y * t.axis.x,
+            }};
+            const float pn = FusionVectorNorm(p);
+            axis.axis.x = p.axis.x / pn; axis.axis.y = p.axis.y / pn; axis.axis.z = p.axis.z / pn;
+            angle = 3.14159265358979f;
+        }
+    } else {
+        axis.axis.x = cr.axis.x / sn; axis.axis.y = cr.axis.y / sn; axis.axis.z = cr.axis.z / sn;
+        angle = atan2f(sn, dotga);
+    }
+    // невязка = поворот-вектор коррекции тела (−ось*угол), |·| ≤ π
+    const float r[3] = { -axis.axis.x * angle, -axis.axis.y * angle, -axis.axis.z * angle };
+
+    // H = единичная на блоке ориентации (3 x N15); смещение гиро правится через кросс-ковариацию P.
+    //   Смещение акселерометра (6..8) НЕ наблюдается гравитацией (иначе ориентация теряет наблюдаемость).
     float H[3 * N15];
     memset(H, 0, sizeof(H));
-    float Hth[9]; Skew3(hAcc, Hth);
-    for (int i = 0; i < 3; ++i)
-        for (int j = 0; j < 3; ++j) H[i * N15 + (0 + j)] = Hth[i * 3 + j];
-    // NB: the accelerometer-bias states (6..8) are intentionally NOT observed by the
-    //   gravity measurement. For a (quasi-)static segment a tilt error and an accel
-    //   bias shift the predicted gravity identically, so jointly estimating both makes
-    //   the orientation unobservable: b_a silently absorbs the gravity residual while the
-    //   orientation drifts and never re-levels (the segment "tumbles" although the
-    //   accelerometer is steady). Dropping the b_a coupling keeps orientation observable;
-    //   MEMS accel bias on the factory-calibrated trackers is small enough to leave frozen.
+    H[0 * N15 + 0] = 1.0f; H[1 * N15 + 1] = 1.0f; H[2 * N15 + 2] = 1.0f;
 
-    const float rNorm = sqrtf(r[0] * r[0] + r[1] * r[1] + r[2] * r[2]);
-    if (rNorm > 1e-6f) {
-        const float invN = 1.0f / rNorm;
-        H[0 * N15 + IDX_SKINPHI] = -r[0] * invN;
-        H[1 * N15 + IDX_SKINPHI] = -r[1] * invN;
-        H[2 * N15 + IDX_SKINPHI] = -r[2] * invN;
-    }
-
-    const float Rs = (ahrs->sigmaAcc * ahrs->sigmaAcc) / ahrs->fAccBoost;
+    // доверие к акселерометру по |a|≈g: статика ⇒ малая σ (большое усиление), динамика ⇒ большая σ.
+    const float errG  = fabsf(aN - KFA_GRAVITY_MS2) / KFA_GRAVITY_MS2;
+    const float tw    = errG / KFA_ACC_TRUST_WIDTH;
+    const float trust = expf(-tw * tw);
+    const float sig   = KFA_ACC_SIG_STATIC_RAD
+                      + (KFA_ACC_SIG_DYN_RAD - KFA_ACC_SIG_STATIC_RAD) * (1.0f - trust);
+    const float Rs = sig * sig;
     const float Rdiag[3] = { Rs, Rs, Rs };
 
     float HP[3 * N15];
@@ -606,6 +607,21 @@ static void ApplyAccUpdate(FusionAhrs *ahrs, FusionVector aSensorMs2) {
     ApplyDeltaX(ahrs, dx);
 
     Joseph_3x15(ahrs->P, H, K, Rdiag);
+
+    // пол ковариации ориентации — усиление гравитационной коррекции остаётся живым (быстрое выравнивание)
+    for (int i = 0; i < 3; ++i)
+        if (ahrs->P[i * N15 + i] < KFA_ACC_P_ORIENT_FLOOR)
+            ahrs->P[i * N15 + i] = KFA_ACC_P_ORIENT_FLOOR;
+
+    // §XII диагностика: остаточная невязка гравитации (м/с²) по СКОРРЕКТИРОВАННОЙ ориентации -> [ahrs] лог
+    {
+        const FusionVector gW = {{ 0.0f, 0.0f, KFA_GRAVITY_MS2 }};
+        const FusionVector gS = RotByQInv(ahrs->q, gW);
+        const float ex = aCorr.axis.x - gS.axis.x;
+        const float ey = aCorr.axis.y - gS.axis.y;
+        const float ez = aCorr.axis.z - gS.axis.z;
+        ahrs->dAcc = sqrtf(ex * ex + ey * ey + ez * ez);
+    }
     ahrs->accUsedThisFrame = true;
 }
 
