@@ -1365,6 +1365,16 @@ struct CliArgs {
 };
 CliArgs parseCli(int argc, char** argv);
 
+// --- Thread-safe diagnostic logging (test mode only) -----------------------
+// Test output is produced from several threads at once (network worker, Manus
+// SDK callback, GUI/render, main). Every write funnels through one mutex so
+// lines cannot interleave/corrupt, and each is stamped with a program-relative
+// timestamp so the log can be correlated with what the operator was doing
+// (T-pose, N-pose, the moment a limb moved, etc.).
+double logUptimeSec();                     // seconds since the first log call
+void   logLine(const std::string& msg);    // one timestamped line, emitted atomically
+void   logBlock(const std::string& block);  // multi-line block, emitted atomically
+
 void testLog(const std::string& msg, bool enabled);
 
 }
