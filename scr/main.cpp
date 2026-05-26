@@ -741,15 +741,16 @@ public:
                 g_glovesFlag().load(std::memory_order_relaxed)) {
                 static int floorTick = 0;
                 if ((++floorTick % 60) == 0) {
-                    std::cout << std::fixed << std::setprecision(4);
-                    std::cout << "[floor] mean=" << m_floorEstimate
-                              << " R=" << (m_floorRInited ? m_floorR : 0.0)
-                              << " L=" << (m_floorLInited ? m_floorL : 0.0)
-                              << " levels=" << kept << " {";
+                    std::ostringstream os;
+                    os << std::fixed << std::setprecision(4);
+                    os << "[floor] mean=" << m_floorEstimate
+                       << " R=" << (m_floorRInited ? m_floorR : 0.0)
+                       << " L=" << (m_floorLInited ? m_floorL : 0.0)
+                       << " levels=" << kept << " {";
                     for (int s = 0; s < kept; ++s)
-                        std::cout << (s ? ", " : "") << top4[s] << "/" << top4Cnt[s];
-                    std::cout << "}\n";
-                    std::cout.flush();
+                        os << (s ? ", " : "") << top4[s] << "/" << top4Cnt[s];
+                    os << "}";
+                    logBlock(os.str());
                 }
             }
         }
@@ -2251,20 +2252,20 @@ public:
                 g_glovesFlag().load(std::memory_order_relaxed)) {
                 static int phaseTick = 0;
                 if ((++phaseTick % 30) == 0) {
-                    std::cout << "[phase] R="
-                              << LocomotionClassifier::gaitPhaseName(m_locomotion.gaitPhaseR())
-                              << " durR=" << std::fixed << std::setprecision(3)
-                              << m_locomotion.gaitDurR()
-                              << "s  L="
-                              << LocomotionClassifier::gaitPhaseName(m_locomotion.gaitPhaseL())
-                              << " durL=" << m_locomotion.gaitDurL() << "s  "
-                              << "strideR=" << m_locomotion.lastStrideLengthR()
-                              << "m hR=" << m_locomotion.lastStrideHeightR() << "m "
-                              << "strideL=" << m_locomotion.lastStrideLengthL()
-                              << "m hL=" << m_locomotion.lastStrideHeightL() << "m "
-                              << "vertOsc=" << m_locomotion.vertCoMOscillationM() << "m"
-                              << "\n";
-                    std::cout.flush();
+                    std::ostringstream os;
+                    os << "[phase] R="
+                       << LocomotionClassifier::gaitPhaseName(m_locomotion.gaitPhaseR())
+                       << " durR=" << std::fixed << std::setprecision(3)
+                       << m_locomotion.gaitDurR()
+                       << "s  L="
+                       << LocomotionClassifier::gaitPhaseName(m_locomotion.gaitPhaseL())
+                       << " durL=" << m_locomotion.gaitDurL() << "s  "
+                       << "strideR=" << m_locomotion.lastStrideLengthR()
+                       << "m hR=" << m_locomotion.lastStrideHeightR() << "m "
+                       << "strideL=" << m_locomotion.lastStrideLengthL()
+                       << "m hL=" << m_locomotion.lastStrideHeightL() << "m "
+                       << "vertOsc=" << m_locomotion.vertCoMOscillationM() << "m";
+                    logBlock(os.str());
                 }
             }
 
@@ -2293,17 +2294,17 @@ public:
                 g_glovesFlag().load(std::memory_order_relaxed)) {
                 static int comTick = 0;
                 if ((++comTick % 60) == 0) {
-                    std::cout << std::fixed << std::setprecision(4);
-                    std::cout << "[com] pos=(" << m_lastCoM.x() << ","
-                              << m_lastCoM.y() << "," << m_lastCoM.z()
-                              << ") m  vel=(" << m_lastCoMVel.x() << ","
-                              << m_lastCoMVel.y() << "," << m_lastCoMVel.z()
-                              << ") m/s  M_kg=" << m_lastBodyMass
-                              << "  F_GRF_z=" << m_lastGRFNewtons.z() << " N"
-                              << "  contactR=" << (rContact ? 1 : 0)
-                              << "  contactL=" << (lContact ? 1 : 0)
-                              << "\n";
-                    std::cout.flush();
+                    std::ostringstream os;
+                    os << std::fixed << std::setprecision(4);
+                    os << "[com] pos=(" << m_lastCoM.x() << ","
+                       << m_lastCoM.y() << "," << m_lastCoM.z()
+                       << ") m  vel=(" << m_lastCoMVel.x() << ","
+                       << m_lastCoMVel.y() << "," << m_lastCoMVel.z()
+                       << ") m/s  M_kg=" << m_lastBodyMass
+                       << "  F_GRF_z=" << m_lastGRFNewtons.z() << " N"
+                       << "  contactR=" << (rContact ? 1 : 0)
+                       << "  contactL=" << (lContact ? 1 : 0);
+                    logBlock(os.str());
                 }
             }
         }
@@ -2709,8 +2710,7 @@ void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
            << "  rej=" << std::fixed << d.rejectedSteps << "\n";
     }
 
-    std::cout << ss.str();
-    std::cout.flush();
+    logBlock(ss.str());
 }
 
 }
@@ -3353,8 +3353,7 @@ QVector3D LocomotionSolver::update(const Quat& qR,
                << " airborne[stableTicks=" << m_airborneStableTicks
                << " landedRamp=" << m_landedRampTicks << " commitFade=" << m_commitFadeTicks << "]\n"
                << "============================================================\n";
-            std::cout << cs.str();
-            std::cout.flush();
+            logBlock(cs.str());
         }
 
         const double a030 = rateAdjustAlpha(0.30, dt);
@@ -3731,24 +3730,32 @@ QVector3D LocomotionSolver::update(const Quat& qR,
         if (m_verbose || pose_solver::g_testFlag().load(
                 std::memory_order_relaxed)) {
             if (!wasCommittedR && m_committedR) {
-                std::cout << "[loco commit R] anchor=("
-                          << std::fixed << std::setprecision(3)
-                          << m_anchorR.x() << "," << m_anchorR.y() << "," << m_anchorR.z()
-                          << ") conf=" << m_confR << "\n";
+                std::ostringstream os;
+                os << "[loco commit R] anchor=("
+                   << std::fixed << std::setprecision(3)
+                   << m_anchorR.x() << "," << m_anchorR.y() << "," << m_anchorR.z()
+                   << ") conf=" << m_confR;
+                logLine(os.str());
             }
             if (wasCommittedR && !m_committedR) {
-                std::cout << "[loco release R] conf=" << std::fixed << std::setprecision(3)
-                          << m_confR << "\n";
+                std::ostringstream os;
+                os << "[loco release R] conf=" << std::fixed << std::setprecision(3)
+                   << m_confR;
+                logLine(os.str());
             }
             if (!wasCommittedL && m_committedL) {
-                std::cout << "[loco commit L] anchor=("
-                          << std::fixed << std::setprecision(3)
-                          << m_anchorL.x() << "," << m_anchorL.y() << "," << m_anchorL.z()
-                          << ") conf=" << m_confL << "\n";
+                std::ostringstream os;
+                os << "[loco commit L] anchor=("
+                   << std::fixed << std::setprecision(3)
+                   << m_anchorL.x() << "," << m_anchorL.y() << "," << m_anchorL.z()
+                   << ") conf=" << m_confL;
+                logLine(os.str());
             }
             if (wasCommittedL && !m_committedL) {
-                std::cout << "[loco release L] conf=" << std::fixed << std::setprecision(3)
-                          << m_confL << "\n";
+                std::ostringstream os;
+                os << "[loco release L] conf=" << std::fixed << std::setprecision(3)
+                   << m_confL;
+                logLine(os.str());
             }
         }
 
@@ -3834,13 +3841,14 @@ QVector3D LocomotionSolver::update(const Quat& qR,
             const float dz = newOff.z() - m_offsetLast.z();
             const float dxy = std::sqrt(dx*dx + dy*dy);
             if (dxy > 0.04f || std::abs(dz) > 0.04f) {
-                std::cout << "[loco jump] dxy=" << std::fixed << std::setprecision(3) << dxy
-                          << "m dz=" << dz << "m off=("
-                          << newOff.x() << "," << newOff.y() << "," << newOff.z() << ")"
-                          << " cR=" << m_confR << " cL=" << m_confL
-                          << " commR=" << (m_committedR ? 1 : 0)
-                          << " commL=" << (m_committedL ? 1 : 0)
-                          << "\n";
+                std::ostringstream os;
+                os << "[loco jump] dxy=" << std::fixed << std::setprecision(3) << dxy
+                   << "m dz=" << dz << "m off=("
+                   << newOff.x() << "," << newOff.y() << "," << newOff.z() << ")"
+                   << " cR=" << m_confR << " cL=" << m_confL
+                   << " commR=" << (m_committedR ? 1 : 0)
+                   << " commL=" << (m_committedL ? 1 : 0);
+                logLine(os.str());
             }
         }
 
@@ -3860,12 +3868,14 @@ QVector3D LocomotionSolver::update(const Quat& qR,
                 }
                 return "?";
             };
-            std::cout << "[loco-event] pose: " << poseName(m_posePrev)
-                      << " -> " << poseName(m_pose)
-                      << "  ticks=" << m_poseTicks
-                      << "  off=(" << std::fixed << std::setprecision(3)
-                      << newOff.x() << "," << newOff.y() << "," << newOff.z()
-                      << ")\n" << std::flush;
+            std::ostringstream os;
+            os << "[loco-event] pose: " << poseName(m_posePrev)
+               << " -> " << poseName(m_pose)
+               << "  ticks=" << m_poseTicks
+               << "  off=(" << std::fixed << std::setprecision(3)
+               << newOff.x() << "," << newOff.y() << "," << newOff.z()
+               << ")";
+            logLine(os.str());
         }
         m_posePrev = m_pose;
 
@@ -4749,8 +4759,7 @@ static void __cdecl foxManusErgonomicsCb(const void* raw)
                 }
                 os << "\n";
             }
-            std::cout << os.str();
-            std::cout.flush();
+            logBlock(os.str());
         }
     }
 
@@ -4781,9 +4790,11 @@ static void __cdecl foxManusErgonomicsCb(const void* raw)
                 static const char* kFingerName[5] = { "thumb", "index", "middle", "ring", "pinky" };
                 static const char* kJointName[4]  = { "spread", "MCP", "PIP", "DIP" };
                 const int fi = idx / 4, ji = idx % 4;
-                std::cout << "[glove-outlier] " << hand << " " << kFingerName[fi]
-                          << " " << kJointName[ji] << " delta=" << std::fixed << std::setprecision(1)
-                          << delta << "° → α=" << outlierAlpha << "\n";
+                std::ostringstream os;
+                os << "[glove-outlier] " << hand << " " << kFingerName[fi]
+                   << " " << kJointName[ji] << " delta=" << std::fixed << std::setprecision(1)
+                   << delta << "° → α=" << outlierAlpha;
+                logLine(os.str());
             }
             return outlier ? outlierAlpha : baseAlpha;
         };
@@ -4904,8 +4915,7 @@ static void __cdecl foxManusErgonomicsCb(const void* raw)
             if (haveL && srcL) dumpHand("LEFT",  true, srcL, lQ, lP, SEG_LHand);
             if (haveR && srcR) dumpHand("RIGHT", true, srcR, rQ, rP, SEG_RHand);
             os << "-----------------------------------------\n";
-            std::cout << os.str();
-            std::cout.flush();
+            logBlock(os.str());
         }
     }
 }
@@ -5051,7 +5061,7 @@ bool MocapReceiver::connectGloves()
                 if (!msg) return;
                 static std::atomic<int> s_skelLogTick{0};
                 if (s_skelLogTick.fetch_add(1) % 240 == 0) {
-                    std::cerr << "[manus-skeleton] frame received (using ergonomics stream as primary)\n";
+                    logLine("[manus-skeleton] frame received (using ergonomics stream as primary)");
                 }
             };
             int r = 0; sehCall([&]() { r = regSkel(skelCb); });
@@ -5063,7 +5073,7 @@ bool MocapReceiver::connectGloves()
         if (regSys)  {
             auto sysCb = [](const void* msg) {
                 if (!msg) return;
-                std::cerr << "[manus-system] event received (low-level diagnostic)\n";
+                logLine("[manus-system] event received (low-level diagnostic)");
             };
             int r = 0; sehCall([&]() { r = regSys(sysCb); });
             testLog("[manus] RegSystemStream rc=" + std::to_string(r), I.test);
@@ -5506,8 +5516,7 @@ void MocapReceiver::run()
             "fox_sensor_placement_classifier.onnx");
         sys << " foxspc=" << (QFile::exists(modelPath) ? "available" : "missing");
         sys << "\n";
-        std::cout << sys.str();
-        std::cout.flush();
+        logBlock(sys.str());
     }
 
     Api api;
@@ -6211,7 +6220,7 @@ void MocapReceiver::run()
                 if (haveFreeAcc) ss << "(" << freeAcc.x() << "," << freeAcc.y()
                                     << "," << freeAcc.z() << ") m/s²";
                 else             ss << "-";
-                std::cout << ss.str() << '\n';
+                logBlock(ss.str());
 
                 if (dumpCount[targetSeg] == 0) {
                     std::ostringstream cs;
@@ -6220,9 +6229,8 @@ void MocapReceiver::run()
                         if (p.fn && p.fn(pkt))
                             cs << " " << p.name;
                     }
-                    std::cout << cs.str() << '\n';
+                    logBlock(cs.str());
                 }
-                std::cout.flush();
                 ++dumpCount[targetSeg];
             }
 
@@ -6281,7 +6289,7 @@ void MocapReceiver::run()
                    << "  magGate=" << (I.dbgDynMagRej[kPelvis] > magGateDeg
                                         ? "REJECTED" : "open")
                    << "\n";
-                std::cout << ss.str() << std::flush;
+                logBlock(ss.str());
                 I.lastAhrsDump = now;
             }
 
@@ -6301,7 +6309,7 @@ void MocapReceiver::run()
                        << "  magErr=" << std::setw(6) << I.segMagErrEma[s] << " (norm)\n";
                     I.segAccErrPeak[s] = 0.0f;
                 }
-                std::cout << ss.str() << std::flush;
+                logBlock(ss.str());
             }
 
             if (I.test && (now - I.lastDump) > 1.5) {
@@ -6506,8 +6514,7 @@ void MocapReceiver::run()
                    << "°  head=" << std::setw(7) << quat_angle_deg(staging.quat[SEG_Head])
                    << "°\n";
                 ss << "============================================================\n";
-                std::cout << ss.str();
-                std::cout.flush();
+                logBlock(ss.str());
                 I.lastDump = now;
             }
         } else {
@@ -7230,13 +7237,12 @@ struct PlacementClassifier {
             session.emplace(env, p.c_str(), opts);
             ready = true;
             if (log) {
-                std::cout << "[FoxSPC] model loaded: "
-                          << modelPath.toStdString() << "\n";
+                logLine("[FoxSPC] model loaded: " + modelPath.toStdString());
             }
         } catch (const std::exception& ex) {
             ready = false;
             if (log) {
-                std::cout << "[FoxSPC] load failed: " << ex.what() << "\n";
+                logLine(std::string("[FoxSPC] load failed: ") + ex.what());
             }
         }
     }
@@ -7265,8 +7271,7 @@ struct PlacementClassifier {
         } catch (const std::exception& ex) {
 
             if (pose_solver::g_testFlag().load(std::memory_order_relaxed)) {
-                std::cout << "[FoxSPC] inference failed: " << ex.what() << "\n";
-                std::cout.flush();
+                logLine(std::string("[FoxSPC] inference failed: ") + ex.what());
             }
         }
         return probs;
@@ -7335,12 +7340,16 @@ static PlacementReport analyzePlacement(
         sumMax += maxP;
 
         if (testLog) {
-            std::cout << "[FoxSPC] sensor " << std::setw(2) << seg
-                      << " (" << kSegmentNames[seg] << ") → class "
-                      << assignedClass << " ("
-                      << fox::body::kSensorPlacementClasses[assignedClass]
-                      << ") max_p=" << std::fixed << std::setprecision(3) << maxP
-                      << "  expected=" << expectedClass << "\n";
+            std::ostringstream os;
+            os << "[FoxSPC] sensor " << std::setw(2) << seg
+               << " (" << kSegmentNames[seg] << ") → class "
+               << assignedClass << " ("
+               << fox::body::kSensorPlacementClasses[assignedClass]
+               << ") max_p=" << std::fixed << std::setprecision(3) << maxP
+               << "  expected=" << expectedClass
+               << (assignedClass == expectedClass
+                   ? "  OK" : "  MISMATCH — sensor likely on the wrong body part");
+            logLine(os.str());
         }
 
         if (assignedClass == expectedClass) {
@@ -8104,16 +8113,16 @@ void NewSessionWizard::logCalibPhaseTransition(const char* tag)
     const int idx = static_cast<int>(m_phase);
     const char* name = (idx >= 0 && idx < int(std::size(kPhaseNames)))
                        ? kPhaseNames[idx] : "?";
-    std::cout << "[calib] -> " << name;
-    if (tag && *tag) std::cout << "  (" << tag << ")";
-    std::cout << "  goodSamples=" << m_goodSamples
-              << "  bufSize="     << int(m_samples.size());
+    std::ostringstream os;
+    os << "[calib] -> " << name;
+    if (tag && *tag) os << "  (" << tag << ")";
+    os << "  goodSamples=" << m_goodSamples
+       << "  bufSize="     << int(m_samples.size());
     if (m_phaseStartMs > 0) {
         const qint64 now = QDateTime::currentMSecsSinceEpoch();
-        std::cout << "  elapsed=" << (now - m_phaseStartMs) << "ms";
+        os << "  elapsed=" << (now - m_phaseStartMs) << "ms";
     }
-    std::cout << "\n";
-    std::cout.flush();
+    logLine(os.str());
 }
 
 void NewSessionWizard::refreshPoseImage()
@@ -8730,10 +8739,11 @@ void NewSessionWizard::onCaptureTick()
                 }
             }
             if (m_test) {
-                std::cout << "[FoxSPC] move stage " << m_moveStage
-                          << " window=[" << wWin.start << "," << wWin.end << ") of "
-                          << m_aslOutCount << " (ref seg " << ref << ")\n";
-                std::cout.flush();
+                std::ostringstream os;
+                os << "[FoxSPC] move stage " << m_moveStage
+                   << " window=[" << wWin.start << "," << wWin.end << ") of "
+                   << m_aslOutCount << " (ref seg " << ref << ")";
+                logLine(os.str());
             }
         }
         ++m_moveStage;
@@ -8845,13 +8855,15 @@ void NewSessionWizard::onCaptureTick()
             }
             m_result.fingerBaselineCaptured = true;
             if (m_test) {
-                std::cout << "[calib T finger baseline] count="
-                          << m_fingerAccumCount << " R thumb spread/MCP="
-                          << m_result.fingerBaselineR[0] << "/"
-                          << m_result.fingerBaselineR[1]
-                          << " L thumb spread/MCP="
-                          << m_result.fingerBaselineL[0] << "/"
-                          << m_result.fingerBaselineL[1] << "\n";
+                std::ostringstream os;
+                os << "[calib T finger baseline] count="
+                   << m_fingerAccumCount << " R thumb spread/MCP="
+                   << m_result.fingerBaselineR[0] << "/"
+                   << m_result.fingerBaselineR[1]
+                   << " L thumb spread/MCP="
+                   << m_result.fingerBaselineL[0] << "/"
+                   << m_result.fingerBaselineL[1];
+                logLine(os.str());
             }
         }
 
@@ -8937,7 +8949,20 @@ void NewSessionWizard::onCaptureTick()
     constexpr std::size_t kCalibMinSamplesPerSeg = 60;
     for (int i = 0; i < kXsensSegmentCount; ++i) {
         if (!fox::body::kSensorPresent[i]) continue;
-        if (sampN[i].size() < kCalibMinSamplesPerSeg) continue;
+        if (sampN[i].size() < kCalibMinSamplesPerSeg) {
+            if (m_test) {
+                std::ostringstream os;
+                os << "[calib §174.4] " << std::left << std::setw(14)
+                   << kSegmentNames[i] << std::right
+                   << "  SKIPPED — only " << sampN[i].size()
+                   << " stable N-pose samples (need >=" << kCalibMinSamplesPerSeg
+                   << "). Alignment left at identity; this segment will be"
+                      " mis-oriented. Likely the sensor dropped out or the actor"
+                      " moved during the N-pose hold.";
+                logLine(os.str());
+            }
+            continue;
+        }
 
         const Quat qAvgN  = fox::quat_avg_markley(sampN[i]);
         m_result.calibReference[i] = qAvgN;
@@ -8990,11 +9015,13 @@ void NewSessionWizard::onCaptureTick()
 
         if (m_test && fox::pose_solver::g_glovesFlag().load(
                 std::memory_order_relaxed)) {
-            std::cout << "[calib §174.6] " << std::left << std::setw(14)
-                      << kSegmentNames[i] << std::right
-                      << "  Ndisp=" << std::fixed << std::setprecision(2)
-                      << nDispDeg << "°  quality-resid=" << residDeg[i]
-                      << "°  Tpose=" << (tposeValid[i] ? "yes" : "no") << "\n";
+            std::ostringstream os;
+            os << "[calib §174.6] " << std::left << std::setw(14)
+               << kSegmentNames[i] << std::right
+               << "  Ndisp=" << std::fixed << std::setprecision(2)
+               << nDispDeg << "°  quality-resid=" << residDeg[i]
+               << "°  Tpose=" << (tposeValid[i] ? "yes" : "no");
+            logLine(os.str());
         }
 
         const int cT = m_accumCountT[i];
@@ -9012,11 +9039,15 @@ void NewSessionWizard::onCaptureTick()
         }
 
         if (m_test) {
-            std::cout << "[calib §174.4] " << std::left << std::setw(14)
-                      << kSegmentNames[i] << std::right
-                      << "  residual=" << std::fixed << std::setprecision(2)
-                      << residDeg[i] << "°"
-                      << "  quality=" << qualityBand[i] << "/5\n";
+            std::ostringstream os;
+            os << "[calib §174.4] " << std::left << std::setw(14)
+               << kSegmentNames[i] << std::right
+               << "  residual=" << std::fixed << std::setprecision(2)
+               << residDeg[i] << "°"
+               << "  quality=" << qualityBand[i] << "/5"
+               << "  verdict=" << (qualityBand[i] <= fox::body::kCalibQualityPoor
+                                   ? "FAIL — re-do this segment" : "ok");
+            logLine(os.str());
         }
     }
 
@@ -9051,11 +9082,13 @@ void NewSessionWizard::onCaptureTick()
             maxCur  = std::max(maxCur,  driftDeg(curA0,  qAvg0, curA2,  qAvg2));
             maxCand = std::max(maxCand, driftDeg(candA0, qAvg0, candA2, qAvg2));
         }
-        std::cout << "[calib-mount §24.5/§223] mount+" << kMountTestDeg
-                  << "° -> макс. дрейф нулевой позы: текущий=" << std::fixed
-                  << std::setprecision(2) << maxCur
-                  << "°  кандидат(conj(qAvg)⊗qRef⊗q_bs)=" << maxCand
-                  << "°  (сверить с реально повёрнутым датчиком на железе)\n";
+        std::ostringstream os;
+        os << "[calib-mount §24.5/§223] mount+" << kMountTestDeg
+           << "° -> макс. дрейф нулевой позы: текущий=" << std::fixed
+           << std::setprecision(2) << maxCur
+           << "°  кандидат(conj(qAvg)⊗qRef⊗q_bs)=" << maxCand
+           << "°  (сверить с реально повёрнутым датчиком на железе)";
+        logLine(os.str());
     }
 
     m_rx->setAccNormalisation(accMagn);
@@ -9081,6 +9114,19 @@ void NewSessionWizard::onCaptureTick()
         const int    band     = fox::body::calibrationQuality(avgResid);
         const char*  label    = fox::body::calibrationQualityLabel(band);
 
+        if (m_test) {
+            std::ostringstream os;
+            os << "[calib] SUMMARY  band=" << band << "/5 " << label
+               << "  avg_residual=" << std::fixed << std::setprecision(2) << avgResid
+               << "°  sensors_calibrated=" << nResid;
+            if (problemList.isEmpty())
+                os << "  problems=none";
+            else
+                os << "  problems=" << problemList.join(", ").toStdString()
+                   << "  (these segments need re-seating / re-calibration)";
+            logLine(os.str());
+        }
+
         if (m_calibQuality) {
             QString qual = QString("Quality: %1/5 %2 (residual %3°)")
                                .arg(band)
@@ -9099,19 +9145,22 @@ void NewSessionWizard::onCaptureTick()
     }
 
     if (m_test) {
-        std::cout << std::fixed << std::setprecision(5);
-        std::cout << "[calib] §174.4 q_align stored (T+N statistics for acc/mag/gyr):\n";
+        std::ostringstream os;
+        os << std::fixed << std::setprecision(5);
+        os << "[calib] §174.4 q_align + T/N statistics (acc/mag/gyr) per sensor:\n";
         for (int i = 0; i < kXsensSegmentCount; ++i) {
             if (!fox::body::kSensorPresent[i]) continue;
-            std::cout << "        " << std::left << std::setw(14)
-                      << kSegmentNames[i] << std::right
-                      << "  acc_magn=" << accMagn[i]
-                      << "  mag_magn=" << magMagn[i]
-                      << "  gyr_bias=(" << gyrBias[i].x() << ","
-                                        << gyrBias[i].y() << ","
-                                        << gyrBias[i].z() << ") rad/s\n";
+            os << "        " << std::left << std::setw(14)
+               << kSegmentNames[i] << std::right
+               << "  q_align=(" << s2s[i].w << "," << s2s[i].x << ","
+                                << s2s[i].y << "," << s2s[i].z << ")"
+               << "  acc_magn=" << accMagn[i]
+               << "  mag_magn=" << magMagn[i]
+               << "  gyr_bias=(" << gyrBias[i].x() << ","
+                                 << gyrBias[i].y() << ","
+                                 << gyrBias[i].z() << ") rad/s\n";
         }
-        std::cout.flush();
+        logBlock(os.str());
     }
 
     if (m_doSensorCheck && m_liveSpcEnabled && g_placementClf().ready) {
@@ -9162,17 +9211,18 @@ void NewSessionWizard::finishCalibrationAsl()
     }
 
     if (m_test) {
-        std::cout << std::fixed << std::setprecision(4);
-        std::cout << "[calib §174.4] calibReference (per-segment N-pose Markley mean):\n";
+        std::ostringstream os;
+        os << std::fixed << std::setprecision(4);
+        os << "[calib §174.4] calibReference (per-segment N-pose Markley mean):\n";
         for (int i = 0; i < kXsensSegmentCount; ++i) {
             if (!fox::body::kSensorPresent[i]) continue;
             const Quat& q = m_result.calibReference[i];
-            std::cout << "        " << std::left << std::setw(14)
-                      << kSegmentNames[i] << std::right
-                      << " (" << q.w << "," << q.x << ","
-                      << q.y << "," << q.z << ")\n";
+            os << "        " << std::left << std::setw(14)
+               << kSegmentNames[i] << std::right
+               << " (" << q.w << "," << q.x << ","
+               << q.y << "," << q.z << ")\n";
         }
-        std::cout.flush();
+        logBlock(os.str());
     }
 
     m_phase = CalibPhase::Done;
@@ -10029,12 +10079,14 @@ void MocapViewport::updatePose(const std::array<Quat, kXsensSegmentCount>& orien
                     static int s_condGlobal = 0; ++s_condGlobal;
                     if (s_condGlobal - s_condTick[i] > 60) {
                         s_condTick[i] = s_condGlobal;
-                        std::cout << "[cond] seg[" << i << "] slew ang="
-                                  << std::fixed << std::setprecision(1) << ang
-                                  << "° budget=" << budgetDeg << "° t="
-                                  << std::setprecision(2) << tSlew << " |w|="
-                                  << std::setprecision(1) << m_angVelLP[i] << "°/s dt="
-                                  << std::setprecision(1) << (dt * 1000.0) << "ms\n";
+                        std::ostringstream os;
+                        os << "[cond] seg[" << i << "] slew ang="
+                           << std::fixed << std::setprecision(1) << ang
+                           << "° budget=" << budgetDeg << "° t="
+                           << std::setprecision(2) << tSlew << " |w|="
+                           << std::setprecision(1) << m_angVelLP[i] << "°/s dt="
+                           << std::setprecision(1) << (dt * 1000.0) << "ms";
+                        logLine(os.str());
                     }
                 }
             }
@@ -10374,18 +10426,19 @@ void MocapViewport::wheelEvent(QWheelEvent* e)
 
 static void dumpFirstFrameHex(const char* tag, const QByteArray& pkt)
 {
-    std::cout << "[stream first-frame hex] " << tag << " bytes="
-              << pkt.size() << "\n";
+    std::ostringstream os;
+    os << "[stream first-frame hex] " << tag << " bytes="
+       << pkt.size() << "\n";
     const int n = std::min(pkt.size(), qsizetype(24 + 64));
-    std::cout << "  hex:";
+    os << "  hex:";
     for (int i = 0; i < n; ++i) {
-        if (i % 16 == 0) std::cout << "\n    ";
+        if (i % 16 == 0) os << "\n    ";
         char buf[4];
         std::snprintf(buf, sizeof(buf), "%02x ",
                       static_cast<unsigned>(static_cast<unsigned char>(pkt[i])));
-        std::cout << buf;
+        os << buf;
     }
-    std::cout << "\n";
+    logBlock(os.str());
 }
 
 struct LiveStreamSender::Impl {
@@ -10427,21 +10480,25 @@ struct LiveStreamSender::Impl {
             const qint64 now = timer.elapsed();
             if (lastMtuWarnMs < 0 || (now - lastMtuWarnMs) >= 5000) {
                 lastMtuWarnMs = now;
-                std::cerr << "[stream] WARNING: UDP datagram size "
-                          << pkt.size() << " bytes > " << kMtuSoftLimit
-                          << " (IPv4 MTU minus 28-byte header). Consider"
-                          << " enabling splitGloveDatagrams to avoid"
-                          << " fragmentation/drop.\n";
+                std::ostringstream os;
+                os << "[stream] WARNING: UDP datagram size "
+                   << pkt.size() << " bytes > " << kMtuSoftLimit
+                   << " (IPv4 MTU minus 28-byte header). Consider"
+                      " enabling splitGloveDatagrams to avoid"
+                      " fragmentation/drop.";
+                logLine(os.str());
             }
         }
         if (sock.writeDatagram(pkt, host, port) >= 0) return;
         const qint64 now = timer.elapsed();
         if (lastSendWarnMs < 0 || (now - lastSendWarnMs) >= 1000) {
             lastSendWarnMs = now;
-            std::cerr << "[stream] WARNING: UDP send failed ("
-                      << sock.errorString().toStdString() << ") to "
-                      << host.toString().toStdString() << ':' << port
-                      << " - frame dropped\n";
+            std::ostringstream os;
+            os << "[stream] WARNING: UDP send failed ("
+               << sock.errorString().toStdString() << ") to "
+               << host.toString().toStdString() << ':' << port
+               << " - frame dropped";
+            logLine(os.str());
         }
     }
 
@@ -10523,10 +10580,10 @@ bool LiveStreamSender::start(const LiveSettings& cfg, QString* err)
             }
         }
         if (!tposeOriginsValid) {
-            std::cout << "[stream] WARNING: MXTP13 tposeOriginM is empty —"
-                         " plugins may render rig at wrong scale.  "
-                         "Caller must populate cfg.tposeOriginM[] from FK "
-                         "before LiveStreamSender::start().\n";
+            logLine("[stream] WARNING: MXTP13 tposeOriginM is empty —"
+                    " plugins may render rig at wrong scale.  "
+                    "Caller must populate cfg.tposeOriginM[] from FK "
+                    "before LiveStreamSender::start().");
         }
         QByteArray payload;
         appendInt32BE(payload, segCount);
@@ -10674,8 +10731,7 @@ void LiveStreamSender::pushFrame(quint32 sample,
         wireSS << "  pelvis(world,m)=(" << pelvisPos.x() << "," << pelvisPos.y()
                << "," << pelvisPos.z() << ")  packetBytes=" << pkt.size() << "\n"
                << "============================================================\n";
-        std::cout << wireSS.str();
-        std::cout.flush();
+        logBlock(wireSS.str());
     }
 }
 
@@ -10713,7 +10769,7 @@ void LiveStreamSender::pushFrameWithGloves(quint32 sample,
                 bs << "  base[" << std::setw(2) << i << "] " << std::left << std::setw(14)
                    << kSegmentNames[i] << std::right << " q=(" << segQuat[i].w << ","
                    << segQuat[i].x << "," << segQuat[i].y << "," << segQuat[i].z << ")\n";
-            std::cout << bs.str(); std::cout.flush();
+            logBlock(bs.str());
         }
     }
 
@@ -10741,7 +10797,7 @@ void LiveStreamSender::pushFrameWithGloves(quint32 sample,
                    << m_impl->baselineLeftGloveQ[i].z << ")  R[" << std::setw(2) << i << "]=("
                    << m_impl->baselineRightGloveQ[i].w << "," << m_impl->baselineRightGloveQ[i].x << ","
                    << m_impl->baselineRightGloveQ[i].y << "," << m_impl->baselineRightGloveQ[i].z << ")\n";
-            std::cout << fb.str(); std::cout.flush();
+            logBlock(fb.str());
         }
     }
 
@@ -10887,8 +10943,7 @@ void LiveStreamSender::pushFrameWithGloves(quint32 sample,
                << (m_cfg.splitGloveDatagrams ? "split" : "combined")
                << "  bodyBytes=" << bodyOnlyBytes << "\n"
                << "============================================================\n";
-        std::cout << wireSS.str();
-        std::cout.flush();
+        logBlock(wireSS.str());
     }
 }
 
@@ -12579,12 +12634,14 @@ void MainWindow::onRenderTick()
                 g_renderDiag.rejectW[i] = rejectW;
                 if (rejectW > 0.999) {
                     if (m_test) {
-                        std::cout << "[fk-jump] seg[" << i << "] " << kSegmentNames[i]
-                                  << " jump=" << std::fixed << std::setprecision(1) << jumpDeg
-                                  << "° full-reject (gyrQuiet, pelvisGyr="
-                                  << std::sqrt(double(f.gyrSensor[SEG_Pelvis].lengthSquared()))
-                                  << " segGyr=" << std::sqrt(double(f.gyrSensor[i].lengthSquared()))
-                                  << ")\n";
+                        std::ostringstream os;
+                        os << "[fk-jump] seg[" << i << "] " << kSegmentNames[i]
+                           << " jump=" << std::fixed << std::setprecision(1) << jumpDeg
+                           << "° full-reject (gyrQuiet, pelvisGyr="
+                           << std::sqrt(double(f.gyrSensor[SEG_Pelvis].lengthSquared()))
+                           << " segGyr=" << std::sqrt(double(f.gyrSensor[i].lengthSquared()))
+                           << ")";
+                        logLine(os.str());
                     }
                     cand = s_lastOut[i];
                 } else if (rejectW > 0.0) {
@@ -12595,11 +12652,13 @@ void MainWindow::onRenderTick()
                         s_globalTick++;
                         if (s_globalTick - s_lastLogTick[i] > 60) {
                             s_lastLogTick[i] = s_globalTick;
-                            std::cout << "[fk-jump] seg[" << i << "] " << kSegmentNames[i]
-                                      << " jump=" << std::fixed << std::setprecision(1) << jumpDeg
-                                      << "° blend rejectW=" << std::setprecision(2) << rejectW
-                                      << " (segGyr=" << std::sqrt(double(f.gyrSensor[i].lengthSquared()))
-                                      << ")\n";
+                            std::ostringstream os;
+                            os << "[fk-jump] seg[" << i << "] " << kSegmentNames[i]
+                               << " jump=" << std::fixed << std::setprecision(1) << jumpDeg
+                               << "° blend rejectW=" << std::setprecision(2) << rejectW
+                               << " (segGyr=" << std::sqrt(double(f.gyrSensor[i].lengthSquared()))
+                               << ")";
+                            logLine(os.str());
                         }
                     }
                 }
@@ -12641,7 +12700,8 @@ void MainWindow::onRenderTick()
                               v.x(), v.y(), v.z(), v.length());
                 return std::string(buf);
             };
-            std::cout << "[sym tick=" << s_symTick << "]\n";
+            std::ostringstream os;
+            os << "[sym tick=" << s_symTick << "]\n";
             for (const Pair& pp : pairs) {
                 const Quat raw_R = raw[pp.r], raw_L = raw[pp.l];
                 const Quat candR = q[pp.r],   candL = q[pp.l];
@@ -12652,19 +12712,19 @@ void MainWindow::onRenderTick()
                 const QVector3D aR = f.accSensor[pp.r], aL = f.accSensor[pp.l];
                 const QVector3D gR = f.gyrSensor[pp.r], gL = f.gyrSensor[pp.l];
                 const QVector3D mR = f.magSensor[pp.r], mL = f.magSensor[pp.l];
-                std::cout << "  " << pp.name
-                          << " rawD="  << std::fixed << std::setprecision(3) << rawD
-                          << " candD=" << candD
-                          << " refD="  << refD
-                          << "\n    raw_R=" << fmtQ(raw_R)
-                          << " raw_L="      << fmtQ(raw_L)
-                          << " mirror_y_quat(raw_L)="  << fmtQ(mirror_y_quat(raw_L))
-                          << "\n    accR=" << fmtV(aR) << " accL=" << fmtV(aL)
-                          << "\n    gyrR=" << fmtV(gR) << " gyrL=" << fmtV(gL)
-                          << "\n    magR=" << fmtV(mR) << " magL=" << fmtV(mL)
-                          << "\n";
+                os << "  " << pp.name
+                   << " rawD="  << std::fixed << std::setprecision(3) << rawD
+                   << " candD=" << candD
+                   << " refD="  << refD
+                   << "\n    raw_R=" << fmtQ(raw_R)
+                   << " raw_L="      << fmtQ(raw_L)
+                   << " mirror_y_quat(raw_L)="  << fmtQ(mirror_y_quat(raw_L))
+                   << "\n    accR=" << fmtV(aR) << " accL=" << fmtV(aL)
+                   << "\n    gyrR=" << fmtV(gR) << " gyrL=" << fmtV(gL)
+                   << "\n    magR=" << fmtV(mR) << " magL=" << fmtV(mL)
+                   << "\n";
             }
-            std::cout.flush();
+            logBlock(os.str());
         }
     }
 
@@ -12792,33 +12852,37 @@ void MainWindow::onRenderTick()
                 const float dxy = std::sqrt(d.x()*d.x() + d.y()*d.y());
                 if (dxy < 0.5f) s_cumHoriz += dxy;
                 if (dxy > 0.03f || std::abs(d.z()) > 0.03f) {
-                    std::cout << "[stream Δpelvis] dxy=" << std::fixed << std::setprecision(3)
-                              << dxy << "m dz=" << d.z() << "m pelvisM=("
-                              << pelvisM.x() << "," << pelvisM.y() << "," << pelvisM.z() << ")"
-                              << " sample=" << f.sampleCounter << "\n";
+                    std::ostringstream os;
+                    os << "[stream Δpelvis] dxy=" << std::fixed << std::setprecision(3)
+                       << dxy << "m dz=" << d.z() << "m pelvisM=("
+                       << pelvisM.x() << "," << pelvisM.y() << "," << pelvisM.z() << ")"
+                       << " sample=" << f.sampleCounter;
+                    logLine(os.str());
                 }
             }
             s_lastStreamPelvis = pelvisM;
             s_havePrevPelvis = true;
             if (++s_streamTick % 240 == 0) {
-                std::cout << "[stream tick=" << s_streamTick << "] pelvisM=("
-                          << std::fixed << std::setprecision(3)
-                          << pelvisM.x() << "," << pelvisM.y() << "," << pelvisM.z() << ")"
-                          << " qPelvis=(" << qStream[SEG_Pelvis].w << ","
-                          << qStream[SEG_Pelvis].x << "," << qStream[SEG_Pelvis].y << ","
-                          << qStream[SEG_Pelvis].z << ")"
-                          << " qRHand=(" << qStream[SEG_RHand].w << ","
-                          << qStream[SEG_RHand].x << "," << qStream[SEG_RHand].y << ","
-                          << qStream[SEG_RHand].z << ")"
-                          << " qLHand=(" << qStream[SEG_LHand].w << ","
-                          << qStream[SEG_LHand].x << "," << qStream[SEG_LHand].y << ","
-                          << qStream[SEG_LHand].z << ")"
-                          << " sample=" << f.sampleCounter << "\n";
+                std::ostringstream os;
+                os << "[stream tick=" << s_streamTick << "] pelvisM=("
+                   << std::fixed << std::setprecision(3)
+                   << pelvisM.x() << "," << pelvisM.y() << "," << pelvisM.z() << ")"
+                   << " qPelvis=(" << qStream[SEG_Pelvis].w << ","
+                   << qStream[SEG_Pelvis].x << "," << qStream[SEG_Pelvis].y << ","
+                   << qStream[SEG_Pelvis].z << ")"
+                   << " qRHand=(" << qStream[SEG_RHand].w << ","
+                   << qStream[SEG_RHand].x << "," << qStream[SEG_RHand].y << ","
+                   << qStream[SEG_RHand].z << ")"
+                   << " qLHand=(" << qStream[SEG_LHand].w << ","
+                   << qStream[SEG_LHand].x << "," << qStream[SEG_LHand].y << ","
+                   << qStream[SEG_LHand].z << ")"
+                   << " sample=" << f.sampleCounter << "\n";
                 const QVector3D dn = pelvisM - s_startPelvis;
                 const double netHoriz = std::sqrt(dn.x()*dn.x() + dn.y()*dn.y());
-                std::cout << "[stream travel] cumHoriz=" << std::fixed
-                          << std::setprecision(2) << s_cumHoriz << "m netHoriz="
-                          << netHoriz << "m (walks-in-place if cum>>net)\n";
+                os << "[stream travel] cumHoriz=" << std::fixed
+                   << std::setprecision(2) << s_cumHoriz << "m netHoriz="
+                   << netHoriz << "m (walks-in-place if cum>>net)";
+                logBlock(os.str());
             }
         }
     }
@@ -12832,9 +12896,11 @@ void MainWindow::onRenderTick()
         if (m_recBuffer.size() >= kHardCapFrames) {
             if (!m_recHardCapped) {
                 m_recHardCapped = true;
-                std::cerr << "[record] ERROR: take hit the ~60 min hard cap ("
-                          << m_recBuffer.size() << " frames); further frames are "
-                             "dropped to protect memory - stop and save now.\n";
+                std::ostringstream os;
+                os << "[record] ERROR: take hit the ~60 min hard cap ("
+                   << m_recBuffer.size() << " frames); further frames are "
+                      "dropped to protect memory - stop and save now.";
+                logLine(os.str());
             }
         } else {
             RecordedFrame rf;
@@ -12861,9 +12927,11 @@ void MainWindow::onRenderTick()
             if (!m_recOverflowWarned &&
                 m_recBuffer.size() > size_t(m_procRateHz * 60 * 10)) {
                 m_recOverflowWarned = true;
-                std::cerr << "[record] WARNING: take exceeded ~10 min ("
-                          << m_recBuffer.size() << " frames); the capture buffer "
-                             "keeps growing in RAM - stop and save soon.\n";
+                std::ostringstream os;
+                os << "[record] WARNING: take exceeded ~10 min ("
+                   << m_recBuffer.size() << " frames); the capture buffer "
+                      "keeps growing in RAM - stop and save soon.";
+                logLine(os.str());
             }
         }
         if (m_hud) m_hud->updateStats(qint64(m_recBuffer.size()), tNow);
@@ -13296,8 +13364,7 @@ void MainWindow::onRenderTick()
             }
 
             ss << "============================================================\n";
-            std::cout << ss.str();
-            std::cout.flush();
+            logBlock(ss.str());
         }
     }
 
@@ -13336,17 +13403,19 @@ void MainWindow::onRenderTick()
                << " heelLift{R=" << (L.heelLiftR ? 1 : 0) << " L=" << (L.heelLiftL ? 1 : 0) << "}"
                << " pelvisZVel=" << L.pelvisZVel
                << " maxW=" << kSegmentNames[maxSeg] << ":" << std::setprecision(1) << maxWdeg << "deg/s\n";
-            std::cout << ps.str();
+            logBlock(ps.str());
         }
 
         static int s_evtTick = 0; s_evtTick++;
 
         static int s_prevPose = -1;
         if (int(L.pose) != s_prevPose) {
-            std::cout << "[evt:pose] f=" << f.sampleCounter << " "
-                      << locoPoseName(s_prevPose < 0 ? 0 : s_prevPose) << " -> " << locoPoseName(L.pose)
-                      << " (tiltCos=" << std::setprecision(3) << L.tiltCos
-                      << " pelvisZVel=" << L.pelvisZVel << "m/s)\n";
+            std::ostringstream os;
+            os << "[evt:pose] f=" << f.sampleCounter << " "
+               << locoPoseName(s_prevPose < 0 ? 0 : s_prevPose) << " -> " << locoPoseName(L.pose)
+               << " (tiltCos=" << std::setprecision(3) << L.tiltCos
+               << " pelvisZVel=" << L.pelvisZVel << "m/s)";
+            logLine(os.str());
             s_prevPose = int(L.pose);
         }
 
@@ -13355,24 +13424,30 @@ void MainWindow::onRenderTick()
         static int s_stanceR = 0, s_stanceL = 0;
         const int srR = stanceOf(L.footPitchZR), srL = stanceOf(L.footPitchZL);
         if (srR != s_stanceR) {
-            std::cout << "[evt:foot] f=" << f.sampleCounter << " R " << stanceName(s_stanceR)
-                      << "->" << stanceName(srR) << " footPitchZ=" << std::setprecision(3)
-                      << L.footPitchZR << " pose=" << locoPoseName(L.pose) << "\n";
+            std::ostringstream os;
+            os << "[evt:foot] f=" << f.sampleCounter << " R " << stanceName(s_stanceR)
+               << "->" << stanceName(srR) << " footPitchZ=" << std::setprecision(3)
+               << L.footPitchZR << " pose=" << locoPoseName(L.pose);
+            logLine(os.str());
             s_stanceR = srR;
         }
         if (srL != s_stanceL) {
-            std::cout << "[evt:foot] f=" << f.sampleCounter << " L " << stanceName(s_stanceL)
-                      << "->" << stanceName(srL) << " footPitchZ=" << std::setprecision(3)
-                      << L.footPitchZL << " pose=" << locoPoseName(L.pose) << "\n";
+            std::ostringstream os;
+            os << "[evt:foot] f=" << f.sampleCounter << " L " << stanceName(s_stanceL)
+               << "->" << stanceName(srL) << " footPitchZ=" << std::setprecision(3)
+               << L.footPitchZL << " pose=" << locoPoseName(L.pose);
+            logLine(os.str());
             s_stanceL = srL;
         }
 
         static int s_lastPelvisZEvt = -1000;
         if (std::abs(L.pelvisZVel) > 0.40 && (s_evtTick - s_lastPelvisZEvt) > 15) {
             s_lastPelvisZEvt = s_evtTick;
-            std::cout << "[evt:pelvisZ] f=" << f.sampleCounter << " pelvisZVel="
-                      << std::setprecision(3) << L.pelvisZVel << "m/s pose=" << locoPoseName(L.pose)
-                      << " airborneT=" << L.airborneTicks << " landedT=" << L.landedTicks << "\n";
+            std::ostringstream os;
+            os << "[evt:pelvisZ] f=" << f.sampleCounter << " pelvisZVel="
+               << std::setprecision(3) << L.pelvisZVel << "m/s pose=" << locoPoseName(L.pose)
+               << " airborneT=" << L.airborneTicks << " landedT=" << L.landedTicks;
+            logLine(os.str());
         }
 
         static std::array<int, kXsensSegmentCount> s_lastOmegaEvt{};
@@ -13380,10 +13455,12 @@ void MainWindow::onRenderTick()
             const double wdeg = s_worldOmegaLP[i] * 180.0 / M_PI;
             if (wdeg > 250.0 && (s_evtTick - s_lastOmegaEvt[i]) > 30) {
                 s_lastOmegaEvt[i] = s_evtTick;
-                std::cout << "[evt:omega] f=" << f.sampleCounter << " seg[" << i << "] "
-                          << kSegmentNames[i] << " |w|=" << std::setprecision(1) << wdeg
-                          << "deg/s jump=" << std::setprecision(2) << g_renderDiag.jumpDeg[i]
-                          << "deg rejectW=" << std::setprecision(3) << g_renderDiag.rejectW[i] << "\n";
+                std::ostringstream os;
+                os << "[evt:omega] f=" << f.sampleCounter << " seg[" << i << "] "
+                   << kSegmentNames[i] << " |w|=" << std::setprecision(1) << wdeg
+                   << "deg/s jump=" << std::setprecision(2) << g_renderDiag.jumpDeg[i]
+                   << "deg rejectW=" << std::setprecision(3) << g_renderDiag.rejectW[i];
+                logLine(os.str());
             }
         }
 
@@ -13444,15 +13521,13 @@ void MainWindow::onRenderTick()
             if (trgPose) hb << "pose->" << locoPoseName(L.pose) << " ";
             if (trgFoot) hb << "footStance ";
             hb << "— flushing " << s_burstCount << " pre-frames -----\n";
-            std::cout << hb.str();
             const int start = (s_burstHead - s_burstCount + kBurstCap) % kBurstCap;
             for (int n = 0; n < s_burstCount; ++n)
-                std::cout << fmtBurst(s_burst[(start + n) % kBurstCap]) << " [pre]\n";
+                hb << fmtBurst(s_burst[(start + n) % kBurstCap]) << " [pre]\n";
+            logBlock(hb.str());
             s_burstPost = 120;
         }
-        if (s_burstPost > 0) { std::cout << fmtBurst(rec) << " [post]\n"; --s_burstPost; }
-
-        std::cout.flush();
+        if (s_burstPost > 0) { logLine(fmtBurst(rec) + " [post]"); --s_burstPost; }
     }
 
     std::array<QVector3D, kFingerSegmentsHand> relR{}, relL{};
@@ -14162,11 +14237,50 @@ CliArgs parseCli(int argc, char** argv)
     return out;
 }
 
+static std::mutex& g_logMutex()
+{
+    static std::mutex m;
+    return m;
+}
+
+double logUptimeSec()
+{
+    using clk = std::chrono::steady_clock;
+    static const clk::time_point t0 = clk::now();
+    return std::chrono::duration<double>(clk::now() - t0).count();
+}
+
+// Build the "[+   12.345s] " timestamp prefix without touching std::cout's
+// persistent format flags (other call sites rely on their own precision).
+static std::string logStamp()
+{
+    std::ostringstream ts;
+    ts << "[+" << std::fixed << std::setprecision(3)
+       << std::setw(9) << logUptimeSec() << "s] ";
+    return ts.str();
+}
+
+void logLine(const std::string& msg)
+{
+    const std::string stamp = logStamp();
+    std::lock_guard<std::mutex> lk(g_logMutex());
+    std::cout << stamp << msg << '\n';
+    std::cout.flush();
+}
+
+void logBlock(const std::string& block)
+{
+    const std::string stamp = logStamp();
+    std::lock_guard<std::mutex> lk(g_logMutex());
+    std::cout << stamp << block;
+    if (block.empty() || block.back() != '\n') std::cout << '\n';
+    std::cout.flush();
+}
+
 void testLog(const std::string& msg, bool enabled)
 {
     if (!enabled) return;
-    std::cout << msg << '\n';
-    std::cout.flush();
+    logLine(msg);
 }
 
 static void attachTestOutput()
@@ -14187,8 +14301,7 @@ static void attachTestOutput()
     std::cout.clear();
     std::cerr.clear();
     std::cout.sync_with_stdio(true);
-    std::cout << "[boot] log opened at " << logPath << '\n';
-    std::cout.flush();
+    logLine("[boot] log opened at " + logPath);
 #endif
 }
 
@@ -14207,11 +14320,12 @@ int main(int argc, char** argv)
     if (cli.test) {
         attachTestOutput();
 
-        std::cout << "[boot] suit=" << (cli.suit == SuitType::Link ? "Link" : "Awinda")
-                  << " nativeRate=" << nativeRateHz(cli.suit) << "Hz"
-                  << " gloves=" << (cli.gloves ? "on" : "off")
-                  << " wristConstraint=" << (cli.wristConstraint ? "on" : "off") << "\n";
-        std::cout.flush();
+        std::ostringstream os;
+        os << "[boot] suit=" << (cli.suit == SuitType::Link ? "Link" : "Awinda")
+           << " nativeRate=" << nativeRateHz(cli.suit) << "Hz"
+           << " gloves=" << (cli.gloves ? "on" : "off")
+           << " wristConstraint=" << (cli.wristConstraint ? "on" : "off");
+        logLine(os.str());
     }
 
     {
