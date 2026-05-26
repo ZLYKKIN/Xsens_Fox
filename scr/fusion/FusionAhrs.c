@@ -337,6 +337,7 @@ void FusionAhrsRestart(FusionAhrs *ahrs) {
     ahrs->magGateOpen = false;
     ahrs->accUsedThisFrame = false;
     ahrs->zruActiveThisFrame = false;
+    ahrs->qSeeded = false;
 }
 
 void FusionAhrsSetSettings(FusionAhrs *ahrs, const FusionAhrsSettings *settings) {
@@ -912,6 +913,31 @@ void FusionAhrsUpdate(FusionAhrs *ahrs,
         accelerometer.axis.y * KFA_GRAVITY_MS2,
         accelerometer.axis.z * KFA_GRAVITY_MS2,
     }};
+
+    // §IX БУТСТРАП ориентации от акселерометра на 1-м кадре. EKF стартует с q=identity и
+    //   init-SD ориентации всего 3° (KFA_INIT_SD_ORIENT_DEG) — то есть «считает себя выровненным».
+    //   Но датчик смонтирован под произвольным углом (напр. q_bs таза ~174°), поэтому без засева
+    //   dAcc огромен, акселерометр гейтится (dAccHighTime>0.5с -> accUsedThisFrame=false) и
+    //   ориентация НЕ сходится -> дрейф/вращение неподвижного сегмента. Засев выравнивает q к
+    //   измеренной гравитации (рыскание=0, его задаёт mag/калибровка): R(q)·â = world_up.
+    //   (formules.txt §IX/§43)
+    if (!ahrs->qSeeded) {
+        const float aN = FusionVectorNorm(aMs2);
+        if (aN > 0.5f * KFA_GRAVITY_MS2 && aN < 1.8f * KFA_GRAVITY_MS2) {
+            const FusionVector u = FusionVectorNormalise(aMs2);   // "вверх" в системе сенсора
+            FusionQuaternion qs;
+            const float w = 1.0f + u.axis.z;
+            if (w < 1.0e-6f) {                 // сенсор перевёрнут (â≈-Z): 180° вокруг X
+                qs.element.w = 0.0f; qs.element.x = 1.0f;
+                qs.element.y = 0.0f; qs.element.z = 0.0f;
+            } else {                           // кратчайшая дуга â -> (0,0,1)
+                qs.element.w = w;  qs.element.x =  u.axis.y;
+                qs.element.y = -u.axis.x; qs.element.z = 0.0f;
+            }
+            ahrs->q = FusionQuaternionNormalise(qs);
+            ahrs->qSeeded = true;
+        }
+    }
 
     Predict(ahrs, gyroscope, dt);
 

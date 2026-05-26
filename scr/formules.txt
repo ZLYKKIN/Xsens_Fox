@@ -4887,8 +4887,9 @@
      q_eta[s] = известная эталонная (из .xsa файла, например для R UpperArm в
                 N-pose = (0.7071, 0.7071, 0, 0));
      q_align[s] = q_eta[s] ⊗ conj(q_S_avg[s]) ⊗ conj(q_bs[s]).   // inv(q_bs)=conj(q_bs), НЕ q_bs
-     // Конвенция Fox (пред-вращение входов + FK m_defAng): q_align[s] = conj(q_S_avg[s]) ⊗ q_eta[s]
-     // ⊗ conj(m_defAng[s]), без q_bs. См. раздел 174.4 (примечание о конвенции) и main.cpp.
+     // Конвенция Fox: s2s пред-вращает входы AHRS на conj(q_align) => fused = q_S_avg ⊗ q_align.
+     // m_defAng в FK СОКРАЩАЕТСЯ (m_localOffset = R(conj(m_defAng))·L_bone), видимая кость = R(fused)·L_bone.
+     // Цель fused = q_eta => q_align[s] = conj(q_S_avg[s]) ⊗ q_eta[s]  (без q_bs и без m_defAng). См. раздел 174.4 и main.cpp.
 
   ШАГ 5: проверка качества:
      для каждого s:
@@ -21754,18 +21755,19 @@
          где q_bs(i) — заводское выравнивание (раздел 88).
          Это даёт уточнённое выравнивание датчик -> кость для данного субъекта.
          ВНИМАНИЕ (конвенция Fox): формула выше — для ПОСТ-умножения на выход (q_seg = q_датчик ⊗ q_align,
-         раздел 24.5). РЕАЛИЗАЦИЯ Fox применяет q_align ПРЕД-вращением входов AHRS (conj(q_align)) и
-         добавляет шаг FK m_defAng: world = fused ⊗ m_defAng, fused = q_датчик ⊗ q_align. Из требования
-         world = q_эталон в калибровочной позе строго следует q_align(i) = conj(q_S_avg(i)) ⊗ q_эталон(i)
-         ⊗ conj(m_defAng(i)) — БЕЗ q_bs (живая калибровка субъекта задаёт связку датчик->мир целиком).
+         раздел 24.5). РЕАЛИЗАЦИЯ Fox: s2s пред-вращает входы AHRS на conj(q_align) => fused = q_датчик ⊗ q_align.
+         Шаг FK oriented = fused ⊗ m_defAng существует, НО m_defAng СОКРАЩАЕТСЯ в геометрии костей, т.к.
+         m_localOffset = R(conj(m_defAng))·L_bone, поэтому видимая кость = R(oriented)·m_localOffset = R(fused)·L_bone.
+         Значит цель — fused = q_эталон, откуда строго: q_align(i) = conj(q_S_avg(i)) ⊗ q_эталон(i)
+         — БЕЗ q_bs и БЕЗ m_defAng. Проверено: R(q_эталон_N)·L_bone даёт точную N-позу.
          См. main.cpp NewSessionWizard::finishCalibration.
 
   [174.5] КАЧЕСТВО КАЛИБРОВКИ.
          q_resid(i) = q_align(i) ⊗ q_bs_baseline(i) — отклонение от заводского.
          angle_resid = 2 * acos(q_resid.w) * 180/pi.
-         ВНИМАНИЕ: при q_align = q_эталон ⊗ conj(q_S_avg) ⊗ conj(q_bs) эта метрика алгебраически
-         сводится к q_эталон ⊗ conj(q_S_avg), а её угол ≈ angle(q_bs) (~100-174° для рук) — то есть
-         почти ВСЕГДА «invalid» независимо от качества стойки. НЕ использовать как самостоятельный балл.
+         ВНИМАНИЕ: q_align законно отличается от заводского q_bs на реальный монтаж датчика субъекта,
+         поэтому angle(q_align ⊗ q_bs) велик (~100-174° для рук) ВСЕГДА и как самостоятельный балл даёт
+         ложный «invalid» независимо от качества стойки. НЕ использовать в одиночку.
          Осмысленные метрики (реализация Fox): (1) РАЗБРОС выборки позы вокруг Маркли-среднего
          (стиллнес субъекта); (2) РАССОГЛАСОВАНИЕ N/T выравниваний angle(qAlignN, qAlignT) — в идеале 0°.
          Качество:
