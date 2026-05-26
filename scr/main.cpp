@@ -6146,12 +6146,22 @@ void MocapReceiver::run()
 
             if (targetSeg >= 0 && targetSeg < kXsensSegmentCount) {
                 QMutexLocker lk(&I.lock);
-                // §174.4 bone orientation = q_sensor ⊗ q_align (post-rotation). q_align was
-                //   solved so that the calibration pose maps to its reference (fused=q_ref);
-                //   gyro then carries it to neighbouring poses. Identity when uncalibrated.
-                const Quat qAlign = cal.s2sActive ? cal.s2sFwd : Quat(1, 0, 0, 0);
-                if      (haveFused) staging.quat[targetSeg] = quat_mult(fusedQuat, qAlign).normalized();
-                else if (haveQuat)  staging.quat[targetSeg] = quat_mult(qo, qAlign).normalized();
+                // §174.4 bone orientation = R_z(h) ⊗ q_sensor ⊗ conj(q_bs).
+                //   cal.s2sFwd = conj(q_bs) (two-pose sensor->bone), applied as a post-rotation.
+                //   R_z(h) = yaw_only(q_ref_N ⊗ q_bs) restores the per-segment heading that the
+                //   no-mag EKF zeroes at its gravity seed, so the rendered pose is correct away
+                //   from the calibration pose (the arms in the T-pose), not only in the N-pose.
+                //   (q_bs = cal.s2sFwd.conj(); identity transform when uncalibrated.)
+                if (haveFused || haveQuat) {
+                    Quat qSensor = haveFused ? fusedQuat : qo;
+                    if (cal.s2sActive) {
+                        const Quat head = yaw_only_quat(
+                            quat_mult(fox::body::kRefQuatN[targetSeg], cal.s2sFwd.conj()));
+                        qSensor = quat_mult(head,
+                                            quat_mult(qSensor, cal.s2sFwd)).normalized();
+                    }
+                    staging.quat[targetSeg] = qSensor;
+                }
                 staging.segValid[targetSeg] = haveFused || haveQuat;
                 staging.segLastT[targetSeg] = monotonicSec();
                 staging.linAccBody[targetSeg]  = I.segLinAccBody[targetSeg];
@@ -9073,22 +9083,14 @@ void NewSessionWizard::onCaptureTick()
             ? m_accAccumT[i] / float(m_accumCountT[i]) : QVector3D(0, 0, 1);
         const QVector3D gN = (m_accumCountN[i] > 0)
             ? m_accAccumN[i] / float(m_accumCountN[i]) : QVector3D(0, 0, 1);
-        // §174.4/§223 spec sensor->bone alignment (replaces the gravity-only mount solve):
-        //   q_align = conj(q_S_avg) ⊗ q_ref_N, applied as a POST-rotation on the sensor-frame
-        //   AHRS output (staging.quat). q_S_avg = gravity-levelled sensor orientation in the
-        //   N-pose held at calibration end (heading 0) — exactly what the re-seeded EKF
-        //   reproduces — so the arbitrary filter heading cancels and fused = q_ref_N when the
-        //   actor holds N; gyro then carries it to q_ref_T as the actor moves to the T-pose.
-        //   Unlike the gravity-only solve this also fixes the heading-dependent arm orientation.
-        QVector3D uN = gN;
-        if (uN.lengthSquared() < 1e-12f) uN = QVector3D(0, 0, 1);
-        uN.normalize();
-        const double wSeed = 1.0 + double(uN.z());
-        const Quat qSavg = (wSeed < 1e-6)
-            ? Quat(0, 1, 0, 0)
-            : Quat(wSeed, double(uN.y()), -double(uN.x()), 0).normalized();
-        s2s[i] = quat_mult(qSavg.conj(), fox::body::kRefQuatN[i]).normalized();
-        (void)gT; (void)solveMountGravity;   // gravity-only mount solve retained for reference
+        // §24.5/§174.4 TWO-pose gravity solve -> q_bs (sensor->bone). The arm gravity changes
+        //   T<->N, which (unlike a single pose) pins the heading component of the mounting too;
+        //   legs/spine stay tilt-only (their heading is unobservable but irrelevant). s2s stores
+        //   conj(q_bs): the runtime applies it as a POST-rotation on the sensor-frame AHRS output,
+        //   bone = R_z(h) ⊗ q_sensor ⊗ conj(q_bs), where R_z(h)=yaw_only(q_ref_N⊗q_bs) restores the
+        //   per-segment heading the no-mag EKF seed zeroes (see staging.quat in run()). This makes
+        //   poses away from the calibration pose (e.g. the T-pose) correct, not just the N-pose.
+        s2s[i] = solveMountGravity(i, gT, gN).conj().normalized();
 
         residDeg[i]    = nDispDeg;   // §174.4 формула-независимое качество захвата (стиллнес N-позы)
         qualityBand[i] = fox::body::calibrationQuality(residDeg[i]);
