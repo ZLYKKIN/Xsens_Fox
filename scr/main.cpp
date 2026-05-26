@@ -68,6 +68,7 @@ extern "C" {
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <iomanip>
@@ -8948,13 +8949,6 @@ void NewSessionWizard::onCaptureTick()
         tposeValid[i] = (dist2 > 1e-12);
     }
 
-    // §V/§24/§174.4 defAng стримингового скелета. FK даёт world=fused⊗m_defAng
-    //   (computeKeypoints, main.cpp:3083), а стрим строит скелет с m_setup.poseKind
-    //   (==m_result.poseKind, main.cpp:12228). Калибровка обязана решать q_align ПОД этот
-    //   же defAng, иначе мировая ориентация сегмента не совпадёт с эталоном. (formules.txt §24.5 стр.21371-21389)
-    const std::array<Quat, kXsensSegmentCount> defAngStream =
-        defaultSegAnglesFor(m_result.poseKind);
-
     constexpr std::size_t kCalibMinSamplesPerSeg = 60;
     for (int i = 0; i < kXsensSegmentCount; ++i) {
         if (!fox::body::kSensorPresent[i]) continue;
@@ -8977,20 +8971,18 @@ void NewSessionWizard::onCaptureTick()
         m_result.calibReference[i] = qAvgN;
         const Quat& qRefN = fox::body::kRefQuatN[i];
         const Quat& qRefT = fox::body::kRefQuatT[i];
-        const Quat& defA  = defAngStream[i];
 
         // §24.5/§174.4 выравнивание датчик->сегмент q_align для КОНВЕНЦИИ ДВИЖКА (усреднение поз Маркли §1824).
-        // Конвенция: s2s пред-вращает входы AHRS на conj(qAlign) (main.cpp:6004-6008) => fused = qAvg (X) qAlign;
-        //   FK даёт world = fused (X) m_defAng (main.cpp:3083). В калибровочной позе world ОБЯЗАН = qRef, откуда
-        //   строго: qAlign = conj(qAvg) (X) qRef (X) conj(m_defAng). НЕ путать с пост-мультипликативной записью
-        //   §24.5/§1160 (q_seg = q_датчик (X) q_align, БЕЗ defAng) — она для другой конвенции, копировать нельзя.
-        // Проверено локально (Python) на qAvg из лога: ошибка world vs эталон = 0.00° по всем сегментам;
-        //   прежняя формула qRef(X)conj(qAvg)(X)conj(q_bs) давала 168-174° (таз/руки) -> скелет вверх ногами.
-        //   q_bs (заводской монтаж §88) здесь НЕ нужен: живая калибровка задаёт связку датчик->мир целиком.
-        //   (formules.txt §24.5 стр.21371-21389, §174.4 стр.21749-21753)
-        const Quat qAlignN = quat_mult(
-            quat_mult(qAvgN.conj(), qRefN),
-            defA.conj()).normalized();
+        // Конвейер: s2s пред-вращает входы AHRS на conj(qAlign) (main.cpp:6004-6008) => в покое fused = qAvg (X) qAlign.
+        //   В FK m_defAng СОКРАЩАЕТСЯ: m_localOffset = R(conj(m_defAng))·L_bone (main.cpp:2891), а
+        //   boneVec = R(fused (X) m_defAng)·m_localOffset = R(fused)·L_bone. Значит видимая кость зависит
+        //   ТОЛЬКО от fused, не от m_defAng. Нужная поза достигается при fused = qRef, откуда строго:
+        //   qAlign = conj(qAvg) (X) qRef.  БЕЗ m_defAng и БЕЗ q_bs.
+        // Проверено локально (Python): R(qRefN)·L_bone даёт ТОЧНУЮ N-позу (позвоночник +Z, руки -Z вниз,
+        //   ноги вниз, стопы +X), R(qRefT)·L_bone — T-позу (руки ±Y в стороны). Прежние варианты неверны:
+        //   оригинал qRef(X)conj(qAvg)(X)conj(q_bs) и ошибочный conj(qAvg)(X)qRef(X)conj(defAng) (позвоночник
+        //   ложился горизонтально). (formules.txt §24.5 стр.21371-21389, §174.4)
+        const Quat qAlignN = quat_mult(qAvgN.conj(), qRefN).normalized();
 
         // §174.4/§1266/§1698 качество захвата = РАЗБРОС N-выборки (стиллнес субъекта + шум датчика).
         //   Каноничная §174.5 angle(qAlign⊗q_bs) вырождается в ~angle(q_bs) (≈100-174° для рук) — всегда
@@ -9012,9 +9004,7 @@ void NewSessionWizard::onCaptureTick()
         Quat qAlign = qAlignN;   // выравнивание (поведение прежнее: Маркли-среднее N и T)
         if (tposeValid[i]) {
             const Quat& qAvgT = m_result.tposeReference[i];
-            const Quat qAlignT = quat_mult(
-                quat_mult(qAvgT.conj(), qRefT),
-                defA.conj()).normalized();
+            const Quat qAlignT = quat_mult(qAvgT.conj(), qRefT).normalized();
             // §174.5 осмысленный остаток качества: рассогласование N/T выравниваний (в идеале 0°,
             //   т.к. оба = одна и та же монтажная связка датчик->кость). (formules.txt §174.5 стр.21755-21763)
             {
@@ -9079,20 +9069,20 @@ void NewSessionWizard::onCaptureTick()
         constexpr double kMountTestDeg = 12.0;
         const double h = 0.5 * kMountTestDeg * M_PI / 180.0;
         const Quat dMount(std::cos(h), 0.0, 0.0, std::sin(h));
-        auto worldOf = [](const Quat& qAvg, const Quat& qRef, const Quat& defA) {
-            const Quat qAlign = quat_mult(quat_mult(qAvg.conj(), qRef), defA.conj()).normalized();
-            return quat_mult(quat_mult(qAvg, qAlign), defA).normalized();
+        // fused = qAvg (X) qAlign, qAlign = conj(qAvg) (X) qRef => fused = qRef (мостонезависимо).
+        auto fusedOf = [](const Quat& qAvg, const Quat& qRef) {
+            const Quat qAlign = quat_mult(qAvg.conj(), qRef).normalized();
+            return quat_mult(qAvg, qAlign).normalized();
         };
         double maxDrift = 0.0;
         for (int s = 0; s < kXsensSegmentCount; ++s) {
             if (!fox::body::kSensorPresent[s]) continue;
             const Quat& qbs  = fox::body::kSensorToBone[s].q_bs;   // пример монтажа датчика
             const Quat& qref = fox::body::kRefQuatN[s];
-            const Quat& defA = defAngStream[s];
             const Quat qAvg0 = quat_mult(qref, qbs).normalized();
             const Quat qAvg2 = quat_mult(qAvg0, dMount).normalized();
-            const Quat w0 = worldOf(qAvg0, qref, defA);
-            const Quat w2 = worldOf(qAvg2, qref, defA);
+            const Quat w0 = fusedOf(qAvg0, qref);
+            const Quat w2 = fusedOf(qAvg2, qref);
             const Quat d  = quat_mult(w0, w2.conj()).normalized();
             double w = std::abs(d.w); if (w > 1.0) w = 1.0;
             maxDrift = std::max(maxDrift, 2.0 * std::acos(w) * 180.0 / M_PI);
@@ -12450,11 +12440,10 @@ MainWindow::MainWindow(MocapReceiver* rx,
     connect(m_rx, &MocapReceiver::gloveStatusChanged, this, &MainWindow::onGloveStatus);
     connect(m_rx, &MocapReceiver::fpsUpdated,         this, &MainWindow::onFps);
 
-    {
-        const QString jp = JointOffsets::filePath();
-        if (QFile::exists(jp)) m_jointOffsets.load(jp);
-        else                   m_jointOffsets.save(jp);
-    }
+    // "Градус направления кости" (m_jointOffsets) по умолчанию НЕЙТРАЛЬНЫЙ — ничего не меняет.
+    //   Раньше офсеты авто-загружались из файла и могли деформировать скелет (магические значения).
+    //   Теперь стартуем с нуля; явная ручная настройка — только через диалог (его load/save). (см. main.cpp:12778)
+    m_jointOffsets.clear();
 
     m_renderTimer.setTimerType(Qt::PreciseTimer);
     m_renderTimer.setInterval(int(1000.0 / m_procRateHz));
@@ -12795,15 +12784,10 @@ void MainWindow::onRenderTick()
         const float pelvisZ_loco = float(fox::body::pelvisStandHeightM(m_setup.heightCm / 100.0));
         auto kpLoco = m_skel->computeKeypoints(qOut, QVector3D(0.0f, 0.0f, pelvisZ_loco));
 
-        // §V/§1158/§1159 loco-решатель и контакты стоп работают в МИРОВОЙ системе:
-        //   world[i] = qOut[i] ⊗ m_defAng[i] (та же связка, что в FK computeKeypoints, main.cpp:3083).
-        //   Передавать сырой qOut (до defAng) нельзя: up-вектор таза и наклон стоп окажутся в чужой
-        //   системе -> ложный Lying/Squat и ложные heel/toe при ровной стойке. (formules.txt §24/§174)
-        const std::array<Quat, kXsensSegmentCount>& defA = m_skel->defaultSegAngles();
-        std::array<Quat, kXsensSegmentCount> worldQ;
-        for (int wi = 0; wi < kXsensSegmentCount; ++wi)
-            worldQ[wi] = quat_mult(qOut[wi], defA[wi]).normalized();
-
+        // §V/§1158/§1159 loco-решатель работает на qOut (= fused). m_defAng в FK СОКРАЩАЕТСЯ
+        //   (m_localOffset=R(conj(defAng))·L_bone, main.cpp:2891), поэтому при верной калибровке
+        //   qOut[Pelvis]=fused=qRef уже даёт правильный up-вектор/yaw. defAng тут добавлять НЕЛЬЗЯ.
+        //   (formules.txt §24/§174)
         const double tSec = std::chrono::duration<double>(
                 std::chrono::steady_clock::now().time_since_epoch()).count();
 
@@ -12815,7 +12799,7 @@ void MainWindow::onRenderTick()
                                 kpLoco[SEG_RFoot].y() - pelvisXY.y(), 0.0f);
             const QVector3D lXY(kpLoco[SEG_LFoot].x() - pelvisXY.x(),
                                 kpLoco[SEG_LFoot].y() - pelvisXY.y(), 0.0f);
-            const Quat qPYawInv = yaw_only_quat(worldQ[SEG_Pelvis]).inv();
+            const Quat qPYawInv = yaw_only_quat(qOut[SEG_Pelvis]).inv();
             const QVector3D rPel = vec_rotate(rXY, qPYawInv);
             const QVector3D lPel = vec_rotate(lXY, qPYawInv);
 
@@ -12824,7 +12808,7 @@ void MainWindow::onRenderTick()
             m_viewport->setCrossLeggedHints(cR > 0.5, cL > 0.5, cR, cL);
         }
 
-        m_viewport->tickLoco(worldQ,
+        m_viewport->tickLoco(qOut,
                              kpLoco[SEG_RFoot], kpLoco[SEG_RToe], kpLoco[26],
                              kpLoco[SEG_LFoot], kpLoco[SEG_LToe], kpLoco[27],
                              tSec);
@@ -14414,6 +14398,17 @@ int main(int argc, char** argv)
     applyDarkTitleBar(win);
 
     const int rc = app.exec();
+
+    // Гарантированное завершение процесса. Драйверы Xsens(XDA)/Manus поднимают свои фоновые
+    //   потоки; если поток-приёмник застрял в их вызове, штатная размотка (~QApplication ->
+    //   ~MocapReceiver -> wait) не дождётся выхода, и fox_mocap.exe остаётся в диспетчере, держа
+    //   fox_mocap.log (это freopen stdout/stderr, main.cpp:~14325). Поэтому: (1) корректно
+    //   останавливаем приёмник, давая run() выполнить CoreSdk_ShutDown/XsControl_close;
+    //   (2) сбрасываем буферы лога; (3) принудительно закрываем процесс, минуя зависающие
+    //   SDK-потоки и static-деструкторы.
+    if (rx) { rx->stop(); rx->wait(4000); }
     delete win;
+    std::fflush(nullptr);
+    std::quick_exit(rc);
     return rc;
 }
