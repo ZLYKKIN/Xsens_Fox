@@ -6086,14 +6086,13 @@ void MocapReceiver::run()
                 if (dt > 1e-4) {
                     FusionAhrsSetSampleRate(&ahrs, float(1.0 / dt));
                 }
-                if (haveMag && mag.length() > 1e-6) {
-                    const FusionVector m = {{ float(mag.x()),
-                                              float(mag.y()),
-                                              float(mag.z()) }};
-                    FusionAhrsUpdate(&ahrs, g, a, m, float(dt));
-                } else {
-                    FusionAhrsUpdateNoMagnetometer(&ahrs, g, a, float(dt));
-                }
+                // Heading from gyro only. The suit magnetometer is unreliable in a
+                // disturbed indoor field (per-segment |m| ~0.72..1.05); its intermittent
+                // gating churned each sensor's yaw independently (l_hand ~100°/s) and
+                // destroyed inter-segment heading coherence — the dominant cause of the
+                // collapsed/twisted skeleton. A single common heading is established by the
+                // calibration re-init (identity) + gravity alignment; gyro maintains it.
+                FusionAhrsUpdateNoMagnetometer(&ahrs, g, a, float(dt));
 
                 {
                     const FusionAhrsInternalStates st = FusionAhrsGetInternalStates(&ahrs);
@@ -8949,6 +8948,61 @@ void NewSessionWizard::onCaptureTick()
         tposeValid[i] = (dist2 > 1e-12);
     }
 
+    // §24.5/§174.4 GRAVITY-based two-pose sensor->bone solve. Gravity in the T and N
+    //   reference poses determines the mounting WITHOUT any heading reference, so it is
+    //   immune to the per-sensor yaw drift that corrupts the fused-orientation average.
+    //   quatAlign: minimal rotation taking unit vector a onto unit vector b.
+    auto quatAlign = [](QVector3D a, QVector3D b) -> Quat {
+        a.normalize(); b.normalize();
+        const double d = double(QVector3D::dotProduct(a, b));
+        if (d > 0.9999995) return Quat(1, 0, 0, 0);
+        QVector3D ax = QVector3D::crossProduct(a, b);
+        const double s = double(ax.length());
+        if (s < 1e-9) {                                   // antiparallel -> 180° about any perp
+            QVector3D perp = QVector3D::crossProduct(a, QVector3D(1, 0, 0));
+            if (double(perp.length()) < 1e-6)
+                perp = QVector3D::crossProduct(a, QVector3D(0, 1, 0));
+            perp.normalize();
+            return Quat(0, perp.x(), perp.y(), perp.z());
+        }
+        ax /= float(s);
+        const double ang = std::atan2(s, d);
+        return fox::quat_exp_rotvec(ax.x() * ang, ax.y() * ang, ax.z() * ang);
+    };
+    //   q_bs (sensor->bone) such that R(q_bs)*gT~=uT and R(q_bs)*gN~=uN, with
+    //   uT/uN = gravity-up expressed in the bone frame for the reference T/N poses.
+    auto solveMountGravity = [&](int i, QVector3D gT, QVector3D gN) -> Quat {
+        if (gT.lengthSquared() < 1e-12f || gN.lengthSquared() < 1e-12f)
+            return fox::body::kSensorToBone[i].q_bs;
+        gT.normalize(); gN.normalize();
+        const QVector3D zUp(0, 0, 1);
+        const QVector3D uT = fox::vec_rotate(zUp, fox::body::kRefQuatT[i].conj());
+        const QVector3D uN = fox::vec_rotate(zUp, fox::body::kRefQuatN[i].conj());
+        const double moved = double(QVector3D::crossProduct(gT, gN).length()); // ~sin(T->N)
+        if (moved < 0.20) {
+            // vertical segment (legs/spine/feet): heading about gravity is unobservable —
+            //   keep factory q_bs heading, correct only the per-subject tilt.
+            const Quat qbs = fox::body::kSensorToBone[i].q_bs;
+            const QVector3D pred = fox::vec_rotate(gT, qbs);
+            return quat_mult(quatAlign(pred, uT), qbs).normalized();
+        }
+        // moving segment (arm): full two-pose solve. Align gT->uT, then twist about uT to gN->uN.
+        const Quat q1 = quatAlign(gT, uT);
+        const QVector3D gN1 = fox::vec_rotate(gN, q1);
+        QVector3D a = gN1 - uT * float(QVector3D::dotProduct(gN1, uT));
+        QVector3D b = uN  - uT * float(QVector3D::dotProduct(uN,  uT));
+        if (double(a.length()) > 1e-4 && double(b.length()) > 1e-4) {
+            a.normalize(); b.normalize();
+            const double dd = std::clamp(double(QVector3D::dotProduct(a, b)), -1.0, 1.0);
+            const QVector3D cr = QVector3D::crossProduct(a, b);
+            const double sgn = (double(QVector3D::dotProduct(cr, uT)) >= 0.0) ? 1.0 : -1.0;
+            const double ang = sgn * std::atan2(double(cr.length()), dd);
+            const Quat q2 = fox::quat_exp_rotvec(uT.x() * ang, uT.y() * ang, uT.z() * ang);
+            return quat_mult(q2, q1).normalized();
+        }
+        return q1.normalized();
+    };
+
     constexpr std::size_t kCalibMinSamplesPerSeg = 60;
     for (int i = 0; i < kXsensSegmentCount; ++i) {
         if (!fox::body::kSensorPresent[i]) continue;
@@ -8972,16 +9026,11 @@ void NewSessionWizard::onCaptureTick()
         const Quat& qRefN = fox::body::kRefQuatN[i];
         const Quat& qRefT = fox::body::kRefQuatT[i];
 
-        // §24.5/§174.4 выравнивание датчик->сегмент q_align для КОНВЕНЦИИ ДВИЖКА (усреднение поз Маркли §1824).
-        // Конвейер: s2s пред-вращает входы AHRS на conj(qAlign) (main.cpp:6004-6008) => в покое fused = qAvg (X) qAlign.
-        //   В FK m_defAng СОКРАЩАЕТСЯ: m_localOffset = R(conj(m_defAng))·L_bone (main.cpp:2891), а
-        //   boneVec = R(fused (X) m_defAng)·m_localOffset = R(fused)·L_bone. Значит видимая кость зависит
-        //   ТОЛЬКО от fused, не от m_defAng. Нужная поза достигается при fused = qRef, откуда строго:
-        //   qAlign = conj(qAvg) (X) qRef.  БЕЗ m_defAng и БЕЗ q_bs.
-        // Проверено локально (Python): R(qRefN)·L_bone даёт ТОЧНУЮ N-позу (позвоночник +Z, руки -Z вниз,
-        //   ноги вниз, стопы +X), R(qRefT)·L_bone — T-позу (руки ±Y в стороны). Прежние варианты неверны:
-        //   оригинал qRef(X)conj(qAvg)(X)conj(q_bs) и ошибочный conj(qAvg)(X)qRef(X)conj(defAng) (позвоночник
-        //   ложился горизонтально). (formules.txt §24.5 стр.21371-21389, §174.4)
+        // §24.5/§174.4 ДИАГНОСТИКА (НЕ устанавливается): прежнее выравнивание из УСРЕДНЁННОЙ
+        //   FUSED-ориентации qAlign = conj(qAvg) ⊗ qRef. Оно наследует рыскание (yaw) пер-сенсорного
+        //   AHRS, которое во время захвата ДРЕЙФУЕТ (магнитометр гейтится закрытым в искажённом поле),
+        //   из-за чего q_align получался мусорным (асимметрия L/R, разброс N-выборки до 100°+).
+        //   Реальное выравнивание s2s теперь считается ПО ГРАВИТАЦИИ (см. ниже, solveMountGravity).
         const Quat qAlignN = quat_mult(qAvgN.conj(), qRefN).normalized();
 
         // §174.4/§1266/§1698 качество захвата = РАЗБРОС N-выборки (стиллнес субъекта + шум датчика).
@@ -9001,21 +9050,25 @@ void NewSessionWizard::onCaptureTick()
             nDispDeg = (cnt > 0) ? std::sqrt(acc / double(cnt)) : 99.0;
         }
 
-        Quat qAlign = qAlignN;   // выравнивание (поведение прежнее: Маркли-среднее N и T)
+        // §174.5 diagnostic (logging only): agreement between the legacy fused-Markley
+        //   N/T alignments — large values here are exactly the per-sensor heading drift
+        //   that motivated switching s2s to the gravity solve below.
         if (tposeValid[i]) {
             const Quat& qAvgT = m_result.tposeReference[i];
             const Quat qAlignT = quat_mult(qAvgT.conj(), qRefT).normalized();
-            // §174.5 осмысленный остаток качества: рассогласование N/T выравниваний (в идеале 0°,
-            //   т.к. оба = одна и та же монтажная связка датчик->кость). (formules.txt §174.5 стр.21755-21763)
-            {
-                double aw = std::abs(quat_mult(qAlignN, qAlignT.conj()).normalized().w);
-                if (aw > 1.0) aw = 1.0;
-                ntAgreeDeg[i] = 2.0 * std::acos(aw) * 180.0 / M_PI;
-            }
-            std::vector<Quat> v{qAlignN, qAlignT};
-            qAlign = fox::quat_avg_markley(v);
+            double aw = std::abs(quat_mult(qAlignN, qAlignT.conj()).normalized().w);
+            if (aw > 1.0) aw = 1.0;
+            ntAgreeDeg[i] = 2.0 * std::acos(aw) * 180.0 / M_PI;
         }
-        s2s[i] = qAlign;
+        // §24.5/§174.4 install the GRAVITY-based two-pose alignment as s2s (sensor->bone).
+        //   Mean gravity per sensor during the T and N captures (already accumulated in
+        //   m_accAccumT/N) drives the solve; heading is never used, so the result is
+        //   immune to the mag-ungated yaw drift that corrupted the fused average.
+        const QVector3D gT = (m_accumCountT[i] > 0)
+            ? m_accAccumT[i] / float(m_accumCountT[i]) : QVector3D(0, 0, 1);
+        const QVector3D gN = (m_accumCountN[i] > 0)
+            ? m_accAccumN[i] / float(m_accumCountN[i]) : QVector3D(0, 0, 1);
+        s2s[i] = solveMountGravity(i, gT, gN).conj().normalized();
 
         residDeg[i]    = nDispDeg;   // §174.4 формула-независимое качество захвата (стиллнес N-позы)
         qualityBand[i] = fox::body::calibrationQuality(residDeg[i]);
