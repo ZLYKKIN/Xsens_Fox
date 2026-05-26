@@ -5772,6 +5772,7 @@ void MocapReceiver::run()
         QVector3D gyrBias, magSoftOff;
         std::array<double, 9> magSoftMat{};
         Quat   s2sInv;
+        Quat   s2sFwd;   // §174.4 q_align: post-rotation on AHRS output (sensor->bone)
         float  segGain = 0.0f;
     };
 
@@ -5833,6 +5834,7 @@ void MocapReceiver::run()
                     cal.magSoftOff    = I.magSoftOff[targetSeg];
                     cal.magSoftMat    = I.magSoftMat[targetSeg];
                     cal.s2sInv        = I.s2sInv[targetSeg];
+                    cal.s2sFwd        = I.s2s[targetSeg];
                     cal.segGain       = I.segGain[targetSeg];
                 }
             }
@@ -6002,12 +6004,11 @@ void MocapReceiver::run()
             if (I.test && targetSeg >= 0 && targetSeg < kXsensSegmentCount)
                 I.dbgMagSoft[targetSeg] = mag;
 
-            if (cal.s2sActive) {
-                const Quat& inv = cal.s2sInv;
-                accForFilter = vec_rotate(accForFilter, inv);
-                gyrForFilter = vec_rotate(gyrForFilter, inv);
-                if (haveMag) mag = vec_rotate(mag, inv);
-            }
+            // §174.4: the sensor->bone alignment is applied as a POST-rotation on the AHRS
+            //   output (see staging.quat below), so the filter runs on the raw sensor-frame
+            //   acc/gyr/mag here — do NOT pre-rotate the inputs. Pre-rotating + gravity
+            //   levelling cannot impose heading, which left the (heading-dependent) arms
+            //   mis-oriented; post-multiplying q_align fixes that.
 
             if (I.test && targetSeg >= 0 && targetSeg < kXsensSegmentCount) {
                 I.dbgAccBody[targetSeg] = accForFilter;
@@ -6145,8 +6146,12 @@ void MocapReceiver::run()
 
             if (targetSeg >= 0 && targetSeg < kXsensSegmentCount) {
                 QMutexLocker lk(&I.lock);
-                if      (haveFused) staging.quat[targetSeg] = fusedQuat;
-                else if (haveQuat)  staging.quat[targetSeg] = qo;
+                // §174.4 bone orientation = q_sensor ⊗ q_align (post-rotation). q_align was
+                //   solved so that the calibration pose maps to its reference (fused=q_ref);
+                //   gyro then carries it to neighbouring poses. Identity when uncalibrated.
+                const Quat qAlign = cal.s2sActive ? cal.s2sFwd : Quat(1, 0, 0, 0);
+                if      (haveFused) staging.quat[targetSeg] = quat_mult(fusedQuat, qAlign).normalized();
+                else if (haveQuat)  staging.quat[targetSeg] = quat_mult(qo, qAlign).normalized();
                 staging.segValid[targetSeg] = haveFused || haveQuat;
                 staging.segLastT[targetSeg] = monotonicSec();
                 staging.linAccBody[targetSeg]  = I.segLinAccBody[targetSeg];
@@ -9068,7 +9073,22 @@ void NewSessionWizard::onCaptureTick()
             ? m_accAccumT[i] / float(m_accumCountT[i]) : QVector3D(0, 0, 1);
         const QVector3D gN = (m_accumCountN[i] > 0)
             ? m_accAccumN[i] / float(m_accumCountN[i]) : QVector3D(0, 0, 1);
-        s2s[i] = solveMountGravity(i, gT, gN).conj().normalized();
+        // §174.4/§223 spec sensor->bone alignment (replaces the gravity-only mount solve):
+        //   q_align = conj(q_S_avg) ⊗ q_ref_N, applied as a POST-rotation on the sensor-frame
+        //   AHRS output (staging.quat). q_S_avg = gravity-levelled sensor orientation in the
+        //   N-pose held at calibration end (heading 0) — exactly what the re-seeded EKF
+        //   reproduces — so the arbitrary filter heading cancels and fused = q_ref_N when the
+        //   actor holds N; gyro then carries it to q_ref_T as the actor moves to the T-pose.
+        //   Unlike the gravity-only solve this also fixes the heading-dependent arm orientation.
+        QVector3D uN = gN;
+        if (uN.lengthSquared() < 1e-12f) uN = QVector3D(0, 0, 1);
+        uN.normalize();
+        const double wSeed = 1.0 + double(uN.z());
+        const Quat qSavg = (wSeed < 1e-6)
+            ? Quat(0, 1, 0, 0)
+            : Quat(wSeed, double(uN.y()), -double(uN.x()), 0).normalized();
+        s2s[i] = quat_mult(qSavg.conj(), fox::body::kRefQuatN[i]).normalized();
+        (void)gT; (void)solveMountGravity;   // gravity-only mount solve retained for reference
 
         residDeg[i]    = nDispDeg;   // §174.4 формула-независимое качество захвата (стиллнес N-позы)
         qualityBand[i] = fox::body::calibrationQuality(residDeg[i]);
