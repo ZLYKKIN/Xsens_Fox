@@ -488,8 +488,19 @@ static void UpdateLPAAndDivMon(FusionAhrs *ahrs, FusionVector aSensorMs2, float 
 // §IX шаг КОРРЕКЦИИ FoxKF по акселерометру: измерение гравитации R(q)·(0,0,-g), невязка, усиление Калмана (formules.txt)
 static void ApplyAccUpdate(FusionAhrs *ahrs, FusionVector aSensorMs2) {
     if (ahrs->dAccHighTime > KFA_ACCDIV_HIGH_HOLD_S) {
-        ahrs->accUsedThisFrame = false;
-        return;
+        // Anti-deadlock recovery. The gate exists to reject *dynamic* acceleration, but a
+        //   merely wrong orientation also inflates dAcc, which then keeps the gate shut so
+        //   the accelerometer can never re-level it — a permanent lock-out. Distinguish the
+        //   two by the specific-force magnitude: if |a| ~= g the segment is (quasi-)static
+        //   and the large residual is orientation error, not motion, so re-open the gate and
+        //   let the (now bias-free) gravity update pull the orientation back to level.
+        const float aN = FusionVectorNorm(aSensorMs2);
+        if (fabsf(aN - KFA_GRAVITY_MS2) < 0.15f * KFA_GRAVITY_MS2) {
+            ahrs->dAccHighTime = 0.0f;
+        } else {
+            ahrs->accUsedThisFrame = false;
+            return;
+        }
     }
 
     const FusionVector gWorld  = { .axis = { 0.0f, 0.0f, +KFA_GRAVITY_MS2 } };
@@ -533,7 +544,13 @@ static void ApplyAccUpdate(FusionAhrs *ahrs, FusionVector aSensorMs2) {
     float Hth[9]; Skew3(hAcc, Hth);
     for (int i = 0; i < 3; ++i)
         for (int j = 0; j < 3; ++j) H[i * N15 + (0 + j)] = Hth[i * 3 + j];
-    for (int i = 0; i < 3; ++i)     H[i * N15 + (6 + i)] = +1.0f;
+    // NB: the accelerometer-bias states (6..8) are intentionally NOT observed by the
+    //   gravity measurement. For a (quasi-)static segment a tilt error and an accel
+    //   bias shift the predicted gravity identically, so jointly estimating both makes
+    //   the orientation unobservable: b_a silently absorbs the gravity residual while the
+    //   orientation drifts and never re-levels (the segment "tumbles" although the
+    //   accelerometer is steady). Dropping the b_a coupling keeps orientation observable;
+    //   MEMS accel bias on the factory-calibrated trackers is small enough to leave frozen.
 
     const float rNorm = sqrtf(r[0] * r[0] + r[1] * r[1] + r[2] * r[2]);
     if (rNorm > 1e-6f) {
@@ -583,6 +600,9 @@ static void ApplyAccUpdate(FusionAhrs *ahrs, FusionVector aSensorMs2) {
     float dx[N15];
     for (int i = 0; i < N15; ++i)
         dx[i] = K[i * 3 + 0] * r[0] + K[i * 3 + 1] * r[1] + K[i * 3 + 2] * r[2];
+    // keep accel-bias frozen: never let the gravity update move b_a, even via the
+    //   orientation/bias cross-covariance (see note on H above).
+    dx[6] = dx[7] = dx[8] = 0.0f;
     ApplyDeltaX(ahrs, dx);
 
     Joseph_3x15(ahrs->P, H, K, Rdiag);
