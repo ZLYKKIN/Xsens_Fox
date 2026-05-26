@@ -8663,24 +8663,31 @@ void NewSessionWizard::onCaptureTick()
     std::array<Quat, kXsensSegmentCount> snap{};
     for (int i = 0; i < kXsensSegmentCount; ++i) snap[i] = fr.quat[i];
 
-    double maxD = 0.0, second = 0.0;
-    if (m_havePrev) {
-        for (int i = 0; i < kXsensSegmentCount; ++i) {
-            const double dot = std::abs(snap[i].w * m_prevSnap[i].w
-                                      + snap[i].x * m_prevSnap[i].x
-                                      + snap[i].y * m_prevSnap[i].y
-                                      + snap[i].z * m_prevSnap[i].z);
-            const double c = dot > 1 ? 1 : (dot < -1 ? -1 : dot);
-            const double a = 2.0 * std::acos(c);
-            if (a > maxD)        { second = maxD; maxD = a; }
-            else if (a > second)   second = a;
-        }
+    // §XIII/§XVII stillness on RAW GYRO, not AHRS quaternion delta.
+    //   The AHRS internally re-levels its orientation via accelerometer
+    //   feedback (commit 787c60a froze accel-bias, so the corrections now
+    //   land on the quaternion itself); transient corrections of 5-10°
+    //   per frame appear in fr.quat even when the sensor is physically
+    //   still — that used to mark valid calibration samples as "moving".
+    //   fr.gyrSensor[i] is the raw gyroscope reading in body deg/s, which
+    //   directly measures whether the segment is rotating, regardless of
+    //   AHRS state.  Threshold 3.0 deg/s ≈ human resting tremor + sensor
+    //   noise floor; second-largest is used so a single noisy sensor
+    //   doesn't tank the whole capture.
+    double maxW = 0.0, secondW = 0.0;
+    for (int i = 0; i < kXsensSegmentCount; ++i) {
+        const QVector3D& g = fr.gyrSensor[i];
+        const double w = std::sqrt(double(g.x())*double(g.x())
+                                 + double(g.y())*double(g.y())
+                                 + double(g.z())*double(g.z()));
+        if (w > maxW)         { secondW = maxW; maxW = w; }
+        else if (w > secondW)   secondW = w;
     }
     m_prevSnap = snap; m_havePrev = true;
 
-    // §XIII/§XVII порог неподвижности при сборе калибровочной позы (движение сегмента < 0.025 рад)
-    constexpr double kStillRad = 0.025;
-    const bool still = second < kStillRad;
+    constexpr double kStillDegPerSec = 3.0;
+    const double second = secondW;            // expose under old name for downstream log lines
+    const bool still = secondW < kStillDegPerSec;
 
     const bool aslCapturing = m_liveSpcEnabled && m_doSensorCheck
         && (m_phase == CalibPhase::CaptureT
