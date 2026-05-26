@@ -38,8 +38,9 @@ build.ninja
 *.bak
 *.orig
 
-# Runtime log directory (whole folder is throwaway; recreated by the app)
-/logs/
+# Runtime log directory — folder itself is tracked so you can commit
+# captured logs for bug reports, but ad-hoc *.log files outside of it
+# are still ignored via the *.log glob above.
 
 # Internal session/working notes (kept locally, not for public repo)
 bugfix.txt
