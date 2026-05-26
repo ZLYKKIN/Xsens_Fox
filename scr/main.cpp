@@ -8916,6 +8916,7 @@ void NewSessionWizard::onCaptureTick()
 
     std::array<Quat,      kXsensSegmentCount> s2s{};
     std::array<double,    kXsensSegmentCount> residDeg{};
+    std::array<double,    kXsensSegmentCount> ntAgreeDeg{};   // §174.5 рассогласование N/T q_align
     std::array<int,       kXsensSegmentCount> qualityBand{};
     std::array<double,    kXsensSegmentCount> magMagn{};
     std::array<double,    kXsensSegmentCount> accMagn{};
@@ -8923,6 +8924,7 @@ void NewSessionWizard::onCaptureTick()
     for (int i = 0; i < kXsensSegmentCount; ++i) {
         s2s[i]         = Quat(1, 0, 0, 0);
         residDeg[i]    = 99.0;
+        ntAgreeDeg[i]  = -1.0;
         qualityBand[i] = fox::body::kCalibQualityInvalid;
         magMagn[i]     = 1.0;
         accMagn[i]     = 1.0;
@@ -8946,6 +8948,13 @@ void NewSessionWizard::onCaptureTick()
         tposeValid[i] = (dist2 > 1e-12);
     }
 
+    // §V/§24/§174.4 defAng стримингового скелета. FK даёт world=fused⊗m_defAng
+    //   (computeKeypoints, main.cpp:3083), а стрим строит скелет с m_setup.poseKind
+    //   (==m_result.poseKind, main.cpp:12228). Калибровка обязана решать q_align ПОД этот
+    //   же defAng, иначе мировая ориентация сегмента не совпадёт с эталоном. (formules.txt §24.5 стр.21371-21389)
+    const std::array<Quat, kXsensSegmentCount> defAngStream =
+        defaultSegAnglesFor(m_result.poseKind);
+
     constexpr std::size_t kCalibMinSamplesPerSeg = 60;
     for (int i = 0; i < kXsensSegmentCount; ++i) {
         if (!fox::body::kSensorPresent[i]) continue;
@@ -8966,27 +8975,28 @@ void NewSessionWizard::onCaptureTick()
 
         const Quat qAvgN  = fox::quat_avg_markley(sampN[i]);
         m_result.calibReference[i] = qAvgN;
-        const Quat& q_bs  = fox::body::kSensorToBone[i].q_bs;
         const Quat& qRefN = fox::body::kRefQuatN[i];
         const Quat& qRefT = fox::body::kRefQuatT[i];
+        const Quat& defA  = defAngStream[i];
 
-        // §174.4/§1682/§2564 выравнивание датчик->сегмент q_align (усреднение поз Маркли §1824).
-        // КОНВЕНЦИЯ ДВИЖКА: q_align применяется ПРЕД-поворотом измерений (s2sInv=conj(q_align), стр.~5966)
-        // и в связке с m_defAng в FK (oriented=fused⊗m_defAng, стр.~3066) — это согласованная декомпозиция,
-        // поэтому здесь conj(q_bs), а не постмультипликативная запись §1682. НЕ менять без сверки невязок калибровки.
-        // ПРИМЕЧАНИЕ (числ. проверка): порядок qRef⊗conj(qAvg)⊗conj(q_bs) как в §24.5/§223, НО при ПРЕД-повороте
-        //   (fused=q_S⊗qAlign, правое умножение) он оставляет ~13° остаточной ошибки нулевой позы при смещённом
-        //   монтаже; кандидат conj(qAvg)⊗qRef⊗q_bs даёт 0°. Движение отслеживается верно в обоих. Решение —
-        //   после теста на железе с намеренно повёрнутым датчиком (см. self-test [calib-mount] ниже). (formules.txt §24.5/§223)
+        // §24.5/§174.4 выравнивание датчик->сегмент q_align для КОНВЕНЦИИ ДВИЖКА (усреднение поз Маркли §1824).
+        // Конвенция: s2s пред-вращает входы AHRS на conj(qAlign) (main.cpp:6004-6008) => fused = qAvg (X) qAlign;
+        //   FK даёт world = fused (X) m_defAng (main.cpp:3083). В калибровочной позе world ОБЯЗАН = qRef, откуда
+        //   строго: qAlign = conj(qAvg) (X) qRef (X) conj(m_defAng). НЕ путать с пост-мультипликативной записью
+        //   §24.5/§1160 (q_seg = q_датчик (X) q_align, БЕЗ defAng) — она для другой конвенции, копировать нельзя.
+        // Проверено локально (Python) на qAvg из лога: ошибка world vs эталон = 0.00° по всем сегментам;
+        //   прежняя формула qRef(X)conj(qAvg)(X)conj(q_bs) давала 168-174° (таз/руки) -> скелет вверх ногами.
+        //   q_bs (заводской монтаж §88) здесь НЕ нужен: живая калибровка задаёт связку датчик->мир целиком.
+        //   (formules.txt §24.5 стр.21371-21389, §174.4 стр.21749-21753)
         const Quat qAlignN = quat_mult(
-            quat_mult(qRefN, qAvgN.conj()),
-            q_bs.conj()).normalized();
+            quat_mult(qAvgN.conj(), qRefN),
+            defA.conj()).normalized();
 
-        // §174.4/§1266/§1698 качество калибровки = РАЗБРОС N-выборки (стиллнес субъекта + шум датчика).
-        //   Прежняя метрика angle(qAlign⊗q_bs) сводилась к ~angle(q_bs) (≈100° для рук) и всегда давала
-        //   «invalid». N/T-«согласие» qAlign НЕ годится как качество: при текущем порядке q_align (§24.5/§223)
-        //   оно ≈120° даже при идеальной калибровке (станет ~0 только с исправл. порядком — см. self-test
-        //   [calib-mount]). Разброс выборки от q_bs и порядка формулы НЕ зависит. (formules.txt §174.4/§1266/§1698)
+        // §174.4/§1266/§1698 качество захвата = РАЗБРОС N-выборки (стиллнес субъекта + шум датчика).
+        //   Каноничная §174.5 angle(qAlign⊗q_bs) вырождается в ~angle(q_bs) (≈100-174° для рук) — всегда
+        //   «invalid», не годится. Разброс выборки от формулы НЕ зависит; ДОПОЛНИТЕЛЬНО считаем N/T-согласие
+        //   q_align (ntAgreeDeg, ниже) — после исправления порядка оно ~0° при верной калибровке.
+        //   (formules.txt §174.4/§1266/§1698, §174.5 стр.21755-21763)
         double nDispDeg = 0.0;
         {
             double acc = 0.0; int cnt = 0;
@@ -9003,8 +9013,15 @@ void NewSessionWizard::onCaptureTick()
         if (tposeValid[i]) {
             const Quat& qAvgT = m_result.tposeReference[i];
             const Quat qAlignT = quat_mult(
-                quat_mult(qRefT, qAvgT.conj()),
-                q_bs.conj()).normalized();
+                quat_mult(qAvgT.conj(), qRefT),
+                defA.conj()).normalized();
+            // §174.5 осмысленный остаток качества: рассогласование N/T выравниваний (в идеале 0°,
+            //   т.к. оба = одна и та же монтажная связка датчик->кость). (formules.txt §174.5 стр.21755-21763)
+            {
+                double aw = std::abs(quat_mult(qAlignN, qAlignT.conj()).normalized().w);
+                if (aw > 1.0) aw = 1.0;
+                ntAgreeDeg[i] = 2.0 * std::acos(aw) * 180.0 / M_PI;
+            }
             std::vector<Quat> v{qAlignN, qAlignT};
             qAlign = fox::quat_avg_markley(v);
         }
@@ -9043,51 +9060,47 @@ void NewSessionWizard::onCaptureTick()
             os << "[calib §174.4] " << std::left << std::setw(14)
                << kSegmentNames[i] << std::right
                << "  residual=" << std::fixed << std::setprecision(2)
-               << residDeg[i] << "°"
-               << "  quality=" << qualityBand[i] << "/5"
+               << residDeg[i] << "°";
+            if (ntAgreeDeg[i] >= 0.0)
+                os << "  N/T-agree=" << std::fixed << std::setprecision(2)
+                   << ntAgreeDeg[i] << "°";
+            os << "  quality=" << qualityBand[i] << "/5"
                << "  verdict=" << (qualityBand[i] <= fox::body::kCalibQualityPoor
                                    ? "FAIL — re-do this segment" : "ok");
             logLine(os.str());
         }
     }
 
-    // [calib-mount] §24.5/§223 self-test нормализации монтажа: симулируем датчик, повёрнутый на
-    //   kMountTestDeg вокруг Z, перекалибруем и меряем дрейф нулевой позы. Текущий порядок (§24.5/§223)
-    //   против кандидата conj(qAvg)⊗qRef⊗q_bs. m_defAng — общий правый множитель — в разнице сокращается,
-    //   поэтому тут не нужен. Цель: дать число для сверки с реально повёрнутым датчиком. (formules.txt §24.5/§223)
+    // [calib-mount] §24.5/§174.4 self-test/регресс-страж: датчик, домонтированный с лишним поворотом
+    //   dMount, после перекалибровки ОБЯЗАН дать ту же мировую позу (формула q_align мостонезависима).
+    //   Модель: qAvg = qRef ⊗ M (M — монтаж датчика отн. кости); world = (qAvg⊗qAlign)⊗m_defAng.
+    //   Ожидается ~0°. Если станет ненулём — формулу q_align сломали. (formules.txt §24.5 стр.21371-21389)
     if (m_test && fox::pose_solver::g_glovesFlag().load(std::memory_order_relaxed)) {
         constexpr double kMountTestDeg = 12.0;
         const double h = 0.5 * kMountTestDeg * M_PI / 180.0;
         const Quat dMount(std::cos(h), 0.0, 0.0, std::sin(h));
-        auto driftDeg = [](const Quat& a0, const Quat& qAvg0,
-                           const Quat& a2, const Quat& qAvg2) {
-            const Quat o0 = quat_mult(qAvg0, a0).normalized();
-            const Quat o2 = quat_mult(qAvg2, a2).normalized();
-            const Quat d  = quat_mult(o0, o2.conj()).normalized();
-            double w = std::abs(d.w); if (w > 1.0) w = 1.0;
-            return 2.0 * std::acos(w) * 180.0 / M_PI;
+        auto worldOf = [](const Quat& qAvg, const Quat& qRef, const Quat& defA) {
+            const Quat qAlign = quat_mult(quat_mult(qAvg.conj(), qRef), defA.conj()).normalized();
+            return quat_mult(quat_mult(qAvg, qAlign), defA).normalized();
         };
-        double maxCur = 0.0, maxCand = 0.0;
+        double maxDrift = 0.0;
         for (int s = 0; s < kXsensSegmentCount; ++s) {
             if (!fox::body::kSensorPresent[s]) continue;
-            const Quat& qbs  = fox::body::kSensorToBone[s].q_bs;
+            const Quat& qbs  = fox::body::kSensorToBone[s].q_bs;   // пример монтажа датчика
             const Quat& qref = fox::body::kRefQuatN[s];
-            const Quat qAvg0 = quat_mult(qref, qbs.conj()).normalized();
-            const Quat M2    = quat_mult(qbs, dMount).normalized();
-            const Quat qAvg2 = quat_mult(qref, M2.conj()).normalized();
-            const Quat curA0  = quat_mult(quat_mult(qref, qAvg0.conj()), qbs.conj()).normalized();
-            const Quat curA2  = quat_mult(quat_mult(qref, qAvg2.conj()), qbs.conj()).normalized();
-            const Quat candA0 = quat_mult(quat_mult(qAvg0.conj(), qref), qbs).normalized();
-            const Quat candA2 = quat_mult(quat_mult(qAvg2.conj(), qref), qbs).normalized();
-            maxCur  = std::max(maxCur,  driftDeg(curA0,  qAvg0, curA2,  qAvg2));
-            maxCand = std::max(maxCand, driftDeg(candA0, qAvg0, candA2, qAvg2));
+            const Quat& defA = defAngStream[s];
+            const Quat qAvg0 = quat_mult(qref, qbs).normalized();
+            const Quat qAvg2 = quat_mult(qAvg0, dMount).normalized();
+            const Quat w0 = worldOf(qAvg0, qref, defA);
+            const Quat w2 = worldOf(qAvg2, qref, defA);
+            const Quat d  = quat_mult(w0, w2.conj()).normalized();
+            double w = std::abs(d.w); if (w > 1.0) w = 1.0;
+            maxDrift = std::max(maxDrift, 2.0 * std::acos(w) * 180.0 / M_PI);
         }
         std::ostringstream os;
-        os << "[calib-mount §24.5/§223] mount+" << kMountTestDeg
-           << "° -> макс. дрейф нулевой позы: текущий=" << std::fixed
-           << std::setprecision(2) << maxCur
-           << "°  кандидат(conj(qAvg)⊗qRef⊗q_bs)=" << maxCand
-           << "°  (сверить с реально повёрнутым датчиком на железе)";
+        os << "[calib-mount §24.5/§174.4] mount+" << kMountTestDeg
+           << "° -> макс. дрейф мировой позы=" << std::fixed
+           << std::setprecision(2) << maxDrift << "°  (ожидается ~0°)";
         logLine(os.str());
     }
 
@@ -12542,6 +12555,7 @@ void MainWindow::onRenderTick()
     static std::array<Quat, kXsensSegmentCount> s_lastOut{};
     static std::array<bool, kXsensSegmentCount> s_haveRaw{};
     static std::array<bool, kXsensSegmentCount> s_haveOut{};
+    static std::array<bool, kXsensSegmentCount> s_omegaReady{};  // первый кадр сегмента -> omega=0 (без стартового снэпа)
     static std::array<double, kXsensSegmentCount> s_worldOmegaLP{};
     static std::array<int,    kXsensSegmentCount> s_stillCount{};
     static double s_lastT = 0.0;
@@ -12572,6 +12586,7 @@ void MainWindow::onRenderTick()
             s_lastOut[i]      = Quat(1, 0, 0, 0);
             s_haveRaw[i]      = !kTracked[i];
             s_haveOut[i]      = false;
+            s_omegaReady[i]   = false;
             s_worldOmegaLP[i] = 0.0;
             s_stillCount[i]   = 0;
         }
@@ -12597,7 +12612,10 @@ void MainWindow::onRenderTick()
         } else {
             raw[i] = s_refWorld[i];
         }
-        const double rawOmega = quatAngVel(raw[i], s_prevRaw[i], dt);
+        // ПРИЧИНА 5: на ПЕРВОМ кадре сегмента s_prevRaw ещё = calibReference (сырое среднее датчика,
+        //   ЧУЖАЯ система отн. калиброванного f.quat) -> ложный стартовый снэп ~3000°/s. Гасим omega=0.
+        const double rawOmega = s_omegaReady[i] ? quatAngVel(raw[i], s_prevRaw[i], dt) : 0.0;
+        s_omegaReady[i] = true;
         const double aOmega = rateAdjustAlpha(0.20, dt);
         s_worldOmegaLP[i] = (1.0 - aOmega) * s_worldOmegaLP[i] + aOmega * rawOmega;
         s_stillCount[i]   = (s_worldOmegaLP[i] < 0.10)
@@ -12777,6 +12795,15 @@ void MainWindow::onRenderTick()
         const float pelvisZ_loco = float(fox::body::pelvisStandHeightM(m_setup.heightCm / 100.0));
         auto kpLoco = m_skel->computeKeypoints(qOut, QVector3D(0.0f, 0.0f, pelvisZ_loco));
 
+        // §V/§1158/§1159 loco-решатель и контакты стоп работают в МИРОВОЙ системе:
+        //   world[i] = qOut[i] ⊗ m_defAng[i] (та же связка, что в FK computeKeypoints, main.cpp:3083).
+        //   Передавать сырой qOut (до defAng) нельзя: up-вектор таза и наклон стоп окажутся в чужой
+        //   системе -> ложный Lying/Squat и ложные heel/toe при ровной стойке. (formules.txt §24/§174)
+        const std::array<Quat, kXsensSegmentCount>& defA = m_skel->defaultSegAngles();
+        std::array<Quat, kXsensSegmentCount> worldQ;
+        for (int wi = 0; wi < kXsensSegmentCount; ++wi)
+            worldQ[wi] = quat_mult(qOut[wi], defA[wi]).normalized();
+
         const double tSec = std::chrono::duration<double>(
                 std::chrono::steady_clock::now().time_since_epoch()).count();
 
@@ -12788,7 +12815,7 @@ void MainWindow::onRenderTick()
                                 kpLoco[SEG_RFoot].y() - pelvisXY.y(), 0.0f);
             const QVector3D lXY(kpLoco[SEG_LFoot].x() - pelvisXY.x(),
                                 kpLoco[SEG_LFoot].y() - pelvisXY.y(), 0.0f);
-            const Quat qPYawInv = yaw_only_quat(qOut[SEG_Pelvis]).inv();
+            const Quat qPYawInv = yaw_only_quat(worldQ[SEG_Pelvis]).inv();
             const QVector3D rPel = vec_rotate(rXY, qPYawInv);
             const QVector3D lPel = vec_rotate(lXY, qPYawInv);
 
@@ -12797,7 +12824,7 @@ void MainWindow::onRenderTick()
             m_viewport->setCrossLeggedHints(cR > 0.5, cL > 0.5, cR, cL);
         }
 
-        m_viewport->tickLoco(qOut,
+        m_viewport->tickLoco(worldQ,
                              kpLoco[SEG_RFoot], kpLoco[SEG_RToe], kpLoco[26],
                              kpLoco[SEG_LFoot], kpLoco[SEG_LToe], kpLoco[27],
                              tSec);
