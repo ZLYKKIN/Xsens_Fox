@@ -70,44 +70,6 @@ if (NOT Eigen3_FOUND)
 endif()
 message(STATUS "Eigen3 ready")
 
-# ---- ONNX Runtime (FoxSPC sensor-placement classifier, spec §1699-1722) ----
-# The classifier model fox_sensor_placement_classifier.onnx is a scikit-learn
-# RBF-SVM (17 classes, 315 features) and needs onnxruntime to execute.  We
-# look for the headers + import-lib + DLLs inside dll/ relative to the repo
-# root; the user is expected to drop the contents of an official
-# onnxruntime-win-x64-1.17.x release into that directory (Windows binary
-# build).  On Linux the build still configures so headers and downstream code
-# can be syntax-checked; the link / DLL-copy step is then skipped because the
-# .dll/.lib artefacts only exist for Windows targets.
-set(FOX_ORT_ROOT "${CMAKE_SOURCE_DIR}/dll")
-set(FOX_ORT_INCLUDE "${FOX_ORT_ROOT}/include")
-set(FOX_ORT_LIB     "${FOX_ORT_ROOT}/onnxruntime.lib")
-set(FOX_ORT_DLL     "${FOX_ORT_ROOT}/onnxruntime.dll")
-set(FOX_ORT_PROV    "${FOX_ORT_ROOT}/onnxruntime_providers_shared.dll")
-if (NOT EXISTS "${FOX_ORT_INCLUDE}/onnxruntime_cxx_api.h")
-    message(FATAL_ERROR
-        "ONNX Runtime headers not found at ${FOX_ORT_INCLUDE} — "
-        "extract onnxruntime-win-x64-1.17.x.zip from "
-        "https://github.com/microsoft/onnxruntime/releases into ${FOX_ORT_ROOT} "
-        "so that include/onnxruntime_cxx_api.h, onnxruntime.dll, "
-        "onnxruntime.lib, and onnxruntime_providers_shared.dll are all present.")
-endif()
-message(STATUS "ONNX Runtime headers:           ${FOX_ORT_INCLUDE}")
-if (WIN32)
-    if (NOT EXISTS "${FOX_ORT_LIB}")
-        message(FATAL_ERROR
-            "ONNX Runtime import library not found: ${FOX_ORT_LIB}")
-    endif()
-    if (NOT EXISTS "${FOX_ORT_DLL}")
-        message(FATAL_ERROR
-            "ONNX Runtime DLL not found: ${FOX_ORT_DLL}")
-    endif()
-    if (NOT EXISTS "${FOX_ORT_PROV}")
-        message(FATAL_ERROR
-            "ONNX Runtime providers DLL not found: ${FOX_ORT_PROV}")
-    endif()
-endif()
-
 # ---- Fox Mocap executable ---------------------------------------------------
 add_executable(fox_mocap WIN32
     scr/main.cpp
@@ -131,7 +93,7 @@ add_executable(fox_mocap WIN32
     scr/fusion/FusionModel.h
     scr/fusion/FusionRemap.h
 )
-target_include_directories(fox_mocap PRIVATE scr scr/fusion "${FOX_ORT_INCLUDE}")
+target_include_directories(fox_mocap PRIVATE scr scr/fusion)
 target_compile_definitions(fox_mocap PRIVATE
     FOX_VERSION_STR="${FOX_VERSION_CLEAN}")
 target_link_libraries(fox_mocap PRIVATE
@@ -139,9 +101,6 @@ target_link_libraries(fox_mocap PRIVATE
     Qt6::OpenGL Qt6::OpenGLWidgets
     Qt6::Network
     Eigen3::Eigen)
-if (WIN32)
-    target_link_libraries(fox_mocap PRIVATE "${FOX_ORT_LIB}")
-endif()
 
 # Use legacy GL functions (lines/points for skeleton rendering).
 # dwmapi — for Windows 11 immersive dark title bar.
@@ -156,16 +115,8 @@ if (EXISTS "${FOX_DLL_SRC}")
     add_custom_command(TARGET fox_mocap POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E make_directory "${FOX_DLL_DST}"
         COMMAND ${CMAKE_COMMAND} -E copy_directory "${FOX_DLL_SRC}" "${FOX_DLL_DST}"
-        COMMENT "Staging Xsens/Manus/ONNX DLLs into build/bin")
+        COMMENT "Staging Xsens/Manus DLLs into build/bin")
 endif()
-
-# Drop the FoxSPC classifier model next to the .exe so SensorPlacementClassifier
-# can load it via QCoreApplication::applicationDirPath() at runtime.
-add_custom_command(TARGET fox_mocap POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${CMAKE_SOURCE_DIR}/dll/fox_sensor_placement_classifier.onnx"
-        "$<TARGET_FILE_DIR:fox_mocap>"
-    COMMENT "Staging fox_sensor_placement_classifier.onnx into build/bin")
 
 # ---- windeployqt -----------------------------------------------------------
 if (WIN32)

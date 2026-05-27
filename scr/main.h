@@ -757,7 +757,6 @@ private:
     class QProgressBar*  m_countdownBar = nullptr;
     class QProgressBar*  m_readyBar     = nullptr;
     class QPushButton*   m_btnCalibBegin = nullptr;
-    class QCheckBox*     m_chkSensorCheck = nullptr;
     class QLabel*        m_calibStatus   = nullptr;
 
     QTimer m_countTimer;
@@ -776,7 +775,7 @@ private:
     qint64 m_phaseStartMs = 0;
 
     enum class CalibPhase { Idle, PrepT, CaptureT, SettleT, PrepN, CaptureN, Settle,
-                            PrepMove, CaptureMove, LiveSpc, Done };
+                            Done };
     CalibPhase m_phase = CalibPhase::Idle;
 
     std::array<QVector3D, kXsensSegmentCount> m_accAccumT{};
@@ -813,37 +812,6 @@ private:
     std::array<int,       kXsensSegmentCount>* m_accumCount  = nullptr;
 
     class QLabel* m_calibQuality = nullptr;
-    class QLabel* m_placementInfo = nullptr;
-
-public:
-
-    struct RawImuBuf {
-        std::vector<QVector3D> acc;
-        std::vector<QVector3D> gyr;
-
-        struct Win { int start = -1; int end = -1; };
-        Win epochCalibration{};
-        Win epochLeftArm{};
-        Win epochRightArm{};
-        Win epochLeftLeg{};
-        Win epochRightLeg{};
-    };
-
-private:
-    std::array<RawImuBuf, kXsensSegmentCount> m_imuBuf{};
-    bool m_liveSpcEnabled = true;
-
-    double m_aslResStep    = 4.0;
-    double m_aslResNextOut = 0.0;
-    int    m_aslResInIdx   = -1;
-    bool   m_aslHavePrev   = false;
-    int    m_aslOutCount   = 0;
-    std::array<QVector3D, kXsensSegmentCount> m_aslPrevAcc{};
-    std::array<QVector3D, kXsensSegmentCount> m_aslPrevGyr{};
-
-    int  m_moveStage         = 0;
-    int  m_moveStageStartIdx = 0;
-    bool m_doSensorCheck     = false;
 
     class QLabel*        m_readyTitle = nullptr;
     class QLabel*        m_readySummary = nullptr;
@@ -859,9 +827,6 @@ private:
     void setBadge(QLabel* lab, const QString& txt, bool green);
 
     void logCalibPhaseTransition(const char* tag);
-
-    void beginMoveStage();
-    void finishCalibrationAsl();
 
     bool calibBusy() const {
         return m_phase != CalibPhase::Idle && m_phase != CalibPhase::Done;
