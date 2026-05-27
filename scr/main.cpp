@@ -1670,48 +1670,17 @@ RenderDiag g_renderDiag{};
 std::array<Quat, kXsensSegmentCountWithDummies>
 SkeletonXsens::addDummySegments(const std::array<Quat, kXsensSegmentCount>& s) const
 {
-    namespace fb = fox::body;
-
+    // Лопатки (центр плеч) и бёдра — как в старой (рабочей) версии: от ПОЛНОЙ ориентации
+    //   T8 / таза, ±90°, БЕЗ yaw_only и БЕЗ связок scapHum/femoropelvic (old/main.cpp:422-426).
+    //   Наши связки (лопатка↔плечо kCArms≈0.95, бедро↔нога kCFemoropelvic) + отбрасывание
+    //   наклона таза (yaw_only) смещали центр плеч и бёдра при наклоне/седе → ноги расходились
+    //   и менялись местами, плечи «ломались». Полная ориентация таза даёт верные бёдра и при
+    //   повороте, и при наклоне; полная T8 — верный центр плеч.
     const double P = M_PI;
-    const Quat t8yaw     = yaw_only_quat(s[SEG_T8]);
-    const Quat pelvisYaw = yaw_only_quat(s[SEG_Pelvis]);
-    const Quat rScapBase = quat_mult(t8yaw,     euler_to_quat(0, -P/2, -P/2, "XYZ"));
-    const Quat lScapBase = quat_mult(t8yaw,     euler_to_quat(0, -P/2,  P/2, "XYZ"));
-    const Quat rHipBase  = quat_mult(pelvisYaw, euler_to_quat(0,  0,   -P/2, "XYZ"));
-    const Quat lHipBase  = quat_mult(pelvisYaw, euler_to_quat(0,  0,    P/2, "XYZ"));
-
-    auto canon = [](const Quat& q) {
-        return (q.w < 0.0) ? Quat(-q.w, -q.x, -q.y, -q.z) : q;
-    };
-    auto scapHumOffset = [&](const Quat& qUpperArm) -> Quat {
-        const Quat qRel = canon(quat_mult(qUpperArm, s[SEG_T8].conj()).normalized());
-        const QVector3D phi = quat_log(qRel);
-        constexpr double kR2D = fb::constants::kRad2Deg;
-        auto ramp = [](double aDeg, double cLow) {
-            const double lo = fb::kScapHumThetaLowDeg;
-            const double hi = fb::kScapHumThetaHighDeg;
-            const double a = std::abs(aDeg);
-            if (a <= lo) return cLow;
-            if (a >= hi) return fb::kCArms[2];
-            return cLow + (a - lo) / (hi - lo) * (fb::kCArms[2] - cLow);
-        };
-        const double cX = ramp(double(phi.x()) * kR2D, fb::kCArms[0]);
-        const double cY = ramp(double(phi.y()) * kR2D, fb::kCArms[1]);
-        return quat_exp_rotvec(cX * double(phi.x()),
-                               cY * double(phi.y()), 0.0);
-    };
-    auto femoropelvicOffset = [&](const Quat& qUpperLeg) -> Quat {
-        const Quat qRel = canon(quat_mult(qUpperLeg, s[SEG_Pelvis].conj()).normalized());
-        const QVector3D phi = quat_log(qRel);
-        const double cR = fb::kCFemoropelvic;
-        return quat_exp_rotvec(cR * double(phi.x()),
-                               cR * double(phi.y()), 0.0);
-    };
-
-    const Quat rScap = quat_mult(scapHumOffset(s[SEG_RUpperArm]), rScapBase).normalized();
-    const Quat lScap = quat_mult(scapHumOffset(s[SEG_LUpperArm]), lScapBase).normalized();
-    const Quat rHip  = quat_mult(femoropelvicOffset(s[SEG_RUpperLeg]), rHipBase).normalized();
-    const Quat lHip  = quat_mult(femoropelvicOffset(s[SEG_LUpperLeg]), lHipBase).normalized();
+    const Quat rScap = quat_mult(s[SEG_T8],     euler_to_quat(0, -P/2, -P/2, "XYZ")).normalized();
+    const Quat lScap = quat_mult(s[SEG_T8],     euler_to_quat(0, -P/2,  P/2, "XYZ")).normalized();
+    const Quat rHip  = quat_mult(s[SEG_Pelvis], euler_to_quat(0,  0,   -P/2, "XYZ")).normalized();
+    const Quat lHip  = quat_mult(s[SEG_Pelvis], euler_to_quat(0,  0,    P/2, "XYZ")).normalized();
 
     std::array<Quat, kXsensSegmentCountWithDummies> out{};
     int k = 0;
@@ -1725,22 +1694,6 @@ SkeletonXsens::addDummySegments(const std::array<Quat, kXsensSegmentCount>& s) c
     out[k++] = lHip;
     for (int i = 19; i < 23; ++i) out[k++] = s[i];
 
-    if (fox::pose_solver::g_testFlag().load(std::memory_order_relaxed) &&
-        fox::pose_solver::g_glovesFlag().load(std::memory_order_relaxed)) {
-        static int dummyTick = 0;
-        if ((++dummyTick % 120) == 0) {
-            std::cout << std::fixed << std::setprecision(2);
-            std::cout << "[dummy-seg] rScap_off="
-                      << quat_angle_deg(quat_mult(rScap, rScapBase.conj()))
-                      << "°  lScap_off="
-                      << quat_angle_deg(quat_mult(lScap, lScapBase.conj()))
-                      << "°  rHip_off="
-                      << quat_angle_deg(quat_mult(rHip,  rHipBase.conj()))
-                      << "°  lHip_off="
-                      << quat_angle_deg(quat_mult(lHip,  lHipBase.conj())) << "°\n";
-            std::cout.flush();
-        }
-    }
     return out;
 }
 
@@ -7773,15 +7726,14 @@ void NewSessionWizard::onCaptureTick()
             if (aw > 1.0) aw = 1.0;
             ntAgreeDeg[i] = 2.0 * std::acos(aw) * 180.0 / M_PI;
         }
-        // §24.5 выравнивание сенсор->кость калибруется от N-ПОЗЫ: q_align = conj(q_avg_N) ⊗ q_ref_N.
-        //   ПОЧЕМУ N, а не T: дефолтные углы скелета (m_defAng, buildDefaultAngles) заданы для N-позы
-        //   (руки опущены, defAng рук = E(±π/2,0,∓π/2) ⇒ (0.5,0.5,0.5,∓0.5)). Опора калибровки ОБЯЗАНА
-        //   быть той же позы — иначе bone=q_ref_T (T) + N-дефолтные-углы рассогласованы и руки ломаются.
-        //   На практике захват T-позы давал мусорный s2s предплечий/кистей (q_align ~155-178°) — руки
-        //   разваливались даже стоя в N-позе. N-поза (руки вдоль гравитации) воспроизводится надёжно;
-        //   скрутка оси руки в N ненаблюдаема, но это меньшее зло, чем сломанный T-захват. Runtime:
-        //   bone = q_sensor ⊗ q_align = q_ref_N в N-позе и трекает 1:1 далее. (formules.txt §24.5)
-        s2s[i] = qAlignN;
+        // Выравнивание сенсор->кость = conj(q_avg_N) — БЕЗ множителя q_ref_N. Так делала старая
+        //   (рабочая) версия: cand = q_sensor ⊗ conj(refWorld_N), в N-позе = identity, а нужную позу
+        //   задаёт m_defAng (buildDefaultAngles, N-пресет: руки вниз, defAng рук=(0.5,0.5,0.5,∓0.5)).
+        //   ДОБАВЛЕНИЕ q_ref_N в s2s — ДВОЙНОЙ учёт: для рук q_ref_N=R_x(90°), и кость уезжала из
+        //   «вниз» в «вбок» (плечи/руки ломались), хотя локоть ~0. Численно (N-поза): с q_ref_N
+        //   r_upper_arm смотрит (0,+1,0)=вбок; без него — (0,0,−1)=вниз (как в старой версии). Ноги
+        //   почти не меняются (их q_ref_N ~2°). Runtime: bone = q_sensor ⊗ s2s, далее ⊗ m_defAng в FK.
+        s2s[i] = qAvgN.conj().normalized();
 
         residDeg[i]    = nDispDeg;   // §174.4 формула-независимое качество захвата (стиллнес N-позы)
         qualityBand[i] = fox::body::calibrationQuality(residDeg[i]);
@@ -8697,22 +8649,17 @@ void MocapViewport::updatePose(const std::array<Quat, kXsensSegmentCount>& orien
                     const Quat& dL = m_driftLocal[i];
                     const double dw = std::min(1.0, std::abs(dL.w));
                     if (2.0 * std::acos(dw) > 1e-4) {
+                        // Корректируем ТОЛЬКО swing (провисание кисти к предплечью), НЕ twist.
+                        //   Прежний блок «через 5с покоя докрутить twist на 50%» (twistHalf) ЛОЧИЛ
+                        //   крен кисти — поэтому вращение запястьем «не понималось». В старой рабочей
+                        //   версии twist кисти не лочился вовсе (см. old/main.cpp:5301-5341). Оставляем
+                        //   только анти-провис, крен кисти свободно следует за сенсором/перчаткой.
                         Quat dLSwing, dLTwist;
                         swingTwistDecompose(dL, QVector3D(1.0f, 0.0f, 0.0f), dLSwing, dLTwist);
                         const Quat dLSwingInv = dLSwing.inv();
                         const Quat correctionWorld = quat_mult(fWorld, quat_mult(dLSwingInv, fWorld.inv())).normalized();
                         const Quat hCorrectedWorld = quat_mult(correctionWorld, hWorld).normalized();
                         filtered[i] = quat_mult(hCorrectedWorld, dA_h.inv()).normalized();
-
-                        if (m_calmSeconds[i] >= 5.0) {
-                            const Quat dLTwistInv = dLTwist.inv();
-                            const Quat twistWorld = quat_mult(fWorld,
-                                                       quat_mult(dLTwistInv, fWorld.inv())).normalized();
-                            const Quat twistHalf  = slerp_quat(Quat(1,0,0,0), twistWorld, 0.5);
-                            const Quat hWithTwist = quat_mult(twistHalf,
-                                                       quat_mult(filtered[i], dA_h)).normalized();
-                            filtered[i] = quat_mult(hWithTwist, dA_h.inv()).normalized();
-                        }
                     }
                 }
 
