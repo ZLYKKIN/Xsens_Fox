@@ -4,8 +4,6 @@
 #include "foxbody.h"
 #include "foxergo.h"
 
-#include <onnxruntime_cxx_api.h>
-
 #include <QtCore/QCommandLineOption>
 #include <QtCore/QCommandLineParser>
 #include <QtCore/QDebug>
@@ -4148,10 +4146,6 @@ void MocapReceiver::run()
             << " gloves=" << (gloves ? "on" : "off")
             << " test=on";
 
-        const QString exeDir = QCoreApplication::applicationDirPath();
-        const QString modelPath = QDir(exeDir).filePath(
-            "fox_sensor_placement_classifier.onnx");
-        sys << " foxspc=" << (QFile::exists(modelPath) ? "available" : "missing");
         sys << "\n";
         logBlock(sys.str());
     }
@@ -5333,22 +5327,8 @@ static const Tr kTr[] = {
     {"calib_rleg_capture", "Поднимите и опустите ПРАВУЮ ногу",  "Raise and lower your RIGHT leg"},
     {"calib_move_hint",    "Движение для авто-проверки размещения датчиков",
                            "Motion for sensor-placement auto-check"},
-    {"asl_check_label",    "Проверить размещение датчиков (≈40 с движений после калибровки)",
-                           "Verify sensor placement (≈40 s of motions after calibration)"},
-    {"asl_skipped",        "FoxSPC: проверка размещения пропущена",
-                           "FoxSPC: placement check skipped"},
     {"calib_pose_empty",   "Калибровка позы не получила стабильных данных (актёр двигался или сенсоры не передают). Качество будет низким — рекомендуется повторить калибровку.", "Pose calibration captured no stable data (actor moved or sensors not streaming). Quality will be poor — recommend recalibrating."},
 
-    {"asl_loading_failed", "FoxSPC: модель размещения датчиков не загрузилась — авто-проверка отключена",
-                           "FoxSPC: placement model failed to load — auto-verification disabled"},
-    {"asl_no_data",        "FoxSPC: недостаточно данных для авто-проверки размещения (нужны движения рук и ног)",
-                           "FoxSPC: insufficient motion data for placement check (move arms / legs)"},
-    {"asl_ok",             "FoxSPC: размещение датчиков подтверждено (%1/%2)",
-                           "FoxSPC: placement verified (%1/%2)"},
-    {"asl_mismatch",       "FoxSPC (справочно, на трекинг не влияет): датчик %1 по движению похож на %2 (p=%3)",
-                           "FoxSPC (advisory, does not affect tracking): sensor %1 resembles %2 by motion (p=%3)"},
-    {"asl_low_confidence", "FoxSPC: проверка размещения неинформативна (низкая уверенность модели) — результат не используется",
-                           "FoxSPC: placement check inconclusive (low model confidence) — result not used"},
     {"still",              "СТОИТЕ СПОКОЙНО",                   "STILL"},
     {"moving",             "ДВИЖЕНИЕ",                          "MOVING"},
     {"suit_connected",     "костюм подключён",                  "suit connected"},
@@ -5592,493 +5572,6 @@ static QIcon makeFlagIcon(const char* code)
     return QIcon(pm);
 }
 
-namespace spc {
-
-#ifdef _WIN32
-using PathChar = wchar_t;
-static std::wstring toOrtPath(const QString& p) { return p.toStdWString(); }
-#else
-using PathChar = char;
-static std::string  toOrtPath(const QString& p) { return p.toStdString(); }
-#endif
-
-constexpr int kMinWindow = 32;
-
-static std::vector<float> realDftMag(const std::vector<float>& x)
-{
-    const int N = int(x.size());
-    if (N < 2) return {};
-    std::vector<float> mag(N / 2 + 1, 0.0f);
-    for (int k = 0; k <= N / 2; ++k) {
-        double re = 0.0, im = 0.0;
-        for (int n = 0; n < N; ++n) {
-            const double th = -2.0 * M_PI * double(k) * double(n) / double(N);
-            re += double(x[n]) * std::cos(th);
-            im += double(x[n]) * std::sin(th);
-        }
-        mag[k] = float(std::sqrt(re * re + im * im));
-    }
-    return mag;
-}
-
-static std::vector<float> axisWindow(
-    const NewSessionWizard::RawImuBuf& buf, fox::body::SpcSignal sig,
-    fox::body::SpcAxis ax, int s, int e)
-{
-    const auto& src = (sig == fox::body::SpcSignal::Acc) ? buf.acc : buf.gyr;
-    if (s < 0 || e <= s || e > int(src.size())) return {};
-    std::vector<float> out;
-    out.reserve(e - s);
-    for (int i = s; i < e; ++i) {
-        const QVector3D& v = src[i];
-        switch (ax) {
-            case fox::body::SpcAxis::X:    out.push_back(v.x()); break;
-            case fox::body::SpcAxis::Y:    out.push_back(v.y()); break;
-            case fox::body::SpcAxis::Z:    out.push_back(v.z()); break;
-            case fox::body::SpcAxis::XAbs: out.push_back(std::abs(v.x())); break;
-            case fox::body::SpcAxis::YAbs: out.push_back(std::abs(v.y())); break;
-            case fox::body::SpcAxis::ZAbs: out.push_back(std::abs(v.z())); break;
-            case fox::body::SpcAxis::Normxyz:
-                out.push_back(std::sqrt(v.x()*v.x() + v.y()*v.y() + v.z()*v.z()));
-                break;
-        }
-    }
-    return out;
-}
-
-static std::vector<float> bandSlice(
-    const std::vector<float>& mag, int N, double fLo, double fHi, double fs)
-{
-    if (mag.empty() || N <= 1) return {};
-    const int kLo = std::max(0, int(std::round(fLo * double(N) / fs)));
-    const int kHi = std::min(int(mag.size()) - 1,
-                             (fHi <= 0.0) ? int(mag.size()) - 1
-                                          : int(std::round(fHi * double(N) / fs)));
-    if (kHi <= kLo) return {};
-    return std::vector<float>(mag.begin() + kLo, mag.begin() + kHi + 1);
-}
-
-static float stat_mean(const std::vector<float>& v) {
-    if (v.empty()) return 0.0f;
-    double s = 0.0;
-    for (float x : v) s += x;
-    return float(s / double(v.size()));
-}
-static float stat_sum(const std::vector<float>& v) {
-    double s = 0.0; for (float x : v) s += x; return float(s);
-}
-static float stat_std(const std::vector<float>& v) {
-    if (v.empty()) return 0.0f;
-    const double m = stat_mean(v);
-    double s = 0.0;
-    for (float x : v) { const double d = x - m; s += d * d; }
-    return float(std::sqrt(s / double(v.size())));
-}
-static float stat_var(const std::vector<float>& v) {
-    const float s = stat_std(v); return s * s;
-}
-static float stat_rms(const std::vector<float>& v) {
-    if (v.empty()) return 0.0f;
-    double s = 0.0; for (float x : v) s += double(x) * double(x);
-    return float(std::sqrt(s / double(v.size())));
-}
-static float stat_max(const std::vector<float>& v) {
-    if (v.empty()) return 0.0f;
-    float m = v[0]; for (float x : v) if (x > m) m = x; return m;
-}
-static float stat_maxIdx(const std::vector<float>& v) {
-    if (v.empty()) return 0.0f;
-    int idx = 0; for (int i = 1; i < int(v.size()); ++i) if (v[i] > v[idx]) idx = i;
-    return float(idx) / float(v.size());
-}
-static float stat_skew(const std::vector<float>& v) {
-    if (v.size() < 3) return 0.0f;
-    const double m = stat_mean(v);
-    double m2 = 0.0, m3 = 0.0;
-    for (float x : v) { const double d = x - m; m2 += d*d; m3 += d*d*d; }
-    m2 /= double(v.size());
-    m3 /= double(v.size());
-    if (m2 < 1e-12) return 0.0f;
-    return float(m3 / std::pow(m2, 1.5));
-}
-static float stat_kurt(const std::vector<float>& v) {
-    if (v.size() < 4) return 0.0f;
-    const double m = stat_mean(v);
-    double m2 = 0.0, m4 = 0.0;
-    for (float x : v) { const double d = x - m; m2 += d*d; m4 += d*d*d*d; }
-    m2 /= double(v.size());
-    m4 /= double(v.size());
-    if (m2 < 1e-12) return -3.0f;
-    return float(m4 / (m2 * m2) - 3.0);
-}
-
-static float pearson(const std::vector<float>& a, const std::vector<float>& b) {
-    const int n = std::min(int(a.size()), int(b.size()));
-    if (n < 2) return 0.0f;
-    double ma = 0.0, mb = 0.0;
-    for (int i = 0; i < n; ++i) { ma += a[i]; mb += b[i]; }
-    ma /= n; mb /= n;
-    double sab = 0.0, saa = 0.0, sbb = 0.0;
-    for (int i = 0; i < n; ++i) {
-        const double da = a[i] - ma, db = b[i] - mb;
-        sab += da * db; saa += da * da; sbb += db * db;
-    }
-    if (saa < 1e-12 || sbb < 1e-12) return 0.0f;
-    return float(sab / std::sqrt(saa * sbb));
-}
-
-static std::pair<int, int> epochWindow(
-    const NewSessionWizard::RawImuBuf& buf, fox::body::SpcEpoch e)
-{
-    using fox::body::SpcEpoch;
-    const NewSessionWizard::RawImuBuf::Win* w = nullptr;
-    switch (e) {
-        case SpcEpoch::Calibration:   w = &buf.epochCalibration; break;
-        case SpcEpoch::LeftArmRaise:  w = &buf.epochLeftArm;     break;
-        case SpcEpoch::RightArmRaise: w = &buf.epochRightArm;    break;
-        case SpcEpoch::LeftLegRaise:  w = &buf.epochLeftLeg;     break;
-        case SpcEpoch::RightLegRaise: w = &buf.epochRightLeg;    break;
-    }
-    return { w->start, w->end };
-}
-
-static float computeFeature(
-    int t,
-    const std::array<NewSessionWizard::RawImuBuf, kXsensSegmentCount>& bufs,
-    const fox::body::SpcFeatureSpec& f)
-{
-    // §XXVII/§1699 FoxSPC: частота анализа окна признаков 60 Гц (маппинг freqBand-полос в бины,
-    //   Найквист 30 Гц). Должна совпадать с частотой заполнения RawImuBuf при калибровке (formules.txt)
-    constexpr double kFs = 60.0;
-    using fox::body::SpcStat;
-    using fox::body::SpcBand;
-    using fox::body::SpcAxis;
-
-    auto wT = epochWindow(bufs[t], f.epoch);
-    if (wT.first < 0) return 0.0f;
-    std::vector<float> target = axisWindow(bufs[t], f.signal, f.axis,
-                                            wT.first, wT.second);
-    if (int(target.size()) < kMinWindow) return 0.0f;
-
-    std::vector<float> work = target;
-    if (f.band != SpcBand::None) {
-        const int N = int(target.size());
-        std::vector<float> centered = target;
-        double mean = 0.0;
-        for (float v : centered) mean += double(v);
-        if (N > 0) mean /= double(N);
-        for (float& v : centered) v = float(double(v) - mean);
-        std::vector<float> mag = realDftMag(centered);
-        double fLo = 0.0, fHi = 0.0;
-        switch (f.band) {
-            case SpcBand::Band0p5To4:   fLo = 0.5;  fHi = 4.0;  break;
-            case SpcBand::Band4p5To10:  fLo = 4.5;  fHi = 10.0; break;
-            case SpcBand::Band10ToNyq:  fLo = 10.0; fHi = kFs / 2.0; break;
-            default: break;
-        }
-        work = bandSlice(mag, N, fLo, fHi, kFs);
-        if (work.empty()) return 0.0f;
-    }
-
-    switch (f.stat) {
-        case SpcStat::Mean:     return stat_mean(work);
-        case SpcStat::Sum:      return stat_sum(work);
-        case SpcStat::Std:      return stat_std(work);
-        case SpcStat::Var:      return stat_var(work);
-        case SpcStat::Rms:      return stat_rms(work);
-        case SpcStat::Max:      return stat_max(work);
-        case SpcStat::MaxIdx:   return stat_maxIdx(work);
-        case SpcStat::Skew:     return stat_skew(work);
-        case SpcStat::Kurtosis: return stat_kurt(work);
-        case SpcStat::SameAxisInterSensorCorrMax:
-        case SpcStat::SameAxisInterSensorCorrAbsMax:
-        case SpcStat::SameAxisInterSensorCorrSum:
-        case SpcStat::SameAxisInterSensorCorrAbsSum: {
-
-            float maxC = -2.0f, maxAbsC = 0.0f, sumC = 0.0f, sumAbsC = 0.0f;
-            int n = 0;
-            for (int s = 0; s < kXsensSegmentCount; ++s) {
-                if (s == t) continue;
-                if (!fox::body::kSensorPresent[s]) continue;
-                auto wS = epochWindow(bufs[s], f.epoch);
-                if (wS.first < 0) continue;
-                std::vector<float> other = axisWindow(bufs[s], f.signal, f.axis,
-                                                      wS.first, wS.second);
-                const int nm = std::min(int(target.size()), int(other.size()));
-                if (nm < kMinWindow) continue;
-                std::vector<float> a(target.begin(), target.begin() + nm);
-                std::vector<float> b(other.begin(),   other.begin()  + nm);
-                const float c = pearson(a, b);
-                if (c > maxC)        maxC    = c;
-                if (std::abs(c) > maxAbsC) maxAbsC = std::abs(c);
-                sumC    += c;
-                sumAbsC += std::abs(c);
-                ++n;
-            }
-            if (n == 0) return 0.0f;
-            if (f.stat == SpcStat::SameAxisInterSensorCorrMax)    return maxC;
-            if (f.stat == SpcStat::SameAxisInterSensorCorrAbsMax) return maxAbsC;
-            if (f.stat == SpcStat::SameAxisInterSensorCorrSum)    return sumC;
-            return sumAbsC;
-        }
-        case SpcStat::SameSensorInterAxisCorrMax:
-        case SpcStat::SameSensorInterAxisCorrAbsMax:
-        case SpcStat::SameSensorInterAxisCorrSum:
-        case SpcStat::SameSensorInterAxisCorrAbsSum: {
-
-            const SpcAxis allAxes[3] = { SpcAxis::X, SpcAxis::Y, SpcAxis::Z };
-            SpcAxis selfAxis = f.axis;
-            if (selfAxis == SpcAxis::XAbs)    selfAxis = SpcAxis::X;
-            if (selfAxis == SpcAxis::YAbs)    selfAxis = SpcAxis::Y;
-            if (selfAxis == SpcAxis::ZAbs)    selfAxis = SpcAxis::Z;
-            if (selfAxis == SpcAxis::Normxyz) selfAxis = SpcAxis::X;
-            float maxC = -2.0f, maxAbsC = 0.0f, sumC = 0.0f, sumAbsC = 0.0f;
-            int n = 0;
-            for (SpcAxis other : allAxes) {
-                if (other == selfAxis) continue;
-                std::vector<float> b = axisWindow(bufs[t], f.signal, other,
-                                                   wT.first, wT.second);
-                const int nm = std::min(int(target.size()), int(b.size()));
-                if (nm < kMinWindow) continue;
-                std::vector<float> a(target.begin(), target.begin() + nm);
-                b.resize(nm);
-                const float c = pearson(a, b);
-                if (c > maxC) maxC = c;
-                if (std::abs(c) > maxAbsC) maxAbsC = std::abs(c);
-                sumC += c;
-                sumAbsC += std::abs(c);
-                ++n;
-            }
-            if (n == 0) return 0.0f;
-            if (f.stat == SpcStat::SameSensorInterAxisCorrMax)    return maxC;
-            if (f.stat == SpcStat::SameSensorInterAxisCorrAbsMax) return maxAbsC;
-            if (f.stat == SpcStat::SameSensorInterAxisCorrSum)    return sumC;
-            return sumAbsC;
-        }
-    }
-    return 0.0f;
-}
-
-static std::array<float, fox::body::kSpcFeatureCount> extractFeatures315(
-    int target,
-    const std::array<NewSessionWizard::RawImuBuf, kXsensSegmentCount>& bufs)
-{
-    std::array<float, fox::body::kSpcFeatureCount> out{};
-    for (int m = 0; m < fox::body::kSpcFeatureCount; ++m) {
-        const int   c   = fox::body::kSpcModelPerm[m];
-        const float raw = computeFeature(target, bufs, fox::body::kFeatureSpecs[c]);
-        const float lo  = fox::body::kFeatureMinM[m];
-        const float hi  = fox::body::kFeatureMaxM[m];
-        const float den = (hi > lo) ? (hi - lo) : 1.0f;
-        float n = (raw - lo) / den;
-        if (n < 0.0f) n = 0.0f;
-        if (n > 1.0f) n = 1.0f;
-        out[m] = n;
-    }
-    return out;
-}
-
-static std::array<int, fox::body::kSpcClassCount> hungarian17(
-    const std::array<std::array<float, fox::body::kSpcClassCount>,
-                     fox::body::kSpcClassCount>& cost)
-{
-    constexpr int N = fox::body::kSpcClassCount;
-    std::array<double, N + 1> u{}, v{};
-    std::array<int,    N + 1> p{}, way{};
-    for (int i = 1; i <= N; ++i) {
-        p[0] = i;
-        int j0 = 0;
-        std::array<double, N + 1> minv;  minv.fill(1e30);
-        std::array<bool,   N + 1> used;  used.fill(false);
-        do {
-            used[j0] = true;
-            const int i0 = p[j0];
-            double delta = 1e30;
-            int j1 = 0;
-            for (int j = 1; j <= N; ++j) {
-                if (used[j]) continue;
-                const double cur = double(cost[i0 - 1][j - 1]) - u[i0] - v[j];
-                if (cur < minv[j]) { minv[j] = cur; way[j] = j0; }
-                if (minv[j] < delta) { delta = minv[j]; j1 = j; }
-            }
-            for (int j = 0; j <= N; ++j) {
-                if (used[j]) { u[p[j]] += delta; v[j] -= delta; }
-                else         { minv[j] -= delta; }
-            }
-            j0 = j1;
-        } while (p[j0] != 0);
-        do {
-            const int j1 = way[j0];
-            p[j0] = p[j1];
-            j0    = j1;
-        } while (j0 != 0);
-    }
-    std::array<int, N> assign{};
-    for (int j = 1; j <= N; ++j) {
-        if (p[j] >= 1 && p[j] <= N) assign[p[j] - 1] = j - 1;
-    }
-    return assign;
-}
-
-struct PlacementClassifier {
-    Ort::Env env{ORT_LOGGING_LEVEL_WARNING, "fox_kfa_spc"};
-    std::optional<Ort::Session> session;
-    bool ready = false;
-
-    void load(const QString& modelPath, bool log) {
-        try {
-            Ort::SessionOptions opts;
-            opts.SetIntraOpNumThreads(1);
-            opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
-            const auto p = toOrtPath(modelPath);
-            session.emplace(env, p.c_str(), opts);
-            ready = true;
-            if (log) {
-                logLine("[FoxSPC] model loaded: " + modelPath.toStdString());
-            }
-        } catch (const std::exception& ex) {
-            ready = false;
-            if (log) {
-                logLine(std::string("[FoxSPC] load failed: ") + ex.what());
-            }
-        }
-    }
-
-    std::array<float, fox::body::kSpcClassCount> classify(
-        const std::array<float, fox::body::kSpcFeatureCount>& x)
-    {
-        std::array<float, fox::body::kSpcClassCount> probs{};
-        if (!ready || !session) return probs;
-        try {
-            Ort::MemoryInfo mem = Ort::MemoryInfo::CreateCpu(
-                OrtArenaAllocator, OrtMemTypeDefault);
-            std::array<int64_t, 2> shape{1, fox::body::kSpcFeatureCount};
-            std::vector<float> data(x.begin(), x.end());
-            Ort::Value input = Ort::Value::CreateTensor<float>(
-                mem, data.data(), data.size(), shape.data(), shape.size());
-
-            const char* inNames[]  = {"X"};
-            const char* outNames[] = {"label", "probabilities"};
-            auto outs = session->Run(Ort::RunOptions{nullptr},
-                                     inNames, &input, 1,
-                                     outNames, 2);
-            if (outs.size() < 2) return probs;
-            float* p = outs[1].GetTensorMutableData<float>();
-            for (int i = 0; i < fox::body::kSpcClassCount; ++i) probs[i] = p[i];
-        } catch (const std::exception& ex) {
-
-            if (pose_solver::g_testFlag().load(std::memory_order_relaxed)) {
-                logLine(std::string("[FoxSPC] inference failed: ") + ex.what());
-            }
-        }
-        return probs;
-    }
-};
-
-struct PlacementReport {
-    bool        haveModel            = false;
-    bool        haveData             = false;
-    int         verified             = 0;
-    int         total                = 0;
-    QStringList mismatches;
-    float       avgMaxP              = 0.0f;
-    bool        suitUncertaintyAlarm = false;
-};
-
-static PlacementReport analyzePlacement(
-    PlacementClassifier& clf,
-    const std::array<NewSessionWizard::RawImuBuf, kXsensSegmentCount>& bufs,
-    bool testLog)
-{
-    PlacementReport rep;
-    rep.haveModel = clf.ready;
-    if (!clf.ready) return rep;
-
-    std::array<std::array<float, fox::body::kSpcClassCount>,
-               fox::body::kSpcClassCount> probs{};
-    std::array<int, fox::body::kSpcClassCount> probRow{};
-    int row = 0;
-    int dataRows = 0;
-    for (int s = 0; s < kXsensSegmentCount; ++s) {
-        if (!fox::body::kSensorPresent[s]) continue;
-        const auto wC = bufs[s].epochCalibration;
-        if (wC.start >= 0 && (wC.end - wC.start) >= kMinWindow) ++dataRows;
-        auto feat = extractFeatures315(s, bufs);
-        probs[row] = clf.classify(feat);
-        probRow[row] = s;
-        ++row;
-    }
-    rep.haveData = (dataRows > 0);
-    if (row == 0) return rep;
-
-    std::array<std::array<float, fox::body::kSpcClassCount>,
-               fox::body::kSpcClassCount> cost{};
-    constexpr float kPhantomCost = 1.0e6f;
-    for (int r = 0; r < int(fox::body::kSpcClassCount); ++r) {
-        if (r < row) {
-            for (int c = 0; c < fox::body::kSpcClassCount; ++c) {
-                const float p = std::max(probs[r][c], 1e-6f);
-                cost[r][c] = -std::log(p);
-            }
-        } else {
-            for (int c = 0; c < fox::body::kSpcClassCount; ++c) {
-                cost[r][c] = kPhantomCost;
-            }
-        }
-    }
-    auto assign = hungarian17(cost);
-
-    float sumMax = 0.0f;
-    for (int r = 0; r < row; ++r) {
-        const int seg = probRow[r];
-        const int expectedClass = fox::body::kSegToClass[seg];
-        const int assignedClass = assign[r];
-        const float maxP = *std::max_element(probs[r].begin(), probs[r].end());
-        sumMax += maxP;
-
-        if (testLog) {
-            std::ostringstream os;
-            os << "[FoxSPC] sensor " << std::setw(2) << seg
-               << " (" << kSegmentNames[seg] << ") → class "
-               << assignedClass << " ("
-               << fox::body::kSensorPlacementClasses[assignedClass]
-               << ") max_p=" << std::fixed << std::setprecision(3) << maxP
-               << "  expected=" << expectedClass
-               << (assignedClass == expectedClass
-                   ? "  OK" : "  MISMATCH — sensor likely on the wrong body part");
-            logLine(os.str());
-        }
-
-        if (assignedClass == expectedClass) {
-            ++rep.verified;
-        } else if (maxP >= fox::body::kSpcAcceptanceP) {
-            rep.mismatches << QString("%1→%2 (p=%3)")
-                                .arg(QString::fromUtf8(kSegmentNames[seg]))
-                                .arg(QString::fromUtf8(
-                                    fox::body::kSensorPlacementClasses[assignedClass]))
-                                .arg(maxP, 0, 'f', 2);
-        }
-        ++rep.total;
-    }
-    rep.avgMaxP = (row > 0) ? sumMax / float(row) : 0.0f;
-
-    float suitUncertainty = 0.0f;
-    for (int r = 0; r < row; ++r) {
-        const float maxP = *std::max_element(probs[r].begin(), probs[r].end());
-        suitUncertainty += (1.0f - maxP);
-    }
-    rep.suitUncertaintyAlarm = suitUncertainty > fox::body::kSpcSuitUncertSum;
-
-    return rep;
-}
-
-}
-
-static spc::PlacementClassifier& g_placementClf() {
-    static spc::PlacementClassifier instance;
-    return instance;
-}
-
 NewSessionWizard::NewSessionWizard(MocapReceiver* rx, bool testMode, QWidget* parent)
     : QDialog(parent), m_rx(rx), m_test(testMode)
 {
@@ -6087,14 +5580,6 @@ NewSessionWizard::NewSessionWizard(MocapReceiver* rx, bool testMode, QWidget* pa
                        .arg(Lang::t("app_title"))
                        .arg(QApplication::applicationVersion()));
     setMinimumSize(760, 640);
-
-    if (!g_placementClf().ready) {
-        const QString modelPath =
-            QCoreApplication::applicationDirPath()
-            + "/fox_sensor_placement_classifier.onnx";
-        g_placementClf().load(modelPath, m_test);
-    }
-    m_liveSpcEnabled = g_placementClf().ready;
 
     buildPages();
 
@@ -6697,24 +6182,12 @@ void NewSessionWizard::buildPages()
         m_calibQuality->setStyleSheet("color:#9B9B9B; font-size:9pt;");
         m_calibQuality->setWordWrap(true);
 
-        m_placementInfo = new QLabel(p);
-        m_placementInfo->setAlignment(Qt::AlignCenter);
-        m_placementInfo->setStyleSheet("color:#9B9B9B; font-size:9pt;");
-        m_placementInfo->setWordWrap(true);
-
         m_btnCalibBegin = new QPushButton(p);
         m_btnCalibBegin->setObjectName("primary");
         m_btnCalibBegin->setMinimumHeight(42);
         m_btnCalibBegin->setMinimumWidth(240);
         connect(m_btnCalibBegin, &QPushButton::clicked,
                 this, &NewSessionWizard::onCalibrationBegin);
-
-        m_chkSensorCheck = new QCheckBox(p);
-        m_chkSensorCheck->setChecked(false);
-        m_chkSensorCheck->setEnabled(m_liveSpcEnabled);
-        m_chkSensorCheck->setStyleSheet("color:#9B9B9B; font-size:9pt;");
-        connect(m_chkSensorCheck, &QCheckBox::toggled,
-                this, [this](bool on) { m_doSensorCheck = on; });
 
         auto* scrollHost = new QWidget(p);
         auto* hostLay    = new QVBoxLayout(scrollHost);
@@ -6735,9 +6208,6 @@ void NewSessionWizard::buildPages()
         hostLay->addWidget(m_stillLabel);
         hostLay->addWidget(m_calibStatus);
         hostLay->addWidget(m_calibQuality);
-        hostLay->addWidget(m_placementInfo);
-        hostLay->addSpacing(8);
-        hostLay->addWidget(m_chkSensorCheck, 0, Qt::AlignHCenter);
         hostLay->addSpacing(12);
         hostLay->addWidget(m_btnCalibBegin, 0, Qt::AlignHCenter);
 
@@ -6805,7 +6275,7 @@ void NewSessionWizard::logCalibPhaseTransition(const char* tag)
     if (!m_test) return;
     static constexpr const char* kPhaseNames[] = {
         "Idle", "PrepT", "CaptureT", "SettleT",
-        "PrepN", "CaptureN", "Settle", "PrepMove", "CaptureMove", "LiveSpc", "Done"
+        "PrepN", "CaptureN", "Settle", "Done"
     };
     const int idx = static_cast<int>(m_phase);
     const char* name = (idx >= 0 && idx < int(std::size(kPhaseNames)))
@@ -6904,7 +6374,6 @@ void NewSessionWizard::retranslate()
         m_poseHint->setText(Lang::t(isNPosePhase() ? "npose_hint" : "tpose_hint"));
     }
     if (m_btnCalibBegin)  m_btnCalibBegin->setText(Lang::t("start_calib"));
-    if (m_chkSensorCheck) m_chkSensorCheck->setText(Lang::t("asl_check_label"));
     if (m_readyTitle)     m_readyTitle->setText(Lang::t("ready_title"));
     if (m_readySummary)   m_readySummary->setText(Lang::t("ready_summary")
                             .arg(Lang::t("finish")));
@@ -7203,28 +6672,6 @@ void NewSessionWizard::onCalibrationBegin()
     }
     m_fingerAccumCount = 0;
 
-    for (auto& buf : m_imuBuf) {
-        buf.acc.clear();
-        buf.gyr.clear();
-        buf.epochCalibration  = RawImuBuf::Win{-1, -1};
-        buf.epochLeftArm      = RawImuBuf::Win{-1, -1};
-        buf.epochRightArm     = RawImuBuf::Win{-1, -1};
-        buf.epochLeftLeg      = RawImuBuf::Win{-1, -1};
-        buf.epochRightLeg     = RawImuBuf::Win{-1, -1};
-    }
-    {
-        const double nativeHz = (m_rx ? m_rx->expectedRate() : 240.0);
-        m_aslResStep = std::max(1.0, (nativeHz > 1.0 ? nativeHz : 240.0) / 60.0);
-    }
-    m_aslResNextOut = 0.0;
-    m_aslResInIdx   = -1;
-    m_aslHavePrev   = false;
-    m_aslOutCount   = 0;
-    m_aslPrevAcc.fill(QVector3D(0, 0, 0));
-    m_aslPrevGyr.fill(QVector3D(0, 0, 0));
-    m_moveStage     = 0;
-    m_moveStageStartIdx = 0;
-
     m_accAccum    = &m_accAccumT;
     m_gyrAccum    = &m_gyrAccumT;
     m_magAccum    = &m_magAccumT;
@@ -7282,63 +6729,12 @@ void NewSessionWizard::onCountdownTick()
             m_phase = CalibPhase::CaptureN;
             if (m_calibStatus)
                 m_calibStatus->setText(Lang::t("calib_n_capture"));
-        } else if (m_phase == CalibPhase::PrepMove) {
-            m_phase = CalibPhase::CaptureMove;
-            m_moveStageStartIdx = m_aslOutCount;
-            static const char* kCap[5] = {
-                "calib_walk_capture", "calib_larm_capture", "calib_rarm_capture",
-                "calib_lleg_capture", "calib_rleg_capture" };
-            const int s = (m_moveStage < 0) ? 0 : (m_moveStage > 4 ? 4 : m_moveStage);
-            if (m_calibStatus) m_calibStatus->setText(Lang::t(kCap[s]));
         }
 
         m_phaseStartMs = QDateTime::currentMSecsSinceEpoch();
         logCalibPhaseTransition("capture begin");
         m_captureTimer.start();
     }
-}
-
-namespace {
-constexpr double kAslWalkCaptureSec  = 6.0;
-constexpr double kAslRaiseCaptureSec = 5.0;
-
-NewSessionWizard::RawImuBuf::Win detectRaiseWindow(
-    const std::vector<QVector3D>& gyr, int from, int to)
-{
-    NewSessionWizard::RawImuBuf::Win w{ from, to };
-    const int n = to - from;
-    if (from < 0 || to > int(gyr.size()) || n < 12) return w;
-
-    std::vector<double> g(n);
-    double peak = 0.0;
-    for (int i = 0; i < n; ++i) {
-        const QVector3D& v = gyr[from + i];
-        const double m = std::sqrt(double(v.x()) * v.x() + double(v.y()) * v.y()
-                                 + double(v.z()) * v.z());
-        g[i] = m;
-        if (m > peak) peak = m;
-    }
-    // §XXVII/§1699 FoxSPC: частота анализа окна 60 Гц (детект движения в ASL-эпохах) (formules.txt)
-    constexpr double kFs = 60.0;
-    const int pfx = std::min(n, std::max(5, int(0.5 * kFs)));
-    double mu = 0.0;
-    for (int i = 0; i < pfx; ++i) mu += g[i];
-    mu /= double(pfx);
-    double var = 0.0;
-    for (int i = 0; i < pfx; ++i) { const double d = g[i] - mu; var += d * d; }
-    const double sd  = std::sqrt(std::max(1e-12, var / double(pfx)));
-    const double thr = std::max(mu + 3.0 * sd, mu + 0.15 * (peak - mu));
-
-    int first = -1, last = -1;
-    for (int i = 0; i < n; ++i)
-        if (g[i] > thr) { if (first < 0) first = i; last = i; }
-    if (first < 0) return w;
-
-    const int pad = int(0.05 * kFs);
-    w.start = from + std::max(0, first - pad);
-    w.end   = from + std::min(n, last + 1 + pad);
-    return w;
-}
 }
 
 void NewSessionWizard::onCaptureTick()
@@ -7379,91 +6775,6 @@ void NewSessionWizard::onCaptureTick()
     constexpr double kStillDegPerSec = 6.0;
     const double second = secondW;            // expose under old name for downstream log lines
     const bool still = secondW < kStillDegPerSec;
-
-    const bool aslCapturing = m_liveSpcEnabled && m_doSensorCheck
-        && (m_phase == CalibPhase::CaptureT
-         || m_phase == CalibPhase::CaptureN
-         || m_phase == CalibPhase::CaptureMove);
-    if (aslCapturing) {
-        ++m_aslResInIdx;
-        const int n = m_aslResInIdx;
-        const bool calibEpoch = (m_phase == CalibPhase::CaptureT
-                              || m_phase == CalibPhase::CaptureN
-                              || (m_phase == CalibPhase::CaptureMove && m_moveStage == 0));
-        while (m_aslResNextOut <= double(n) + 1e-9) {
-            double frac = (n >= 1) ? (m_aslResNextOut - double(n - 1)) : 0.0;
-            if (frac < 0.0) frac = 0.0; else if (frac > 1.0) frac = 1.0;
-            const float f = float(frac);
-            for (int i = 0; i < kXsensSegmentCount; ++i) {
-                const QVector3D pA = m_aslHavePrev ? m_aslPrevAcc[i] : fr.accSensor[i];
-                const QVector3D pG = m_aslHavePrev ? m_aslPrevGyr[i] : fr.gyrSensor[i];
-                const QVector3D cA = fr.segValid[i] ? fr.accSensor[i] : pA;
-                const QVector3D cG = fr.segValid[i] ? fr.gyrSensor[i] : pG;
-                m_imuBuf[i].acc.push_back(pA * (1.0f - f) + cA * f);
-                m_imuBuf[i].gyr.push_back(pG * (1.0f - f) + cG * f);
-                if (calibEpoch) {
-                    if (m_imuBuf[i].epochCalibration.start < 0)
-                        m_imuBuf[i].epochCalibration.start = m_aslOutCount;
-                    m_imuBuf[i].epochCalibration.end = m_aslOutCount + 1;
-                }
-            }
-            ++m_aslOutCount;
-            m_aslResNextOut += m_aslResStep;
-        }
-        for (int i = 0; i < kXsensSegmentCount; ++i) {
-            if (fr.segValid[i]) {
-                m_aslPrevAcc[i] = fr.accSensor[i];
-                m_aslPrevGyr[i] = fr.gyrSensor[i];
-            }
-        }
-        m_aslHavePrev = true;
-    }
-
-    if (m_phase == CalibPhase::CaptureMove) {
-        const qint64 elapsedMs = (m_phaseStartMs > 0)
-            ? (QDateTime::currentMSecsSinceEpoch() - m_phaseStartMs) : 0;
-        const double stageSec = (m_moveStage == 0)
-            ? kAslWalkCaptureSec : kAslRaiseCaptureSec;
-        const qint64 budgetMs = qint64(stageSec * 1000.0);
-        if (m_readyBar) {
-            m_readyBar->setRange(0, int(budgetMs));
-            m_readyBar->setValue(int(std::min<qint64>(elapsedMs, budgetMs)));
-            m_readyBar->setFormat("%p%");
-        }
-        if (m_stillLabel) {
-            m_stillLabel->setStyleSheet("color:#2EC25A; font-weight:700;");
-            m_stillLabel->setText(Lang::t("calib_move_hint"));
-        }
-        if (elapsedMs < budgetMs) return;
-
-        m_captureTimer.stop();
-        if (m_moveStage >= 1) {
-            static const int kRefSeg[5] = { -1, 12, 8, 19, 15 };
-            const int ref = kRefSeg[m_moveStage];
-            const RawImuBuf::Win wWin =
-                detectRaiseWindow(m_imuBuf[ref].gyr, m_moveStageStartIdx, m_aslOutCount);
-            for (int i = 0; i < kXsensSegmentCount; ++i) {
-                switch (m_moveStage) {
-                    case 1: m_imuBuf[i].epochLeftArm  = wWin; break;
-                    case 2: m_imuBuf[i].epochRightArm = wWin; break;
-                    case 3: m_imuBuf[i].epochLeftLeg  = wWin; break;
-                    case 4: m_imuBuf[i].epochRightLeg = wWin; break;
-                    default: break;
-                }
-            }
-            if (m_test) {
-                std::ostringstream os;
-                os << "[FoxSPC] move stage " << m_moveStage
-                   << " window=[" << wWin.start << "," << wWin.end << ") of "
-                   << m_aslOutCount << " (ref seg " << ref << ")";
-                logLine(os.str());
-            }
-        }
-        ++m_moveStage;
-        if (m_moveStage <= 4) beginMoveStage();
-        else                  finishCalibrationAsl();
-        return;
-    }
 
     if (still) {
         m_samples.push_back(snap);
@@ -7884,53 +7195,6 @@ void NewSessionWizard::onCaptureTick()
         logBlock(os.str());
     }
 
-    if (m_doSensorCheck && m_liveSpcEnabled && g_placementClf().ready) {
-        m_moveStage = 0;
-        beginMoveStage();
-        return;
-    }
-    finishCalibrationAsl();
-}
-
-void NewSessionWizard::finishCalibrationAsl()
-{
-    if (m_placementInfo) {
-        if (!m_doSensorCheck) {
-            m_placementInfo->setText(Lang::t("asl_skipped"));
-            m_placementInfo->setStyleSheet("color:#9B9B9B;");
-        } else if (!m_liveSpcEnabled || !g_placementClf().ready) {
-            m_placementInfo->setText(Lang::t("asl_loading_failed"));
-            m_placementInfo->setStyleSheet("color:#9B9B9B;");
-        } else {
-            const spc::PlacementReport rep = spc::analyzePlacement(
-                g_placementClf(), m_imuBuf, m_test);
-            QString msg;
-            QString style = "color:#9B9B9B;";
-            if (!rep.haveData) {
-                msg   = Lang::t("asl_no_data");
-            // §XXVII тревога SPC: средняя макс. вероятность класса < 0.35 -> неуверенное размещение датчиков
-            } else if (rep.suitUncertaintyAlarm || rep.avgMaxP < 0.35f) {
-                msg   = Lang::t("asl_low_confidence");
-            } else if (rep.mismatches.isEmpty()) {
-                msg   = Lang::t("asl_ok").arg(rep.verified).arg(rep.total);
-                style = "color:#2EC25A; font-weight:700;";
-            } else {
-                const QString first = rep.mismatches.first();
-                const QStringList parts = first.split(QRegularExpression("[ →(=)]"),
-                                                       Qt::SkipEmptyParts);
-                QString a = parts.value(0);
-                QString b = parts.value(1);
-                QString p = parts.value(2);
-                msg   = Lang::t("asl_mismatch").arg(a).arg(b).arg(p);
-                if (rep.mismatches.size() > 1) {
-                    msg += QString(" (+%1)").arg(rep.mismatches.size() - 1);
-                }
-            }
-            m_placementInfo->setText(msg);
-            m_placementInfo->setStyleSheet(style);
-        }
-    }
-
     if (m_test) {
         std::ostringstream os;
         os << std::fixed << std::setprecision(4);
@@ -7949,30 +7213,6 @@ void NewSessionWizard::finishCalibrationAsl()
     m_phase = CalibPhase::Done;
     logCalibPhaseTransition("calibration complete");
     this->goNext();
-}
-
-void NewSessionWizard::beginMoveStage()
-{
-    static const char* kPrep[5] = {
-        "calib_walk_prepare", "calib_larm_prepare", "calib_rarm_prepare",
-        "calib_lleg_prepare", "calib_rleg_prepare" };
-    const int s = (m_moveStage < 0) ? 0 : (m_moveStage > 4 ? 4 : m_moveStage);
-
-    m_phase = CalibPhase::PrepMove;
-    refreshPoseImage();
-    if (m_calibStatus) m_calibStatus->setText(Lang::t(kPrep[s]));
-    if (m_poseHint)    m_poseHint->setText(Lang::t("calib_move_hint"));
-
-    m_countTicksLeft = kCountdownSeconds * 10;
-    if (m_countdownBar) m_countdownBar->setValue(0);
-    if (m_countLabel)   m_countLabel->setText(QString::number(kCountdownSeconds));
-    if (m_readyBar) {
-        m_readyBar->setValue(0);
-        m_readyBar->setFormat("%p%");
-    }
-    logCalibPhaseTransition("move stage prep");
-    m_countTimer.start();
-    updateNavButtons();
 }
 
 void NewSessionWizard::closeEvent(QCloseEvent* e)
