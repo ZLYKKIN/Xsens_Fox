@@ -601,6 +601,10 @@ static void ApplyAccUpdate(FusionAhrs *ahrs, FusionVector aSensorMs2) {
     float dx[N15];
     for (int i = 0; i < N15; ++i)
         dx[i] = K[i * 3 + 0] * r[0] + K[i * 3 + 1] * r[1] + K[i * 3 + 2] * r[2];
+    // never inject a non-finite correction: it would NaN the quaternion and force a
+    //   re-seed that loses heading (a ~100° yaw jump). Skip this update instead.
+    for (int i = 0; i < N15; ++i)
+        if (!isfinite(dx[i])) { ahrs->accUsedThisFrame = false; return; }
     // keep accel-bias frozen: never let the gravity update move b_a, even via the
     //   orientation/bias cross-covariance (see note on H above).
     dx[6] = dx[7] = dx[8] = 0.0f;
