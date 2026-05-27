@@ -2023,8 +2023,11 @@ struct SmootherFrame {
 
 class BatchSmoother {
 public:
-    // §XXX окно сглаживания 240 кадров = 1 c при базовой частоте 240 Гц (formules.txt)
-    static constexpr int kWindow = 240;
+    // §XXX окно сглаживания. Было 240 кадров = 1 c при 240 Гц, а backwardPass возвращает САМЫЙ
+    //   СТАРЫЙ кадр окна → задержка ~1 с (поза «замедленно» догоняет реальное движение). Снижено
+    //   до 6 кадров (~25 мс): лёгкий денойз без заметного лага. Ориентации после фикса EKF чистые,
+    //   тяжёлое сглаживание не нужно. (formules.txt §XXX)
+    static constexpr int kWindow = 6;
     BatchSmoother() { m_ring.fill({}); }
     void reset() {
         m_head = 0; m_count = 0;
@@ -2148,8 +2151,10 @@ public:
 
         BodyPoseSolver::Diag dg{};
         if (ctx.sensorMeas && ctx.sensorPresent) {
+            const std::array<Quat, fb::kSegmentCount> orient_pre = orient;     // §DBG pre-solver (post-defAng)
             dg = m_solver.solve(orient, *ctx.sensorMeas, *ctx.sensorPresent,
                                 m_skin, cr.active, dt);
+            const std::array<Quat, fb::kSegmentCount> orient_solved = orient;  // §DBG post-solver, pre-smoother
 
             {
                 std::array<double, fb::kSegmentCount * 3> P_diag{};
@@ -2164,6 +2169,33 @@ public:
                     m_smoother.backwardPass(smoothed);
                     orient = smoothed;
                     m_smoother.marginalizeOldest();
+                }
+            }
+
+            // §DBG staged per-segment effect: how much the SOLVER and the SMOOTHER each move a
+            //   segment away from the (correct) sensor pose. orient_pre=pre-solver, orient_solved=
+            //   post-solver, orient=post-smoother. Pinpoints which module collapses the T-pose.
+            if (g_testFlag().load(std::memory_order_relaxed)) {
+                static int s_solvDbg = 0;
+                if ((s_solvDbg++ % 24) == 0) {
+                    auto angd = [](const Quat& a, const Quat& b) {
+                        return quat_log(quat_mult(a, b.conj()).normalized()).length()
+                               * 57.29577951308232;
+                    };
+                    auto uz = [](const Quat& q){ return 1.0 - 2.0 * (q.x * q.x + q.y * q.y); };
+                    const int segs[7] = { 0, 4, 6, 8, 9, 15, 16 };  // pelvis t8 head rUA rFA rUL rLL
+                    std::ostringstream so;
+                    so << std::fixed << std::setprecision(1)
+                       << "[solv] pelUz pre=" << std::setprecision(2) << uz(orient_pre[0])
+                       << " solved=" << uz(orient_solved[0]) << " post=" << uz(orient[0])
+                       << std::setprecision(1) << "  solverD/smoothD deg:";
+                    for (int k = 0; k < 7; ++k) {
+                        const int s = segs[k];
+                        so << " s" << s << "=" << angd(orient_solved[s], orient_pre[s])
+                           << "/" << angd(orient[s], orient_solved[s]);
+                    }
+                    so << "\n";
+                    std::cout << so.str();
                 }
             }
 
