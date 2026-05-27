@@ -4345,6 +4345,10 @@ struct MocapReceiver::Impl {
     std::array<QVector3D, kXsensSegmentCount> dbgGyrUnbias{};
     std::array<QVector3D, kXsensSegmentCount> dbgMagSoft{};
     std::array<Quat,      kXsensSegmentCount> dbgFusedQuat{};
+    // §43 last finite fused orientation per segment + validity. Used to preserve heading
+    //   across a non-finite EKF re-init (otherwise it re-seeds yaw=0 -> ~100° heading jump).
+    std::array<Quat,      kXsensSegmentCount> lastFusedGood{};
+    std::array<bool,      kXsensSegmentCount> haveLastFused{};
 
     std::array<float,     kXsensSegmentCount> dbgDynAccRej{};
     std::array<float,     kXsensSegmentCount> dbgDynMagRej{};
@@ -6080,6 +6084,23 @@ void MocapReceiver::run()
                                                    nz.sigmaGyrDegS,
                                                    nz.sigmaMagNorm);
                     }
+                    // §43 HEADING-PRESERVING recovery. This re-init only fires after a transient
+                    //   non-finite EKF output. A plain re-init re-seeds orientation from the
+                    //   accelerometer with yaw=0, throwing away the per-segment heading — a
+                    //   discontinuous ~100° yaw jump (no gyro, tilt still fine) that twists the
+                    //   skeleton ("shakes then freezes"). Restore the last good fused orientation
+                    //   so only the covariance resets, never the heading.
+                    if (I.haveLastFused[targetSeg]) {
+                        const Quat& lg = I.lastFusedGood[targetSeg];
+                        FusionQuaternion fqlg;
+                        fqlg.element.w = float(lg.w); fqlg.element.x = float(lg.x);
+                        fqlg.element.y = float(lg.y); fqlg.element.z = float(lg.z);
+                        FusionAhrsSetQuaternion(&ahrs, fqlg);
+                        ahrs.qSeeded = true;            // keep heading; do not re-seed from accel
+                        if (I.test)
+                            logBlock("[reseed] seg=" + std::string(kSegmentNames[targetSeg]) +
+                                     " EKF re-init after non-finite output — heading preserved\n");
+                    }
                     I.fusionReady[targetSeg] = true;
                 }
 
@@ -6125,6 +6146,8 @@ void MocapReceiver::run()
                     fusedQuat = Quat(fq.element.w, fq.element.x,
                                      fq.element.y, fq.element.z).normalized();
                     haveFused = true;
+                    I.lastFusedGood[targetSeg] = fusedQuat;   // §43 keep heading for NaN-recovery
+                    I.haveLastFused[targetSeg] = true;
                     if (I.test) I.dbgFusedQuat[targetSeg] = fusedQuat;
                 } else {
 
@@ -8722,7 +8745,11 @@ void NewSessionWizard::onCaptureTick()
     }
     m_prevSnap = snap; m_havePrev = true;
 
-    constexpr double kStillDegPerSec = 3.0;
+    // §XIII threshold raised 3.0 -> 6.0 deg/s: with the T-pose held (arms out), the
+    //   second-largest segment's natural sway+noise sits at ~3.2 deg/s median (p90 5.4),
+    //   so 3.0 rejected ~54% of genuinely-still T-pose frames ("you are moving"). 6.0
+    //   admits the held poses while still rejecting real motion (>>6 deg/s). [data: fox_mocap.log fdump]
+    constexpr double kStillDegPerSec = 6.0;
     const double second = secondW;            // expose under old name for downstream log lines
     const bool still = secondW < kStillDegPerSec;
 
