@@ -2156,6 +2156,14 @@ public:
                                 m_skin, cr.active, dt);
             const std::array<Quat, fb::kSegmentCount> orient_solved = orient;  // §DBG post-solver, pre-smoother
 
+            // TRUST THE SENSORS. The Gauss-Newton IK has multiple minima and intermittently jumps
+            //   between them (flips the whole pose 100-170°, see [solv]) — the dominant cause of the
+            //   shaking / collapsed ("lying") skeleton. After the EKF + T-pose s2s fixes, the measured
+            //   orientations are already correct, so keep them for every sensor-bearing segment and
+            //   let the solver only fill the non-measured spine vertebrae (dummies).
+            for (int i = 0; i < fb::kSegmentCount; ++i)
+                if ((*ctx.sensorPresent)[i]) orient[i] = orient_pre[i];
+
             {
                 std::array<double, fb::kSegmentCount * 3> P_diag{};
                 const double sigma2 = std::max(1e-9,
@@ -9131,12 +9139,17 @@ void NewSessionWizard::onCaptureTick()
             if (aw > 1.0) aw = 1.0;
             ntAgreeDeg[i] = 2.0 * std::acos(aw) * 180.0 / M_PI;
         }
-        // §24.5 install the sensor->bone alignment: q_align = conj(q_avg_N) ⊗ q_ref_N (= qAlignN
-        //   above). Runtime forms bone = q_sensor ⊗ q_align, which equals q_ref_N in the N-pose and
-        //   rotates 1:1 with the segment afterwards (so a held T-pose renders as a T-pose via real
-        //   motion, not a second calibration). The relative per-segment heading is captured here
-        //   and held by the now-stable EKF + gyro, so no separate heading restore is applied.
-        s2s[i] = qAlignN;
+        // §24.5 sensor->bone alignment, calibrated from the T-POSE (the pose the actor holds):
+        //   q_align = conj(q_avg_T) ⊗ q_ref_T. The N-pose has the arms hanging along gravity, where
+        //   the arm-axis twist/yaw is UNOBSERVABLE, so an N-pose q_align bakes in an arbitrary twist
+        //   that surfaces as a ~95° elbow once the arms are horizontal. The T-pose has the arms
+        //   horizontal (twist observable) -> elbow ~0. Legs/torso are vertical in both poses, so the
+        //   T-pose alignment keeps them correct too. Runtime forms bone = q_sensor ⊗ q_align, which
+        //   equals q_ref_T in the T-pose and tracks 1:1 thereafter. Fall back to the N-pose alignment
+        //   only if the T capture for this segment was invalid.
+        s2s[i] = tposeValid[i]
+               ? quat_mult(m_result.tposeReference[i].conj(), qRefT).normalized()
+               : qAlignN;
 
         residDeg[i]    = nDispDeg;   // §174.4 формула-независимое качество захвата (стиллнес N-позы)
         qualityBand[i] = fox::body::calibrationQuality(residDeg[i]);
