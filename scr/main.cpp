@@ -244,6 +244,10 @@ constexpr double kD2R = fb::constants::kDeg2Rad;
 
 inline std::atomic<bool>& g_testFlag();
 inline std::atomic<bool>& g_glovesFlag();
+// §DBG monotonic deadline (sec): while now < this, the receiver emits a per-frame
+//   all-segment [fdump] (raw EKF inputs + fused quat) for offline replay. Set at
+//   calibration start, auto-expires. 0 = off.
+inline std::atomic<double>& g_frameDumpUntilMono();
 
 inline double sigmoid(double x) {
     if (x >  40.0) return 1.0;
@@ -2360,6 +2364,7 @@ inline std::mutex&   g_refinerMtx() {
 
 inline std::atomic<bool>& g_testFlag()   { static std::atomic<bool> v{false}; return v; }
 inline std::atomic<bool>& g_glovesFlag() { static std::atomic<bool> v{false}; return v; }
+inline std::atomic<double>& g_frameDumpUntilMono() { static std::atomic<double> v{0.0}; return v; }
 
 void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
                    const BodyPoseSolver::Diag& d,
@@ -6306,6 +6311,35 @@ void MocapReceiver::run()
                 I.lastAhrsDump = now;
             }
 
+            // §DBG per-frame all-segment dump for the [fdump] window armed at calibration start.
+            //   Emits the exact EKF inputs (acc in g, gyr in deg/s, mag) and the fused quaternion
+            //   (sensor->world) for every present segment, so the whole engine — EKF stillness/
+            //   level and the §24.5 bone = q_sensor ⊗ q_align pose — can be replayed offline
+            //   frame-by-frame. Auto-expires (deadline set by the calibrator); off otherwise.
+            if (I.test &&
+                now < fox::pose_solver::g_frameDumpUntilMono().load(std::memory_order_relaxed)) {
+                static quint64 s_fdumpIdx = 0;
+                std::ostringstream fd;
+                fd << "[fdump] f=" << s_fdumpIdx++
+                   << " t=" << std::fixed << std::setprecision(3) << now
+                   << " hz=" << std::setprecision(1) << I.freqHz
+                   << "  (acc=g, gyr=deg/s, fused=sensor->world)\n";
+                fd << std::setprecision(5);
+                for (int s = 0; s < kXsensSegmentCount; ++s) {
+                    if (!fox::body::kSensorPresent[s]) continue;
+                    const QVector3D& a = I.dbgAccBody[s];
+                    const QVector3D& g = I.dbgGyrBody[s];
+                    const QVector3D& m = I.dbgMagBody[s];
+                    const Quat&      q = I.dbgFusedQuat[s];
+                    fd << "  " << std::left << std::setw(13) << kSegmentNames[s] << std::right
+                       << " a=" << a.x() << "," << a.y() << "," << a.z()
+                       << " g=" << g.x() << "," << g.y() << "," << g.z()
+                       << " m=" << m.x() << "," << m.y() << "," << m.z()
+                       << " q=" << q.w << "," << q.x << "," << q.y << "," << q.z << "\n";
+                }
+                logBlock(fd.str());
+            }
+
             if (fox::pose_solver::g_testFlag().load(std::memory_order_relaxed) &&
                 fox::pose_solver::g_glovesFlag().load(std::memory_order_relaxed) &&
                 (now - I.segAccDumpAccumSec) > 2.0) {
@@ -8564,6 +8598,11 @@ void NewSessionWizard::onCalibrationBegin()
         m_poseHint->setText(Lang::t("tpose_hint"));
     testLog("[calib] double-pose sequence started, PrepT "
             "(Madgwick re-init scheduled)", m_test);
+    // §DBG arm the per-frame [fdump] window: calibration (~15 s) + the post-calib T-pose
+    //   hold, so the engine can be replayed offline frame-by-frame. Auto-expires.
+    if (m_test)
+        fox::pose_solver::g_frameDumpUntilMono().store(
+            monotonicSec() + 30.0, std::memory_order_relaxed);
     logCalibPhaseTransition("countdown begin");
     m_countTimer.start();
     updateNavButtons();
