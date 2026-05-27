@@ -8696,22 +8696,17 @@ void MocapViewport::updatePose(const std::array<Quat, kXsensSegmentCount>& orien
                     const Quat& dL = m_driftLocal[i];
                     const double dw = std::min(1.0, std::abs(dL.w));
                     if (2.0 * std::acos(dw) > 1e-4) {
+                        // Корректируем ТОЛЬКО swing (провисание кисти к предплечью), НЕ twist.
+                        //   Прежний блок «через 5с покоя докрутить twist на 50%» (twistHalf) ЛОЧИЛ
+                        //   крен кисти — поэтому вращение запястьем «не понималось». В старой рабочей
+                        //   версии twist кисти не лочился вовсе (см. old/main.cpp:5301-5341). Оставляем
+                        //   только анти-провис, крен кисти свободно следует за сенсором/перчаткой.
                         Quat dLSwing, dLTwist;
                         swingTwistDecompose(dL, QVector3D(1.0f, 0.0f, 0.0f), dLSwing, dLTwist);
                         const Quat dLSwingInv = dLSwing.inv();
                         const Quat correctionWorld = quat_mult(fWorld, quat_mult(dLSwingInv, fWorld.inv())).normalized();
                         const Quat hCorrectedWorld = quat_mult(correctionWorld, hWorld).normalized();
                         filtered[i] = quat_mult(hCorrectedWorld, dA_h.inv()).normalized();
-
-                        if (m_calmSeconds[i] >= 5.0) {
-                            const Quat dLTwistInv = dLTwist.inv();
-                            const Quat twistWorld = quat_mult(fWorld,
-                                                       quat_mult(dLTwistInv, fWorld.inv())).normalized();
-                            const Quat twistHalf  = slerp_quat(Quat(1,0,0,0), twistWorld, 0.5);
-                            const Quat hWithTwist = quat_mult(twistHalf,
-                                                       quat_mult(filtered[i], dA_h)).normalized();
-                            filtered[i] = quat_mult(hWithTwist, dA_h.inv()).normalized();
-                        }
                     }
                 }
 
