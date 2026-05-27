@@ -11270,9 +11270,10 @@ inline std::string fmtV3(const QVector3D& v) {
 
 QVector3D worldPelvisWithLoco(const SkeletonXsens& skel,
                               const std::array<Quat, kXsensSegmentCount>& segWorld,
-                              const QVector3D& locoOffset)
+                              const QVector3D& locoOffset,
+                              float rootZ)
 {
-    auto kp = skel.computeKeypoints(segWorld, QVector3D(0.0f, 0.0f, 0.0f));
+    auto kp = skel.computeKeypoints(segWorld, QVector3D(0.0f, 0.0f, rootZ));
     for (auto& p : kp) p += locoOffset;
     float minZ = kp[0].z();
     for (const auto& p : kp) if (p.z() < minZ) minZ = p.z();
@@ -11545,14 +11546,18 @@ void MainWindow::onRenderTick()
         }
     }
 
-    m_viewport->updatePose(q, QVector3D(0.0f, 0.0f, 0.0f));
+    // §loco-якорь: рендер/стрим/loco FK кореним на ОДНОЙ высоте таза (pelvisStandHeightM).
+    //   loco.update возвращает offset ОТНОСИТЕЛЬНО этого корня (стоя ≈0; Sit/Lying offset уже
+    //   вычитает standHeight, см. main.cpp:2200-2202). Если корень=0, стоя таз падал в z=0 (на пол),
+    //   ноги под пол — фигура «в середине сцены». (formules.txt §35/§loco)
+    const float rootZ = float(fox::body::pelvisStandHeightM(m_setup.heightCm / 100.0));
+    m_viewport->updatePose(q, QVector3D(0.0f, 0.0f, rootZ));
     const auto& qOut = m_viewport->filteredOrient();
 
     if (m_skel) {
 
         m_skel->setAccLPBodyHint(f.accSensor);
-        const float pelvisZ_loco = float(fox::body::pelvisStandHeightM(m_setup.heightCm / 100.0));
-        auto kpLoco = m_skel->computeKeypoints(qOut, QVector3D(0.0f, 0.0f, pelvisZ_loco));
+        auto kpLoco = m_skel->computeKeypoints(qOut, QVector3D(0.0f, 0.0f, rootZ));
 
         // §V/§1158/§1159 loco-решатель работает на qOut (= fused). m_defAng в FK СОКРАЩАЕТСЯ
         //   (m_localOffset=R(conj(defAng))·L_bone, main.cpp:2891), поэтому при верной калибровке
@@ -11589,7 +11594,7 @@ void MainWindow::onRenderTick()
         std::array<Quat, kXsensSegmentCount> qStream = qOut;
 
         if (m_skel) {
-            pelvisM = worldPelvisWithLoco(*m_skel, qOut, m_viewport->lastLocoOffset());
+            pelvisM = worldPelvisWithLoco(*m_skel, qOut, m_viewport->lastLocoOffset(), rootZ);
             pelvisM = m_viewport->lockPelvisIfFrozen(pelvisM);  // §35 заморозка пинит таз и в стриме (formules.txt)
         }
         const bool gloves = f.hasGloves && m_setup.useGloves;
@@ -11690,7 +11695,7 @@ void MainWindow::onRenderTick()
 
             QVector3D pelvisM(0.0f, 0.0f, 0.0f);
             if (m_skel) {
-                pelvisM = worldPelvisWithLoco(*m_skel, qOut, m_viewport->lastLocoOffset());
+                pelvisM = worldPelvisWithLoco(*m_skel, qOut, m_viewport->lastLocoOffset(), rootZ);
                 pelvisM = m_viewport->lockPelvisIfFrozen(pelvisM);  // §35 заморозка пинит таз и в записи (formules.txt)
             }
             rf.pelvisPos = pelvisM;
