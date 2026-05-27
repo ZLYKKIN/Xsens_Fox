@@ -332,6 +332,11 @@ private:
 
         double    m_pelvisStillRad    = 0.20;
 
+        // §loco-clamp макс. горизонтальная скорость таза (м/с): физический потолок
+        //   XY-смещения корня за кадр (maxStepXY = m_pelvisVMaxXY·dt). Щедрый —
+        //   не режет реальную ходьбу/бег, ловит только аномальные скачки/dt-спайки.
+        double    m_pelvisVMaxXY      = 3.0;
+
         double    m_confCommit        = 0.35;
         double    m_confRelease       = 0.25;
         double    m_confRiseRate      = 0.50;
