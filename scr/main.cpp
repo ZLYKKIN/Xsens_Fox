@@ -910,11 +910,13 @@ public:
             //   them between pelvis and T8 (the solver left them at identity, which kinked the
             //   spine). Spine chain indices: 0 pelvis, 1 L5, 2 L3, 3 T12, 4 T8, 5 neck, 6 head.
             //   (skeleton hierarchy per Xsens MVN / HumanInertialPose xsens.py)
-            orient[1] = slerp_quat(orient[0], orient[4], 0.25);   // L5
+            //   Веса L5/T12 — как в старой: smoothstep(0.22)=0.124, smoothstep(0.78)=0.876
+            //   (поясница прижата к тазу, грудной отдел к груди → естественный прогиб при наклоне).
+            orient[1] = slerp_quat(orient[0], orient[4], 0.124);  // L5
             orient[2] = slerp_quat(orient[0], orient[4], 0.50);   // L3
-            orient[3] = slerp_quat(orient[0], orient[4], 0.75);   // T12
+            orient[3] = slerp_quat(orient[0], orient[4], 0.876);  // T12
             orient[5] = slerp_quat(orient[4], orient[6], 0.50);   // neck (T8 -> head)
-            dg.spineFracL5 = 0.25; dg.spineFracL3 = 0.50; dg.spineFracT12 = 0.75;
+            dg.spineFracL5 = 0.124; dg.spineFracL3 = 0.50; dg.spineFracT12 = 0.876;
 
             for (int i = 0; i < fb::kSegmentCount; ++i) {
                 if (!(*ctx.sensorPresent)[i]) continue;
