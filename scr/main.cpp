@@ -7773,17 +7773,15 @@ void NewSessionWizard::onCaptureTick()
             if (aw > 1.0) aw = 1.0;
             ntAgreeDeg[i] = 2.0 * std::acos(aw) * 180.0 / M_PI;
         }
-        // §24.5 sensor->bone alignment, calibrated from the T-POSE (the pose the actor holds):
-        //   q_align = conj(q_avg_T) ⊗ q_ref_T. The N-pose has the arms hanging along gravity, where
-        //   the arm-axis twist/yaw is UNOBSERVABLE, so an N-pose q_align bakes in an arbitrary twist
-        //   that surfaces as a ~95° elbow once the arms are horizontal. The T-pose has the arms
-        //   horizontal (twist observable) -> elbow ~0. Legs/torso are vertical in both poses, so the
-        //   T-pose alignment keeps them correct too. Runtime forms bone = q_sensor ⊗ q_align, which
-        //   equals q_ref_T in the T-pose and tracks 1:1 thereafter. Fall back to the N-pose alignment
-        //   only if the T capture for this segment was invalid.
-        s2s[i] = tposeValid[i]
-               ? quat_mult(m_result.tposeReference[i].conj(), qRefT).normalized()
-               : qAlignN;
+        // §24.5 выравнивание сенсор->кость калибруется от N-ПОЗЫ: q_align = conj(q_avg_N) ⊗ q_ref_N.
+        //   ПОЧЕМУ N, а не T: дефолтные углы скелета (m_defAng, buildDefaultAngles) заданы для N-позы
+        //   (руки опущены, defAng рук = E(±π/2,0,∓π/2) ⇒ (0.5,0.5,0.5,∓0.5)). Опора калибровки ОБЯЗАНА
+        //   быть той же позы — иначе bone=q_ref_T (T) + N-дефолтные-углы рассогласованы и руки ломаются.
+        //   На практике захват T-позы давал мусорный s2s предплечий/кистей (q_align ~155-178°) — руки
+        //   разваливались даже стоя в N-позе. N-поза (руки вдоль гравитации) воспроизводится надёжно;
+        //   скрутка оси руки в N ненаблюдаема, но это меньшее зло, чем сломанный T-захват. Runtime:
+        //   bone = q_sensor ⊗ q_align = q_ref_N в N-позе и трекает 1:1 далее. (formules.txt §24.5)
+        s2s[i] = qAlignN;
 
         residDeg[i]    = nDispDeg;   // §174.4 формула-независимое качество захвата (стиллнес N-позы)
         qualityBand[i] = fox::body::calibrationQuality(residDeg[i]);
