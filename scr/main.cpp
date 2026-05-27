@@ -2151,61 +2151,20 @@ public:
 
         BodyPoseSolver::Diag dg{};
         if (ctx.sensorMeas && ctx.sensorPresent) {
-            const std::array<Quat, fb::kSegmentCount> orient_pre = orient;     // §DBG pre-solver (post-defAng)
-            dg = m_solver.solve(orient, *ctx.sensorMeas, *ctx.sensorPresent,
-                                m_skin, cr.active, dt);
-            const std::array<Quat, fb::kSegmentCount> orient_solved = orient;  // §DBG post-solver, pre-smoother
-
-            // TRUST THE SENSORS. The Gauss-Newton IK has multiple minima and intermittently jumps
-            //   between them (flips the whole pose 100-170°, see [solv]) — the dominant cause of the
-            //   shaking / collapsed ("lying") skeleton. After the EKF + T-pose s2s fixes, the measured
-            //   orientations are already correct, so keep them for every sensor-bearing segment and
-            //   let the solver only fill the non-measured spine vertebrae (dummies).
-            for (int i = 0; i < fb::kSegmentCount; ++i)
-                if ((*ctx.sensorPresent)[i]) orient[i] = orient_pre[i];
-
-            {
-                std::array<double, fb::kSegmentCount * 3> P_diag{};
-                const double sigma2 = std::max(1e-9,
-                    dg.covMaxOriRad * dg.covMaxOriRad);
-                for (int s = 0; s < fb::kSegmentCount; ++s)
-                    for (int k = 0; k < 3; ++k)
-                        P_diag[s * 3 + k] = sigma2;
-                m_smoother.pushFrame(orient, P_diag, dt);
-                if (m_smoother.count() >= BatchSmoother::kWindow) {
-                    std::array<Quat, fb::kSegmentCount> smoothed{};
-                    m_smoother.backwardPass(smoothed);
-                    orient = smoothed;
-                    m_smoother.marginalizeOldest();
-                }
-            }
-
-            // §DBG staged per-segment effect: how much the SOLVER and the SMOOTHER each move a
-            //   segment away from the (correct) sensor pose. orient_pre=pre-solver, orient_solved=
-            //   post-solver, orient=post-smoother. Pinpoints which module collapses the T-pose.
-            if (g_testFlag().load(std::memory_order_relaxed)) {
-                static int s_solvDbg = 0;
-                if ((s_solvDbg++ % 24) == 0) {
-                    auto angd = [](const Quat& a, const Quat& b) {
-                        return quat_log(quat_mult(a, b.conj()).normalized()).length()
-                               * 57.29577951308232;
-                    };
-                    auto uz = [](const Quat& q){ return 1.0 - 2.0 * (q.x * q.x + q.y * q.y); };
-                    const int segs[7] = { 0, 4, 6, 8, 9, 15, 16 };  // pelvis t8 head rUA rFA rUL rLL
-                    std::ostringstream so;
-                    so << std::fixed << std::setprecision(1)
-                       << "[solv] pelUz pre=" << std::setprecision(2) << uz(orient_pre[0])
-                       << " solved=" << uz(orient_solved[0]) << " post=" << uz(orient[0])
-                       << std::setprecision(1) << "  solverD/smoothD deg:";
-                    for (int k = 0; k < 7; ++k) {
-                        const int s = segs[k];
-                        so << " s" << s << "=" << angd(orient_solved[s], orient_pre[s])
-                           << "/" << angd(orient[s], orient_solved[s]);
-                    }
-                    so << "\n";
-                    std::cout << so.str();
-                }
-            }
+            // ── BodyPoseSolver + BatchSmoother REMOVED ──────────────────────────────────
+            //   The Gauss-Newton IK had multiple minima and intermittently flipped the WHOLE pose
+            //   by 100-170° — the shaking and the collapsed/"lying" skeleton; the batch smoother
+            //   also lagged the motion. After the EKF + T-pose s2s fixes, the measured per-segment
+            //   orientations are already correct, so the skeleton is driven DIRECTLY from them — no
+            //   IK, no smoothing. Only the non-measured spine vertebrae need filling: interpolate
+            //   them between pelvis and T8 (the solver left them at identity, which kinked the
+            //   spine). Spine chain indices: 0 pelvis, 1 L5, 2 L3, 3 T12, 4 T8, 5 neck, 6 head.
+            //   (skeleton hierarchy per Xsens MVN / HumanInertialPose xsens.py)
+            orient[1] = slerp_quat(orient[0], orient[4], 0.25);   // L5
+            orient[2] = slerp_quat(orient[0], orient[4], 0.50);   // L3
+            orient[3] = slerp_quat(orient[0], orient[4], 0.75);   // T12
+            orient[5] = slerp_quat(orient[4], orient[6], 0.50);   // neck (T8 -> head)
+            dg.spineFracL5 = 0.25; dg.spineFracL3 = 0.50; dg.spineFracT12 = 0.75;
 
             for (int i = 0; i < fb::kSegmentCount; ++i) {
                 if (!(*ctx.sensorPresent)[i]) continue;
@@ -2375,8 +2334,9 @@ public:
 private:
     SkinArtifactState     m_skin;
     ContactDetector       m_contacts;
-    BodyPoseSolver        m_solver;
-    BatchSmoother         m_smoother;
+    // BodyPoseSolver removed — skeleton is driven directly from the per-sensor orientations
+    //   (the Gauss-Newton IK flipped the pose; sensors are correct after the EKF + s2s fixes).
+    BatchSmoother         m_smoother;  // retained (reset only); no longer applied in refine()
     LocomotionClassifier  m_locomotion;
     std::array<Quat,      fb::kSegmentCount> m_prevOrient{};
     std::array<QVector3D, fb::kSegmentCount> m_prevSegCenter{};
