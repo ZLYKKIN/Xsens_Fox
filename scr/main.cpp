@@ -11306,7 +11306,6 @@ void MainWindow::onRenderTick()
     static bool s_stateReady = false;
 
     static std::array<Quat, kXsensSegmentCount> s_refWorld{};
-    static std::array<Quat, kXsensSegmentCount> s_refWorldInv{};
     static std::array<Quat, kXsensSegmentCount> s_lastRaw{};
     static std::array<Quat, kXsensSegmentCount> s_prevRaw{};
     static std::array<Quat, kXsensSegmentCount> s_lastOut{};
@@ -11337,7 +11336,6 @@ void MainWindow::onRenderTick()
     if (!s_stateReady) {
         for (int i = 0; i < kXsensSegmentCount; ++i) {
             s_refWorld[i]     = safeQuat(m_setup.calibReference[i], Quat(1,0,0,0));
-            s_refWorldInv[i]  = s_refWorld[i].inv();
             s_lastRaw[i]      = s_refWorld[i];
             s_prevRaw[i]      = s_refWorld[i];
             s_lastOut[i]      = Quat(1, 0, 0, 0);
@@ -11367,7 +11365,7 @@ void MainWindow::onRenderTick()
         } else if (s_haveRaw[i]) {
             raw[i] = s_lastRaw[i];
         } else {
-            raw[i] = s_refWorld[i];
+            raw[i] = Quat(1, 0, 0, 0);   // сегмент без данных -> нейтральная кость (cand берётся как есть)
         }
         // ПРИЧИНА 5: на ПЕРВОМ кадре сегмента s_prevRaw ещё = calibReference (сырое среднее датчика,
         //   ЧУЖАЯ система отн. калиброванного f.quat) -> ложный стартовый снэп ~3000°/s. Гасим omega=0.
@@ -11389,7 +11387,11 @@ void MainWindow::onRenderTick()
         g_renderDiag.rejectW[i]   = 0.0;
         g_renderDiag.gyroQuiet[i] = false;
 
-        Quat cand = quat_mult(raw[i], s_refWorldInv[i]).normalized();
+        // f.quat ПРИХОДИТ уже как §24.5 кость (fused ⊗ s2sFwd, поток приёма main.cpp:4938).
+        //   Раньше тут ВТОРОЙ раз вычиталась calibReference (⊗ conj(qAvg)) — двойная коррекция
+        //   заваливала таз (up-вектор 0.98→0.42, поза=Lying) и весь скелет «ложился». Берём
+        //   калиброванную ориентацию как есть. (formules.txt §24.5; ср. коммент §V ниже про qOut=qRef)
+        Quat cand = raw[i];
 
         if (f.segValid[i] && s_haveOut[i]) {
             const double jumpDeg = quat_angle_deg(quat_mult(cand, s_lastOut[i].inv()));
