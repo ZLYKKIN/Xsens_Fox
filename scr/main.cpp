@@ -10781,6 +10781,13 @@ void MainWindow::onRenderTick()
         std::array<Quat, kXsensSegmentCount> qStream = qOut;
 
         if (m_skel) {
+            // §стрим: наружу — АБСОЛЮТНАЯ ориентация сегмента (как во вьюпорте: oriented = qOut⊗defAng),
+            //   а НЕ калибровочно-относительная qOut. Плагины (UE домножает на m_mvnToUnrealTpose,
+            //   Blender — по-косточный MVN-ремап) ждут MVN-абсолют; на голом qOut в N-позе ушли бы
+            //   identity у всех сегментов → рассинхрон с тем, что видно. defAng в позиции таза
+            //   сокращается, поэтому worldPelvisWithLoco считаем от qOut. (formules.txt §24/§174)
+            for (int i = 0; i < kXsensSegmentCount; ++i)
+                qStream[i] = quat_mult(qOut[i], m_skel->defAngFor(i)).normalized();
             pelvisM = worldPelvisWithLoco(*m_skel, qOut, m_viewport->lastLocoOffset(), rootZ);
             pelvisM = m_viewport->lockPelvisIfFrozen(pelvisM);  // §35 заморозка пинит таз и в стриме (formules.txt)
         }
