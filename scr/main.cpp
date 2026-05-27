@@ -1670,48 +1670,17 @@ RenderDiag g_renderDiag{};
 std::array<Quat, kXsensSegmentCountWithDummies>
 SkeletonXsens::addDummySegments(const std::array<Quat, kXsensSegmentCount>& s) const
 {
-    namespace fb = fox::body;
-
+    // Лопатки (центр плеч) и бёдра — как в старой (рабочей) версии: от ПОЛНОЙ ориентации
+    //   T8 / таза, ±90°, БЕЗ yaw_only и БЕЗ связок scapHum/femoropelvic (old/main.cpp:422-426).
+    //   Наши связки (лопатка↔плечо kCArms≈0.95, бедро↔нога kCFemoropelvic) + отбрасывание
+    //   наклона таза (yaw_only) смещали центр плеч и бёдра при наклоне/седе → ноги расходились
+    //   и менялись местами, плечи «ломались». Полная ориентация таза даёт верные бёдра и при
+    //   повороте, и при наклоне; полная T8 — верный центр плеч.
     const double P = M_PI;
-    const Quat t8yaw     = yaw_only_quat(s[SEG_T8]);
-    const Quat pelvisYaw = yaw_only_quat(s[SEG_Pelvis]);
-    const Quat rScapBase = quat_mult(t8yaw,     euler_to_quat(0, -P/2, -P/2, "XYZ"));
-    const Quat lScapBase = quat_mult(t8yaw,     euler_to_quat(0, -P/2,  P/2, "XYZ"));
-    const Quat rHipBase  = quat_mult(pelvisYaw, euler_to_quat(0,  0,   -P/2, "XYZ"));
-    const Quat lHipBase  = quat_mult(pelvisYaw, euler_to_quat(0,  0,    P/2, "XYZ"));
-
-    auto canon = [](const Quat& q) {
-        return (q.w < 0.0) ? Quat(-q.w, -q.x, -q.y, -q.z) : q;
-    };
-    auto scapHumOffset = [&](const Quat& qUpperArm) -> Quat {
-        const Quat qRel = canon(quat_mult(qUpperArm, s[SEG_T8].conj()).normalized());
-        const QVector3D phi = quat_log(qRel);
-        constexpr double kR2D = fb::constants::kRad2Deg;
-        auto ramp = [](double aDeg, double cLow) {
-            const double lo = fb::kScapHumThetaLowDeg;
-            const double hi = fb::kScapHumThetaHighDeg;
-            const double a = std::abs(aDeg);
-            if (a <= lo) return cLow;
-            if (a >= hi) return fb::kCArms[2];
-            return cLow + (a - lo) / (hi - lo) * (fb::kCArms[2] - cLow);
-        };
-        const double cX = ramp(double(phi.x()) * kR2D, fb::kCArms[0]);
-        const double cY = ramp(double(phi.y()) * kR2D, fb::kCArms[1]);
-        return quat_exp_rotvec(cX * double(phi.x()),
-                               cY * double(phi.y()), 0.0);
-    };
-    auto femoropelvicOffset = [&](const Quat& qUpperLeg) -> Quat {
-        const Quat qRel = canon(quat_mult(qUpperLeg, s[SEG_Pelvis].conj()).normalized());
-        const QVector3D phi = quat_log(qRel);
-        const double cR = fb::kCFemoropelvic;
-        return quat_exp_rotvec(cR * double(phi.x()),
-                               cR * double(phi.y()), 0.0);
-    };
-
-    const Quat rScap = quat_mult(scapHumOffset(s[SEG_RUpperArm]), rScapBase).normalized();
-    const Quat lScap = quat_mult(scapHumOffset(s[SEG_LUpperArm]), lScapBase).normalized();
-    const Quat rHip  = quat_mult(femoropelvicOffset(s[SEG_RUpperLeg]), rHipBase).normalized();
-    const Quat lHip  = quat_mult(femoropelvicOffset(s[SEG_LUpperLeg]), lHipBase).normalized();
+    const Quat rScap = quat_mult(s[SEG_T8],     euler_to_quat(0, -P/2, -P/2, "XYZ")).normalized();
+    const Quat lScap = quat_mult(s[SEG_T8],     euler_to_quat(0, -P/2,  P/2, "XYZ")).normalized();
+    const Quat rHip  = quat_mult(s[SEG_Pelvis], euler_to_quat(0,  0,   -P/2, "XYZ")).normalized();
+    const Quat lHip  = quat_mult(s[SEG_Pelvis], euler_to_quat(0,  0,    P/2, "XYZ")).normalized();
 
     std::array<Quat, kXsensSegmentCountWithDummies> out{};
     int k = 0;
@@ -1725,22 +1694,6 @@ SkeletonXsens::addDummySegments(const std::array<Quat, kXsensSegmentCount>& s) c
     out[k++] = lHip;
     for (int i = 19; i < 23; ++i) out[k++] = s[i];
 
-    if (fox::pose_solver::g_testFlag().load(std::memory_order_relaxed) &&
-        fox::pose_solver::g_glovesFlag().load(std::memory_order_relaxed)) {
-        static int dummyTick = 0;
-        if ((++dummyTick % 120) == 0) {
-            std::cout << std::fixed << std::setprecision(2);
-            std::cout << "[dummy-seg] rScap_off="
-                      << quat_angle_deg(quat_mult(rScap, rScapBase.conj()))
-                      << "°  lScap_off="
-                      << quat_angle_deg(quat_mult(lScap, lScapBase.conj()))
-                      << "°  rHip_off="
-                      << quat_angle_deg(quat_mult(rHip,  rHipBase.conj()))
-                      << "°  lHip_off="
-                      << quat_angle_deg(quat_mult(lHip,  lHipBase.conj())) << "°\n";
-            std::cout.flush();
-        }
-    }
     return out;
 }
 
