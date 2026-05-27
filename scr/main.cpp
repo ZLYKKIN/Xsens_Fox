@@ -2007,12 +2007,26 @@ QVector3D LocomotionSolver::update(const Quat& qR,
         const double toeContactWL_pre  = sstep_local((-m_footPitchZL - 0.17) / 0.17);
         const double neutralR = std::max(0.0, 1.0 - heelContactWR_pre - toeContactWR_pre);
         const double neutralL = std::max(0.0, 1.0 - heelContactWL_pre - toeContactWL_pre);
-        const QVector3D fkR = float(neutralR) * fkRLowest
-                            + float(heelContactWR_pre) * fkRHeel
-                            + float(toeContactWR_pre)  * fkRBall;
-        const QVector3D fkL = float(neutralL) * fkLLowest
-                            + float(heelContactWL_pre) * fkLHeel
-                            + float(toeContactWL_pre)  * fkLBall;
+        QVector3D fkR = float(neutralR) * fkRLowest
+                      + float(heelContactWR_pre) * fkRHeel
+                      + float(toeContactWR_pre)  * fkRBall;
+        QVector3D fkL = float(neutralL) * fkLLowest
+                      + float(heelContactWL_pre) * fkLHeel
+                      + float(toeContactWL_pre)  * fkLBall;
+        // §loco-RI: контактный blend heel/ball/tip выше СМЕЩАЕТ эффективную точку
+        //   стопы ВПЕРЁД при перекате пятка→носок (≈длину стопы). В одиночной опоре
+        //   этот сдвиг утекает в loco-offset (re-anchor по контакту ниже при одной
+        //   опорной ноге — тождественная операция, no-op), поэтому корень уползает
+        //   назад на каждый шаг → теряется чистое перемещение («ходьба на месте»,
+        //   cum>>net) и дёргается. Якорим XY-перемещение к РОЛЛ-ИНВАРИАНТНОМУ
+        //   центроиду стопы (фикс. веса точек); контактный Z оставляем для высоты/
+        //   позы/контакта.
+        {
+            const QVector3D rc = (fkRHeel + fkRBall + fkRTip) * (1.0f / 3.0f);
+            const QVector3D lc = (fkLHeel + fkLBall + fkLTip) * (1.0f / 3.0f);
+            fkR.setX(rc.x()); fkR.setY(rc.y());
+            fkL.setX(lc.x()); fkL.setY(lc.y());
+        }
 
         auto angVel = [](const Quat& a, const Quat& b, double dt_) {
             if (dt_ < 1e-6) return 0.0;
@@ -2442,11 +2456,14 @@ QVector3D LocomotionSolver::update(const Quat& qR,
 
         {
 
-            const float stepScale = float(dt * 90.0);
-            float maxStepXY = ((imbalance > 0.7) ? 0.35f : 0.20f) * stepScale;
+            // §loco-clamp: потолок XY-смещения корня за кадр = физический предел
+            //   скорости таза (м/с)·dt. Прежний dt*90 допускал ~0.2-0.35 м/кадр и
+            //   раздувался до многометровых скачков на «проседании» кадра (dt→0.1).
+            const float maxFrameXY = float(m_pelvisVMaxXY * dt);
+            float maxStepXY = ((imbalance > 0.7) ? 1.4f : 1.0f) * maxFrameXY;
             if (m_recentCommitTicks > 0) {
                 const float fade = float(m_recentCommitTicks) / float(m_commitFadeTicks);
-                const float minCap = 0.04f * stepScale;
+                const float minCap = 0.2f * maxStepXY;
                 maxStepXY = minCap + (maxStepXY - minCap) * (1.0f - fade);
             }
             const float dx = newOff.x() - m_offsetLast.x();
