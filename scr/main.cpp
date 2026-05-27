@@ -244,6 +244,10 @@ constexpr double kD2R = fb::constants::kDeg2Rad;
 
 inline std::atomic<bool>& g_testFlag();
 inline std::atomic<bool>& g_glovesFlag();
+// §DBG monotonic deadline (sec): while now < this, the receiver emits a per-frame
+//   all-segment [fdump] (raw EKF inputs + fused quat) for offline replay. Set at
+//   calibration start, auto-expires. 0 = off.
+inline std::atomic<double>& g_frameDumpUntilMono();
 
 inline double sigmoid(double x) {
     if (x >  40.0) return 1.0;
@@ -2360,6 +2364,7 @@ inline std::mutex&   g_refinerMtx() {
 
 inline std::atomic<bool>& g_testFlag()   { static std::atomic<bool> v{false}; return v; }
 inline std::atomic<bool>& g_glovesFlag() { static std::atomic<bool> v{false}; return v; }
+inline std::atomic<double>& g_frameDumpUntilMono() { static std::atomic<double> v{0.0}; return v; }
 
 void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
                    const BodyPoseSolver::Diag& d,
@@ -6146,19 +6151,17 @@ void MocapReceiver::run()
 
             if (targetSeg >= 0 && targetSeg < kXsensSegmentCount) {
                 QMutexLocker lk(&I.lock);
-                // §174.4 bone orientation = R_z(h) ⊗ q_sensor ⊗ conj(q_bs).
-                //   cal.s2sFwd = conj(q_bs) (two-pose sensor->bone), applied as a post-rotation.
-                //   R_z(h) = yaw_only(q_ref_N ⊗ q_bs) restores the per-segment heading that the
-                //   no-mag EKF zeroes at its gravity seed, so the rendered pose is correct away
-                //   from the calibration pose (the arms in the T-pose), not only in the N-pose.
-                //   (q_bs = cal.s2sFwd.conj(); identity transform when uncalibrated.)
+                // §24.5 bone orientation = q_sensor ⊗ q_align, where the calibration stored
+                //   q_align = conj(q_avg_N) ⊗ q_ref_N (cal.s2sFwd). This equals q_ref_N in the
+                //   N-pose and rotates 1:1 with the segment thereafter (T-pose etc.). The old
+                //   yaw_only(q_ref_N ⊗ q_bs) heading restore + gravity-solve mount was a
+                //   workaround for the diverging EKF; it left the static pose off by up to ~100°.
+                //   With the per-sensor EKF stable (gravity level + gyro heading) the documented
+                //   §24.5 form is exact, so apply q_align directly with no separate heading term.
                 if (haveFused || haveQuat) {
                     Quat qSensor = haveFused ? fusedQuat : qo;
                     if (cal.s2sActive) {
-                        const Quat head = yaw_only_quat(
-                            quat_mult(fox::body::kRefQuatN[targetSeg], cal.s2sFwd.conj()));
-                        qSensor = quat_mult(head,
-                                            quat_mult(qSensor, cal.s2sFwd)).normalized();
+                        qSensor = quat_mult(qSensor, cal.s2sFwd).normalized();
                     }
                     staging.quat[targetSeg] = qSensor;
                 }
@@ -6306,6 +6309,35 @@ void MocapReceiver::run()
                    << "\n";
                 logBlock(ss.str());
                 I.lastAhrsDump = now;
+            }
+
+            // §DBG per-frame all-segment dump for the [fdump] window armed at calibration start.
+            //   Emits the exact EKF inputs (acc in g, gyr in deg/s, mag) and the fused quaternion
+            //   (sensor->world) for every present segment, so the whole engine — EKF stillness/
+            //   level and the §24.5 bone = q_sensor ⊗ q_align pose — can be replayed offline
+            //   frame-by-frame. Auto-expires (deadline set by the calibrator); off otherwise.
+            if (I.test &&
+                now < fox::pose_solver::g_frameDumpUntilMono().load(std::memory_order_relaxed)) {
+                static quint64 s_fdumpIdx = 0;
+                std::ostringstream fd;
+                fd << "[fdump] f=" << s_fdumpIdx++
+                   << " t=" << std::fixed << std::setprecision(3) << now
+                   << " hz=" << std::setprecision(1) << I.freqHz
+                   << "  (acc=g, gyr=deg/s, fused=sensor->world)\n";
+                fd << std::setprecision(5);
+                for (int s = 0; s < kXsensSegmentCount; ++s) {
+                    if (!fox::body::kSensorPresent[s]) continue;
+                    const QVector3D& a = I.dbgAccBody[s];
+                    const QVector3D& g = I.dbgGyrBody[s];
+                    const QVector3D& m = I.dbgMagBody[s];
+                    const Quat&      q = I.dbgFusedQuat[s];
+                    fd << "  " << std::left << std::setw(13) << kSegmentNames[s] << std::right
+                       << " a=" << a.x() << "," << a.y() << "," << a.z()
+                       << " g=" << g.x() << "," << g.y() << "," << g.z()
+                       << " m=" << m.x() << "," << m.y() << "," << m.z()
+                       << " q=" << q.w << "," << q.x << "," << q.y << "," << q.z << "\n";
+                }
+                logBlock(fd.str());
             }
 
             if (fox::pose_solver::g_testFlag().load(std::memory_order_relaxed) &&
@@ -8566,6 +8598,11 @@ void NewSessionWizard::onCalibrationBegin()
         m_poseHint->setText(Lang::t("tpose_hint"));
     testLog("[calib] double-pose sequence started, PrepT "
             "(Madgwick re-init scheduled)", m_test);
+    // §DBG arm the per-frame [fdump] window: calibration (~15 s) + the post-calib T-pose
+    //   hold, so the engine can be replayed offline frame-by-frame. Auto-expires.
+    if (m_test)
+        fox::pose_solver::g_frameDumpUntilMono().store(
+            monotonicSec() + 30.0, std::memory_order_relaxed);
     logCalibPhaseTransition("countdown begin");
     m_countTimer.start();
     updateNavButtons();
@@ -8970,60 +9007,13 @@ void NewSessionWizard::onCaptureTick()
         tposeValid[i] = (dist2 > 1e-12);
     }
 
-    // §24.5/§174.4 GRAVITY-based two-pose sensor->bone solve. Gravity in the T and N
-    //   reference poses determines the mounting WITHOUT any heading reference, so it is
-    //   immune to the per-sensor yaw drift that corrupts the fused-orientation average.
-    //   quatAlign: minimal rotation taking unit vector a onto unit vector b.
-    auto quatAlign = [](QVector3D a, QVector3D b) -> Quat {
-        a.normalize(); b.normalize();
-        const double d = double(QVector3D::dotProduct(a, b));
-        if (d > 0.9999995) return Quat(1, 0, 0, 0);
-        QVector3D ax = QVector3D::crossProduct(a, b);
-        const double s = double(ax.length());
-        if (s < 1e-9) {                                   // antiparallel -> 180° about any perp
-            QVector3D perp = QVector3D::crossProduct(a, QVector3D(1, 0, 0));
-            if (double(perp.length()) < 1e-6)
-                perp = QVector3D::crossProduct(a, QVector3D(0, 1, 0));
-            perp.normalize();
-            return Quat(0, perp.x(), perp.y(), perp.z());
-        }
-        ax /= float(s);
-        const double ang = std::atan2(s, d);
-        return fox::quat_exp_rotvec(ax.x() * ang, ax.y() * ang, ax.z() * ang);
-    };
-    //   q_bs (sensor->bone) such that R(q_bs)*gT~=uT and R(q_bs)*gN~=uN, with
-    //   uT/uN = gravity-up expressed in the bone frame for the reference T/N poses.
-    auto solveMountGravity = [&](int i, QVector3D gT, QVector3D gN) -> Quat {
-        if (gT.lengthSquared() < 1e-12f || gN.lengthSquared() < 1e-12f)
-            return fox::body::kSensorToBone[i].q_bs;
-        gT.normalize(); gN.normalize();
-        const QVector3D zUp(0, 0, 1);
-        const QVector3D uT = fox::vec_rotate(zUp, fox::body::kRefQuatT[i].conj());
-        const QVector3D uN = fox::vec_rotate(zUp, fox::body::kRefQuatN[i].conj());
-        const double moved = double(QVector3D::crossProduct(gT, gN).length()); // ~sin(T->N)
-        if (moved < 0.20) {
-            // vertical segment (legs/spine/feet): heading about gravity is unobservable —
-            //   keep factory q_bs heading, correct only the per-subject tilt.
-            const Quat qbs = fox::body::kSensorToBone[i].q_bs;
-            const QVector3D pred = fox::vec_rotate(gT, qbs);
-            return quat_mult(quatAlign(pred, uT), qbs).normalized();
-        }
-        // moving segment (arm): full two-pose solve. Align gT->uT, then twist about uT to gN->uN.
-        const Quat q1 = quatAlign(gT, uT);
-        const QVector3D gN1 = fox::vec_rotate(gN, q1);
-        QVector3D a = gN1 - uT * float(QVector3D::dotProduct(gN1, uT));
-        QVector3D b = uN  - uT * float(QVector3D::dotProduct(uN,  uT));
-        if (double(a.length()) > 1e-4 && double(b.length()) > 1e-4) {
-            a.normalize(); b.normalize();
-            const double dd = std::clamp(double(QVector3D::dotProduct(a, b)), -1.0, 1.0);
-            const QVector3D cr = QVector3D::crossProduct(a, b);
-            const double sgn = (double(QVector3D::dotProduct(cr, uT)) >= 0.0) ? 1.0 : -1.0;
-            const double ang = sgn * std::atan2(double(cr.length()), dd);
-            const Quat q2 = fox::quat_exp_rotvec(uT.x() * ang, uT.y() * ang, uT.z() * ang);
-            return quat_mult(q2, q1).normalized();
-        }
-        return q1.normalized();
-    };
+    // §24.5 sensor->bone alignment is solved per-segment from the settled N-pose only:
+    //   q_align = conj(q_avg_N) ⊗ q_ref_N (computed as qAlignN in the loop below). Runtime forms
+    //   bone = q_sensor ⊗ q_align, which is exactly q_ref_N in the calibration pose and tracks
+    //   the segment 1:1 thereafter. The earlier gravity two-pose solve (solveMountGravity) only
+    //   existed to survive the per-sensor yaw drift of the old diverging EKF; offline reconstruction
+    //   showed it leaves the calibrated pose off by up to ~100°. With the EKF fixed (stable gravity
+    //   level + gyro-held heading) the documented §24.5 form is exact, so the gravity solve is gone.
 
     constexpr std::size_t kCalibMinSamplesPerSeg = 60;
     for (int i = 0; i < kXsensSegmentCount; ++i) {
@@ -9048,11 +9038,11 @@ void NewSessionWizard::onCaptureTick()
         const Quat& qRefN = fox::body::kRefQuatN[i];
         const Quat& qRefT = fox::body::kRefQuatT[i];
 
-        // §24.5/§174.4 ДИАГНОСТИКА (НЕ устанавливается): прежнее выравнивание из УСРЕДНЁННОЙ
-        //   FUSED-ориентации qAlign = conj(qAvg) ⊗ qRef. Оно наследует рыскание (yaw) пер-сенсорного
-        //   AHRS, которое во время захвата ДРЕЙФУЕТ (магнитометр гейтится закрытым в искажённом поле),
-        //   из-за чего q_align получался мусорным (асимметрия L/R, разброс N-выборки до 100°+).
-        //   Реальное выравнивание s2s теперь считается ПО ГРАВИТАЦИИ (см. ниже, solveMountGravity).
+        // §24.5 выравнивание сенсор->кость: q_align = conj(q_avg_N) ⊗ q_ref_N. Прежде оно считалось
+        //   мусорным из-за рыскания пер-сенсорного AHRS, дрейфовавшего во время захвата (магнитометр
+        //   гейтился закрытым) — но это был симптом расходящегося EKF. После починки фильтра (стабильный
+        //   уровень по гравитации + курс по гироскопу) §24.5 точна: bone = q_sensor ⊗ q_align даёт ровно
+        //   q_ref_N в позе калибровки. Ставится как s2s ниже (заменяет прежний gravity-solve).
         const Quat qAlignN = quat_mult(qAvgN.conj(), qRefN).normalized();
 
         // §174.4/§1266/§1698 качество захвата = РАЗБРОС N-выборки (стиллнес субъекта + шум датчика).
@@ -9082,22 +9072,12 @@ void NewSessionWizard::onCaptureTick()
             if (aw > 1.0) aw = 1.0;
             ntAgreeDeg[i] = 2.0 * std::acos(aw) * 180.0 / M_PI;
         }
-        // §24.5/§174.4 install the GRAVITY-based two-pose alignment as s2s (sensor->bone).
-        //   Mean gravity per sensor during the T and N captures (already accumulated in
-        //   m_accAccumT/N) drives the solve; heading is never used, so the result is
-        //   immune to the mag-ungated yaw drift that corrupted the fused average.
-        const QVector3D gT = (m_accumCountT[i] > 0)
-            ? m_accAccumT[i] / float(m_accumCountT[i]) : QVector3D(0, 0, 1);
-        const QVector3D gN = (m_accumCountN[i] > 0)
-            ? m_accAccumN[i] / float(m_accumCountN[i]) : QVector3D(0, 0, 1);
-        // §24.5/§174.4 TWO-pose gravity solve -> q_bs (sensor->bone). The arm gravity changes
-        //   T<->N, which (unlike a single pose) pins the heading component of the mounting too;
-        //   legs/spine stay tilt-only (their heading is unobservable but irrelevant). s2s stores
-        //   conj(q_bs): the runtime applies it as a POST-rotation on the sensor-frame AHRS output,
-        //   bone = R_z(h) ⊗ q_sensor ⊗ conj(q_bs), where R_z(h)=yaw_only(q_ref_N⊗q_bs) restores the
-        //   per-segment heading the no-mag EKF seed zeroes (see staging.quat in run()). This makes
-        //   poses away from the calibration pose (e.g. the T-pose) correct, not just the N-pose.
-        s2s[i] = solveMountGravity(i, gT, gN).conj().normalized();
+        // §24.5 install the sensor->bone alignment: q_align = conj(q_avg_N) ⊗ q_ref_N (= qAlignN
+        //   above). Runtime forms bone = q_sensor ⊗ q_align, which equals q_ref_N in the N-pose and
+        //   rotates 1:1 with the segment afterwards (so a held T-pose renders as a T-pose via real
+        //   motion, not a second calibration). The relative per-segment heading is captured here
+        //   and held by the now-stable EKF + gyro, so no separate heading restore is applied.
+        s2s[i] = qAlignN;
 
         residDeg[i]    = nDispDeg;   // §174.4 формула-независимое качество захвата (стиллнес N-позы)
         qualityBand[i] = fox::body::calibrationQuality(residDeg[i]);
