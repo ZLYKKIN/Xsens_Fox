@@ -10695,13 +10695,14 @@ void MainWindow::onRenderTick()
 
     q[SEG_RToe] = Quat(1, 0, 0, 0);
     q[SEG_LToe] = Quat(1, 0, 0, 0);
-    if (!m_skel) {
-
-        q[SEG_L5]   = q[SEG_Pelvis];
-        q[SEG_L3]   = q[SEG_Pelvis];
-        q[SEG_T12]  = q[SEG_T8];
-        q[SEG_Neck] = q[SEG_T8];
-    }
+    // §спина: интерполируем непросчитанные позвонки В qOut (а не только в render-копии
+    //   oriented внутри refine() §915-918), иначе стрим (qStream=qOut⊗defAng) и запись
+    //   (rf.segQuat=qOut) шлют ПРЯМУЮ спину, рассинхрон с вьюпортом. Веса = как в refine().
+    //   defAng[Pelvis..Head] одинаков (R_y(−90°)) → slerp здесь = slerp в oriented (рендер не меняется).
+    q[SEG_L5]   = slerp_quat(q[SEG_Pelvis], q[SEG_T8],   0.124);
+    q[SEG_L3]   = slerp_quat(q[SEG_Pelvis], q[SEG_T8],   0.50);
+    q[SEG_T12]  = slerp_quat(q[SEG_Pelvis], q[SEG_T8],   0.876);
+    q[SEG_Neck] = slerp_quat(q[SEG_T8],     q[SEG_Head], 0.50);
 
     s_lastOut[SEG_L5]   = q[SEG_L5];
     s_lastOut[SEG_L3]   = q[SEG_L3];
