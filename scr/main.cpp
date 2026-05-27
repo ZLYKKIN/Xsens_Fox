@@ -959,71 +959,6 @@ public:
                 if (ac.seg == fb::kSEG_RFoot || ac.seg == fb::kSEG_RToe) rContact = true;
                 if (ac.seg == fb::kSEG_LFoot || ac.seg == fb::kSEG_LToe) lContact = true;
             }
-            const QVector3D pelvis = (*ctx.segCenter)[0];
-            const double pelvisSpeed = m_havePrev
-                ? (pelvis - m_prevSegCenter[0]).length() / std::max(1e-4, dt)
-                : 0.0;
-
-            const QVector3D pelvisZAxisWorld = vec_rotate(QVector3D(0, 0, 1), orient[0]);
-            const double pelvisTiltDeg =
-                std::acos(std::clamp(double(pelvisZAxisWorld.z()), -1.0, 1.0)) *
-                fb::constants::kRad2Deg;
-
-            const QVector3D t8ZAxisWorld = vec_rotate(QVector3D(0, 0, 1), orient[4]);
-            const double t8TiltDeg =
-                std::acos(std::clamp(double(t8ZAxisWorld.z()), -1.0, 1.0)) *
-                fb::constants::kRad2Deg;
-
-            const double sitH = fb::pelvisSitHeightM(1.75);
-            m_locomotion.update(double(pelvis.z()), pelvisSpeed,
-                                rContact, lContact,
-                                pelvisTiltDeg, t8TiltDeg,
-                                sitH, dt);
-
-            const QVector3D rFootZAxisWorld =
-                vec_rotate(QVector3D(0, 0, 1), orient[fb::kSEG_RFoot]);
-            const QVector3D lFootZAxisWorld =
-                vec_rotate(QVector3D(0, 0, 1), orient[fb::kSEG_LFoot]);
-            const double rFootPitchZ = double(rFootZAxisWorld.z());
-            const double lFootPitchZ = double(lFootZAxisWorld.z());
-            const double rFootVelZ = m_havePrev
-                ? double(velocity[fb::kSEG_RFoot].z()) : 0.0;
-            const double lFootVelZ = m_havePrev
-                ? double(velocity[fb::kSEG_LFoot].z()) : 0.0;
-            m_locomotion.updateGaitPhases(rContact, lContact,
-                                          rFootPitchZ, lFootPitchZ,
-                                          rFootVelZ, lFootVelZ, dt);
-
-            // §90/§138.16 точка пятки pHeel (= fb::kFootPointsRight[0].r_local) для CoM/детекции heel-strike
-            const QVector3D rHeelW = (*ctx.segCenter)[fb::kSEG_RFoot]
-                + vec_rotate(QVector3D(-0.036f, 0.0f, -0.080f),
-                              orient[fb::kSEG_RFoot]);
-            const QVector3D lHeelW = (*ctx.segCenter)[fb::kSEG_LFoot]
-                + vec_rotate(QVector3D(-0.036f, 0.0f, -0.080f),
-                              orient[fb::kSEG_LFoot]);
-            const QVector3D comNow = fb::centerOfMass(*ctx.segCenter, nullptr);
-            m_locomotion.updateStepMetrics(rHeelW, lHeelW, comNow, dt);
-
-            if (g_testFlag().load(std::memory_order_relaxed) &&
-                g_glovesFlag().load(std::memory_order_relaxed)) {
-                static int phaseTick = 0;
-                if ((++phaseTick % 30) == 0) {
-                    std::ostringstream os;
-                    os << "[phase] R="
-                       << LocomotionClassifier::gaitPhaseName(m_locomotion.gaitPhaseR())
-                       << " durR=" << std::fixed << std::setprecision(3)
-                       << m_locomotion.gaitDurR()
-                       << "s  L="
-                       << LocomotionClassifier::gaitPhaseName(m_locomotion.gaitPhaseL())
-                       << " durL=" << m_locomotion.gaitDurL() << "s  "
-                       << "strideR=" << m_locomotion.lastStrideLengthR()
-                       << "m hR=" << m_locomotion.lastStrideHeightR() << "m "
-                       << "strideL=" << m_locomotion.lastStrideLengthL()
-                       << "m hL=" << m_locomotion.lastStrideHeightL() << "m "
-                       << "vertOsc=" << m_locomotion.vertCoMOscillationM() << "m";
-                    logBlock(os.str());
-                }
-            }
 
             double bodyMass = 0.0;
             const QVector3D com = fb::centerOfMass(*ctx.segCenter, &bodyMass);
@@ -1075,7 +1010,6 @@ public:
 
     const SkinArtifactState&    skin()     const { return m_skin; }
     const ContactDetector&      contacts() const { return m_contacts; }
-    const LocomotionClassifier& locomotion() const { return m_locomotion; }
     int                         lastSkinPosUpdates() const { return m_lastSkinPosUpdates; }
     QVector3D                   lastCoM()       const { return m_lastCoM; }
     QVector3D                   lastCoMVel()    const { return m_lastCoMVel; }
@@ -1088,7 +1022,6 @@ private:
     ContactDetector       m_contacts;
     // BodyPoseSolver removed — skeleton is driven directly from the per-sensor orientations
     //   (the Gauss-Newton IK flipped the pose; sensors are correct after the EKF + s2s fixes).
-    LocomotionClassifier  m_locomotion;
     std::array<Quat,      fb::kSegmentCount> m_prevOrient{};
     std::array<QVector3D, fb::kSegmentCount> m_prevSegCenter{};
     bool   m_havePrev = false;
@@ -1120,8 +1053,7 @@ inline std::atomic<double>& g_frameDumpUntilMono() { static std::atomic<double> 
 void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
                    const BodyPoseSolver::Diag& d,
                    const ContactDetector::Result& cr,
-                   const SkinArtifactState& skin,
-                   const LocomotionClassifier& loco)
+                   const SkinArtifactState& skin)
 {
     if (!testEnabled) return;
     static int frameCounter = 0;
@@ -1330,14 +1262,6 @@ void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
                                 << (d.aidingBiasMaxMps * 1000.0) << "mm/s"
        << std::setprecision(4)
        << "\n";
-
-    ss << "[loco] phase=" << locomotionPhaseName(loco.phase())
-       << "  flight=" << std::setprecision(2) << loco.flightFracSec() << "s"
-       << "  contact=" << loco.contactFracSec() << "s"
-       << "  pelvis_tilt=" << std::setprecision(1) << loco.pelvisTiltDeg() << "°"
-       << "  t8_tilt=" << loco.t8TiltDeg() << "°"
-       << "  posture=" << LocomotionClassifier::postureName(loco.posture())
-       << std::setprecision(4) << "\n";
 
     if (glovesEnabled) {
         const QVector3D cop = cr.active.empty()
@@ -1877,8 +1801,7 @@ SkeletonXsens::computeKeypoints(const std::array<Quat, kXsensSegmentCount>& raw,
         pose_solver::dumpFrameDiag(
             pose_solver::g_testFlag().load(),
             pose_solver::g_glovesFlag().load(),
-            dg, contacts, pose_solver::g_refiner().skin(),
-            pose_solver::g_refiner().locomotion());
+            dg, contacts, pose_solver::g_refiner().skin());
     }
 
     const auto global = addDummySegments(oriented);
