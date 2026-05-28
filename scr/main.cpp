@@ -4291,10 +4291,14 @@ void MocapReceiver::run()
     }
 
     if (portCount == 0) {
-        api.arrayDestruct(ports);
-        api.controlClose(control);
-        if (api.controlDestruct) api.controlDestruct(control);
-        unloadApi(api);
+        // §connect: XDA-очистку оборачиваем в sehCall. Без костюма/донгла эти вызовы
+        //   драйвера могут бросить SEH (access violation); в рабочем потоке QThread это
+        //   роняло ВЕСЬ процесс вместо штатного статуса "костюм не найден". sehCall ловит
+        //   структурное исключение и даёт спокойно показать NoDevice и снова нажать «Подключить».
+        sehCall([&]{ api.arrayDestruct(ports); });
+        sehCall([&]{ api.controlClose(control); });
+        sehCall([&]{ if (api.controlDestruct) api.controlDestruct(control); });
+        sehCall([&]{ unloadApi(api); });
         const QString noDevMsg = preferNet
             ? QStringLiteral(
                 "Костюм не найден в сети. Убедитесь, что этот ПК и костюм "
@@ -4390,9 +4394,9 @@ void MocapReceiver::run()
     api.arrayDestruct(ports);
 
     if (trackerHandles.empty()) {
-        api.controlClose(control);
-        if (api.controlDestruct) api.controlDestruct(control);
-        unloadApi(api);
+        sehCall([&]{ api.controlClose(control); });
+        sehCall([&]{ if (api.controlDestruct) api.controlDestruct(control); });
+        sehCall([&]{ unloadApi(api); });
         I.setStatus(ConnStatus::NoDevice,
                     "port(s) opened but no Xsens motion trackers reported",
                     this);
@@ -4413,9 +4417,9 @@ void MocapReceiver::run()
         }
     }
     if (!measuring) {
-        api.controlClose(control);
-        if (api.controlDestruct) api.controlDestruct(control);
-        unloadApi(api);
+        sehCall([&]{ api.controlClose(control); });
+        sehCall([&]{ if (api.controlDestruct) api.controlDestruct(control); });
+        sehCall([&]{ unloadApi(api); });
         I.setStatus(ConnStatus::Failed,
                     "XsDevice_gotoMeasurement refused — check firmware / radio", this);
         return;
@@ -5262,10 +5266,12 @@ void MocapReceiver::run()
         }
     }
 
-    for (void* d : trackerHandles) api.deviceGotoConfig(d);
-    api.controlClose(control);
-    if (api.controlDestruct) api.controlDestruct(control);
-    unloadApi(api);
+    // §close/§connect: штатное закрытие XDA тоже под sehCall — фолт драйвера на
+    //   разрыве (выдернут донгл/радиопотеря) не должен ронять рабочий поток.
+    sehCall([&]{ for (void* d : trackerHandles) api.deviceGotoConfig(d); });
+    sehCall([&]{ api.controlClose(control); });
+    sehCall([&]{ if (api.controlDestruct) api.controlDestruct(control); });
+    sehCall([&]{ unloadApi(api); });
     I.setStatus(ConnStatus::NotInitialized, "closed", this);
 }
 
@@ -5621,7 +5627,12 @@ NewSessionWizard::NewSessionWizard(MocapReceiver* rx, bool testMode, QWidget* pa
     setWindowTitle(QString("%1 — %2")
                        .arg(Lang::t("app_title"))
                        .arg(QApplication::applicationVersion()));
-    setMinimumSize(760, 640);
+    // §ui: окно выше, чтобы страница калибровки (картинка позы + подсказки + бары
+    //   + кнопка «Старт») помещалась целиком БЕЗ прокрутки — раньше при 640px кнопку
+    //   старта приходилось доскролливать. Страница размеров актёра остаётся со своим
+    //   скроллом (там длинный список — это нормально). resize даёт комфортный старт.
+    setMinimumSize(800, 820);
+    resize(840, 880);
 
     buildPages();
 
@@ -10161,7 +10172,13 @@ void JointOffsetsDialog::buildUi()
     auto* btnReset = new QPushButton(Lang::t("js_reset"), this);
     auto* btnLoad  = new QPushButton(Lang::t("js_load"),  this);
     auto* btnSave  = new QPushButton(Lang::t("js_save"),  this);
+    btnReset->setObjectName("jsGhost");
+    btnLoad->setObjectName("jsAccent");
     btnSave->setObjectName("primary");
+    for (QPushButton* b : { btnReset, btnLoad, btnSave }) {
+        b->setMinimumHeight(36);
+        b->setCursor(Qt::PointingHandCursor);
+    }
     btnRow->addWidget(btnReset);
     btnRow->addWidget(btnLoad);
     btnRow->addWidget(btnSave);
@@ -10181,6 +10198,37 @@ void JointOffsetsDialog::buildUi()
         if (ok) syncControlsFromModel();
         if (m_status) m_status->setText(ok ? Lang::t("js_loaded") : Lang::t("js_load_err"));
     });
+
+    // §ui: scoped dark polish for THIS dialog only (no white gaps; chunkier,
+    //   gradient sliders; distinct Load(accent)/Save(primary)/Reset(ghost)).
+    //   Сохранение/загрузка — рядом с программой (JointOffsets::filePath), без
+    //   диалога выбора пути. Коррекции по умолчанию нейтральны (всё по нулям),
+    //   применяются только когда пользователь сам сдвинул ползунок.
+    setStyleSheet(R"(
+        QDialog { background:#0E0E0E; }
+        QScrollArea, QScrollArea > QWidget > QWidget { background:transparent; }
+        QGroupBox { background:#161616; border:1px solid #242424; border-radius:10px;
+                    margin-top:12px; padding:12px 10px 10px; }
+        QGroupBox::title { color:#FF7A1A; subcontrol-origin:margin; left:12px;
+                           padding:0 6px; font-weight:700; letter-spacing:0.5px; }
+        QFrame#jointCard { background:#191919; border:1px solid #2A2A2A; border-radius:10px; }
+        QFrame#jointCard:hover { border-color:#3A3A3A; }
+        QLabel#jointName { color:#FFB066; font-weight:700; font-size:10pt; }
+        QSlider::groove:horizontal { height:6px; background:#242424; border-radius:3px; }
+        QSlider::sub-page:horizontal { background:qlineargradient(x1:0,y1:0,x2:1,y2:0,
+                                         stop:0 #FF7A1A, stop:1 #FFA053); border-radius:3px; }
+        QSlider::add-page:horizontal { background:#242424; border-radius:3px; }
+        QSlider::handle:horizontal { width:16px; height:16px; margin:-6px 0; border-radius:8px;
+                                     background:#FF7A1A; border:2px solid #1E1E1E; }
+        QSlider::handle:horizontal:hover { background:#FFA053; border-color:#FF7A1A; }
+        QPushButton#jsGhost { background:transparent; color:#CFCFCF; border:1px solid #2B2B2B;
+                              border-radius:8px; padding:6px 16px; font-weight:600; }
+        QPushButton#jsGhost:hover { border-color:#FF7A1A; color:#FFFFFF; }
+        QPushButton#jsAccent { background:#1F1407; color:#FF9340; border:1px solid #FF7A1A;
+                               border-radius:8px; padding:6px 16px; font-weight:700; }
+        QPushButton#jsAccent:hover { background:#2A1A0A; color:#FFB066; }
+        QPushButton#primary { border-radius:8px; padding:6px 18px; font-weight:800; }
+    )");
 }
 
 void JointOffsetsDialog::syncControlsFromModel()
@@ -12215,6 +12263,29 @@ const char* kStyleSheet = R"(
   QLabel#sectionSub { color: #6E6E6E; font-size: 8pt;
                       font-weight: 500; letter-spacing: 0.5px;
                       margin-top: -2px; margin-bottom: 4px; }
+
+  /* Generic spin-box arrows — make every (non-#bigSpin) spin box dark so the
+     joint-correction Settings dialog has NO white default spinner gaps. The
+     more-specific #bigSpin rules above keep their own 26px buttons. */
+  QDoubleSpinBox::up-button, QSpinBox::up-button {
+      subcontrol-origin: border; subcontrol-position: top right;
+      width: 16px; background: #1E1E1E; border-left: 1px solid #2A2A2A;
+      border-top-right-radius: 6px; }
+  QDoubleSpinBox::down-button, QSpinBox::down-button {
+      subcontrol-origin: border; subcontrol-position: bottom right;
+      width: 16px; background: #1E1E1E; border-left: 1px solid #2A2A2A;
+      border-bottom-right-radius: 6px; }
+  QDoubleSpinBox::up-button:hover, QSpinBox::up-button:hover,
+  QDoubleSpinBox::down-button:hover, QSpinBox::down-button:hover { background: #FF7A1A; }
+  QDoubleSpinBox::up-arrow, QSpinBox::up-arrow {
+      width: 0; height: 0; border-left: 4px solid transparent;
+      border-right: 4px solid transparent; border-bottom: 5px solid #CFCFCF; }
+  QDoubleSpinBox::down-arrow, QSpinBox::down-arrow {
+      width: 0; height: 0; border-left: 4px solid transparent;
+      border-right: 4px solid transparent; border-top: 5px solid #CFCFCF; }
+
+  /* Scroll areas: transparent over the dark dialog/window — no white viewport. */
+  QScrollArea { background: transparent; border: 0; }
 )";
 
 CliArgs parseCli(int argc, char** argv)
@@ -12416,9 +12487,18 @@ int main(int argc, char** argv)
     //   останавливаем приёмник, давая run() выполнить CoreSdk_ShutDown/XsControl_close;
     //   (2) сбрасываем буферы лога; (3) принудительно закрываем процесс, минуя зависающие
     //   SDK-потоки и static-деструкторы.
-    if (rx) { rx->stop(); rx->wait(4000); }
+    if (rx) { rx->stop(); rx->wait(2000); }
     delete win;
     std::fflush(nullptr);
+#ifdef _WIN32
+    // §close: std::quick_exit на Windows — НЕ жёсткий выход. Он всё равно сливает
+    //   DLL_PROCESS_DETACH под loader-lock; если фоновый поток XDA / Intel-OpenMP
+    //   (libiomp5md) / Manus застрял в SDK-вызове и держит (или ждёт) loader-lock,
+    //   teardown там зависает — окно закрыто, а fox_mocap.exe висит в диспетчере
+    //   (особенно в режиме -test -gloves, где подняты потоки Manus). TerminateProcess
+    //   убивает все потоки немедленно, минуя loader-lock и DLL-detach. Лог уже сброшен.
+    TerminateProcess(GetCurrentProcess(), static_cast<UINT>(rc));
+#endif
     std::quick_exit(rc);
     return rc;
 }
