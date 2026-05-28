@@ -8696,7 +8696,7 @@ void LiveStreamSender::pushFrame(quint32 sample,
                                    float(ergo[j].flexionDeg),
                                    float(ergo[j].rotationDeg));
         }
-        const QByteArray ergoHdr = buildMxtpHeader("21", sample, 0x80,
+        const QByteArray ergoHdr = buildMxtpHeader("20", sample, 0x80,
                                                    quint8(fox::body::kJointCount),
                                                    ft, quint8(fox::body::kJointCount), 0);
         m_impl->sendChecked(ergoHdr + ergoBody);
@@ -8906,7 +8906,7 @@ void LiveStreamSender::pushFrameWithGloves(quint32 sample,
                                    float(ergo[j].flexionDeg),
                                    float(ergo[j].rotationDeg));
         }
-        const QByteArray ergoHdr = buildMxtpHeader("21", sample, 0x80,
+        const QByteArray ergoHdr = buildMxtpHeader("20", sample, 0x80,
                                                    quint8(fox::body::kJointCount),
                                                    ft, quint8(fox::body::kJointCount), 0);
         m_impl->sendChecked(ergoHdr + ergoBody);

@@ -1703,14 +1703,14 @@ inline constexpr std::array<std::uint8_t, kJointCount> kErgoHandler = {
     2,
     2,
     2,
-    2,
-    1,
-    3,
-    1,
-    3,
-    2,
-    4,
-    2,
+    1,   // 14 jRightHip       right       (was 2=left handler: right hip's abduction/rotation came out sign-flipped)
+    1,   // 15 jRightKnee      right
+    3,   // 16 jRightAnkle     right-foot
+    3,   // 17 jRightBallFoot  right-foot  (was 1: the right toe joint must use the foot extractor, not the generic right handler)
+    2,   // 18 jLeftHip        left        (was 3=right-FOOT extractor: the left hip was decomposed with matrix_to_euler_B)
+    2,   // 19 jLeftKnee       left
+    4,   // 20 jLeftAnkle      left-foot
+    4,   // 21 jLeftBallFoot   left-foot   (was 2: the left toe joint must use the foot extractor, not the generic left handler)
 };
 
 namespace constants {
