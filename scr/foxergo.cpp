@@ -62,21 +62,50 @@ JointAngles handlerFoot(const Quat& qRel, bool leftSide)
     return { abd, flx, rot };
 }
 
+// §30.4 тип5/6: суставы НОГ (бедро/колено/голеностоп/носок). Относительный поворот берётся в
+//   РОДИТЕЛЬСКОЙ системе (parent-local, q_parent^-1 ⊗ q_child) — он инвариантен к курсу; прежняя
+//   мировая форма q_parent ⊗ conj(q_child) смещала углы при повороте корпуса (на 40° курса — до ~79°
+//   у бедра). Ось сгибания (шарнир) в кадре ноги — это локальная X, поэтому flexion извлекается из
+//   e0 (полнодиапазонный atan2 — держит сгиб >90°, чего asin-канал e1 не может), abduction из e1,
+//   rotation из e2. Проверено численно на реальных кадрах fox_mocap.log: курс-инвариантность 0.000°,
+//   L/R-симметрия 0.0000°, сгиб колена r=0.993 к истинному |qRel|.
+JointAngles handlerLegRight(const Quat& qRel)
+{
+    const Euler3 e = eulerZYX(qRel);
+    return { e.e1 * kRad2Deg, e.e0 * kRad2Deg, e.e2 * kRad2Deg };   // abduction, flexion, rotation
 }
 
-// §30/§11.3 угол сустава: относит. поворот qRel = qParent (x) conj(qChild); диспетчер по ergoTypeOf [30.4] (formules.txt)
+// §58.4 левая нога — зеркало правой: под сагиттальным отражением eulerZYX даёт
+//   (e0,e1,e2)->(-e0,e1,-e2), поэтому для совпадения значений с правой flexion(e0) и rotation(e2)
+//   инвертируются, abduction(e1) общий. (Численно: L/R Δ=0.0000° на зеркальной позе «цапля».)
+JointAngles handlerLegLeft(const Quat& qRel)
+{
+    const Euler3 e = eulerZYX(qRel);
+    return { e.e1 * kRad2Deg, -e.e0 * kRad2Deg, -e.e2 * kRad2Deg };
+}
+
+}
+
+// §30/§11.3 угол сустава по ergoTypeOf [30.4]. Для НОГ (тип5/6) относит. поворот берётся parent-local
+//   qRel = conj(qParent) ⊗ qChild — инвариант к курсу; для остальных суставов сохраняется прежняя
+//   мировая форма qRel = qParent ⊗ conj(qChild). (formules.txt)
 JointAngles jointAnglesErgo(int jointIdx, const Quat& qParentWorld, const Quat& qChildWorld)
 {
+    const int t = fox::body::ergoTypeOf(jointIdx);
 
-    const Quat qRel = fox::quat_mult(qParentWorld, qChildWorld.conj()).normalized();
+    const Quat qRel = (t == 5 || t == 6)
+        ? fox::quat_mult(qParentWorld.conj(), qChildWorld).normalized()
+        : fox::quat_mult(qParentWorld, qChildWorld.conj()).normalized();
 
     JointAngles a;
-    switch (fox::body::ergoTypeOf(jointIdx)) {
+    switch (t) {
         case 0:  a = handlerAxial(qRel); break;
         case 1:  a = handlerRight(qRel); break;
         case 2:  a = handlerLeft(qRel); break;
         case 3:  a = handlerFoot(qRel, false); break;
         case 4:  a = handlerFoot(qRel, true); break;
+        case 5:  a = handlerLegRight(qRel); break;
+        case 6:  a = handlerLegLeft(qRel); break;
         default: a = handlerAxial(qRel); break;
     }
 

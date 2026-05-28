@@ -260,7 +260,6 @@ private:
 
     QVector3D m_offsetLast   {0, 0, 0};
 
-    QVector3D m_offsetCommitted {0, 0, 0};
     bool      m_offsetReady  = false;
 
         Quat      m_prevPelvisQ      {1, 0, 0, 0};

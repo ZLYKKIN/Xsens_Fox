@@ -1903,7 +1903,6 @@ static double parallelDeviationDeg(const Quat& qR, const Quat& qL)
         m_contact = {};
 
         m_offsetLast = QVector3D(0, 0, 0);
-        m_offsetCommitted = QVector3D(0, 0, 0);
         m_offsetReady = false;
 
         m_prevPelvisQ     = Quat(1, 0, 0, 0);
@@ -2084,13 +2083,17 @@ QVector3D LocomotionSolver::update(const Quat& qR,
         }
         if (!freezeRing && m_yawFrozenPrev && m_initialised) {
 
+            // §loco-flight: приземление после полёта — переякориваем опорные стопы к
+            //   ТЕКУЩЕМУ замороженному тазу m_offsetLast (тот же резон, что в
+            //   bestPelvisEstimate без опоры), а НЕ к устаревшему m_offsetCommitted —
+            //   иначе боковой прыжок «откатывался» назад на приземлении.
             if (m_committedR) {
-                m_anchorR.setX(fkR.x() + m_offsetCommitted.x());
-                m_anchorR.setY(fkR.y() + m_offsetCommitted.y());
+                m_anchorR.setX(fkR.x() + m_offsetLast.x());
+                m_anchorR.setY(fkR.y() + m_offsetLast.y());
             }
             if (m_committedL) {
-                m_anchorL.setX(fkL.x() + m_offsetCommitted.x());
-                m_anchorL.setY(fkL.y() + m_offsetCommitted.y());
+                m_anchorL.setX(fkL.x() + m_offsetLast.x());
+                m_anchorL.setY(fkL.y() + m_offsetLast.y());
             }
             m_fkxyHead  = 0;
             m_fkxyCount = 0;
@@ -2284,9 +2287,31 @@ QVector3D LocomotionSolver::update(const Quat& qR,
                 return QVector3D(m_anchorL.x() - fkL.x(),
                                  m_anchorL.y() - fkL.y(),
                                  m_offsetLast.z());
-
-            return QVector3D(m_offsetCommitted.x(),
-                             m_offsetCommitted.y(),
+            // §loco-DS: двойная опора — ЖИВАЯ оценка таза = взвешенное по conf среднее
+            //   обеих стоп (как одиночная опора), а НЕ устаревший m_offsetCommitted
+            //   (заморожен на момент последнего commit, т.е. ПОЗАДИ при ходьбе). Прежде
+            //   контактный re-anchor (heel→toe) тянул якоря к устаревшему тазу → корень
+            //   недоезжал ~15% @60Гц и до ~28% @240Гц (масштабная ошибка перемещения,
+            //   «шаги короче реальных»). Устаревшее значение оставляем только для «нет
+            //   опоры» (полёт), где опорной стопы нет. (verify/loco_drive: 85→97%)
+            if (m_committedR && m_committedL) {
+                const double er = std::max(1e-6, m_confR);
+                const double el = std::max(1e-6, m_confL);
+                const double tot = er + el;
+                return QVector3D(
+                    float((er*(m_anchorR.x()-fkR.x()) + el*(m_anchorL.x()-fkL.x())) / tot),
+                    float((er*(m_anchorR.y()-fkR.y()) + el*(m_anchorL.y()-fkL.y())) / tot),
+                    m_offsetLast.z());
+            }
+            // §loco-flight: НЕТ опоры (полёт/обе свингуют) — лучшая оценка таза =
+            //   ТЕКУЩЕЕ замороженное смещение m_offsetLast (где таз был на отрыве),
+            //   а НЕ устаревший m_offsetCommitted (заморожен на прошлом commit, т.е.
+            //   на целый шаг ПОЗАДИ). Иначе при коммите опорной ноги ПОСЛЕ полёта
+            //   (бег, прыжок, скип) якорь ставился позади → корень дёргался назад
+            //   каждый шаг: бег давал ~2% перемещения с джиттером cum/net≈24.
+            //   (verify/running: 2%→59% при 20% полёта, cum/net→1.0)
+            return QVector3D(m_offsetLast.x(),
+                             m_offsetLast.y(),
                              m_offsetLast.z());
         };
 
@@ -2324,8 +2349,6 @@ QVector3D LocomotionSolver::update(const Quat& qR,
 
                 const QVector3D pelvis = bestPelvisEstimate();
 
-                m_offsetCommitted = QVector3D(pelvis.x(), pelvis.y(),
-                                              m_offsetCommitted.z());
                 QVector3D world(fk.x() + pelvis.x(),
                                 fk.y() + pelvis.y(),
                                 fk.z() + pelvis.z());
@@ -8696,7 +8719,7 @@ void LiveStreamSender::pushFrame(quint32 sample,
                                    float(ergo[j].flexionDeg),
                                    float(ergo[j].rotationDeg));
         }
-        const QByteArray ergoHdr = buildMxtpHeader("21", sample, 0x80,
+        const QByteArray ergoHdr = buildMxtpHeader("20", sample, 0x80,
                                                    quint8(fox::body::kJointCount),
                                                    ft, quint8(fox::body::kJointCount), 0);
         m_impl->sendChecked(ergoHdr + ergoBody);
@@ -8906,7 +8929,7 @@ void LiveStreamSender::pushFrameWithGloves(quint32 sample,
                                    float(ergo[j].flexionDeg),
                                    float(ergo[j].rotationDeg));
         }
-        const QByteArray ergoHdr = buildMxtpHeader("21", sample, 0x80,
+        const QByteArray ergoHdr = buildMxtpHeader("20", sample, 0x80,
                                                    quint8(fox::body::kJointCount),
                                                    ft, quint8(fox::body::kJointCount), 0);
         m_impl->sendChecked(ergoHdr + ergoBody);
