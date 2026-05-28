@@ -1685,8 +1685,10 @@ inline int poseQualityFromResidual(double residual) {
     return PoseQualityInvalid;
 }
 
-// §30.4 байтовая таблица диспетчеризации эргоуглов по 22 суставам (точное совпадение со спекой):
-//   тип0 ×7 (осевые) | тип1 правые | тип2 левые | тип3/4 стопы. Драйвит ergoTypeOf()/foxergo (formules.txt)
+// §30.4 байтовая таблица диспетчеризации эргоуглов по 22 суставам:
+//   тип0 ×7 (осевые) | тип1 правая рука | тип2 левая рука | тип3/4 стопы (legacy, мировой qRel) |
+//   тип5/6 НОГИ (parent-local qRel, курс-инвариантно, flexion на полнодиапазонной оси e0).
+//   Драйвит ergoTypeOf()/foxergo. (formules.txt)
 inline constexpr std::array<std::uint8_t, kJointCount> kErgoHandler = {
 
     0,
@@ -1703,14 +1705,14 @@ inline constexpr std::array<std::uint8_t, kJointCount> kErgoHandler = {
     2,
     2,
     2,
-    1,   // 14 jRightHip       right       (was 2=left handler: right hip's abduction/rotation came out sign-flipped)
-    1,   // 15 jRightKnee      right
-    3,   // 16 jRightAnkle     right-foot
-    3,   // 17 jRightBallFoot  right-foot  (was 1: the right toe joint must use the foot extractor, not the generic right handler)
-    2,   // 18 jLeftHip        left        (was 3=right-FOOT extractor: the left hip was decomposed with matrix_to_euler_B)
-    2,   // 19 jLeftKnee       left
-    4,   // 20 jLeftAnkle      left-foot
-    4,   // 21 jLeftBallFoot   left-foot   (was 2: the left toe joint must use the foot extractor, not the generic left handler)
+    5,   // 14 jRightHip       leg-right (parent-local qRel; flexion on full-range e0; heading-invariant)
+    5,   // 15 jRightKnee      leg-right
+    5,   // 16 jRightAnkle     leg-right
+    5,   // 17 jRightBallFoot  leg-right
+    6,   // 18 jLeftHip        leg-left  (exact sagittal mirror of leg-right; L/R Δ=0)
+    6,   // 19 jLeftKnee       leg-left
+    6,   // 20 jLeftAnkle      leg-left
+    6,   // 21 jLeftBallFoot   leg-left
 };
 
 namespace constants {
@@ -1803,7 +1805,8 @@ inline int lumpOf(int jointIdx) {
     return (jointIdx >= 0 && jointIdx < kJointCount) ? kJointLump[jointIdx] : -1;
 }
 
-// §30.4 тип обработчика эргоугла сустава: 0=осевой, 1=правый, 2=левый, 3/4=стопы (formules.txt)
+// §30.4 тип обработчика эргоугла сустава: 0=осевой, 1=правая рука, 2=левая рука, 3/4=стопы(legacy),
+//   5=нога правая, 6=нога левая (parent-local) (formules.txt)
 inline int ergoTypeOf(int jointIdx) {
     return (jointIdx >= 0 && jointIdx < kJointCount) ? int(kErgoHandler[jointIdx]) : 0;
 }
