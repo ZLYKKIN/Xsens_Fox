@@ -1757,6 +1757,37 @@ SkeletonXsens::computeKeypoints(const std::array<Quat, kXsensSegmentCount>& raw,
             dg, contacts, pose_solver::g_refiner().skin());
     }
 
+    // §wrist-clamp: ограничиваем СГИБ кисти к предплечью анатомическим пределом (≤90°),
+    //   КРЕН (twist вокруг оси кости) оставляем свободным — как в старой рабочей версии
+    //   (constrain_wrist_twist: maxFlex=90°, twistWeight=1.0). Текущая версия убрала жёсткий
+    //   клапан (оставив только мягкий анти-провис), поэтому при сбое/рассинхроне данных
+    //   перчатки кисть улетала на 120–148° от предплечья — «сломанные запястья» (проверено
+    //   на логе: r_hand на 100–148° от r_forearm в кадрах t22/30/33). Клапан гнёт ТОЛЬКО
+    //   направление кости (swing back к предплечью), крен кисти сохраняется.
+    auto clampWristBend = [&](int hand, int forearm, double maxBendRad) {
+        const QVector3D loH = vec_rotate(fb::kSensorToBone[hand].L_bone,    m_defAng[hand].conj());
+        const QVector3D loF = vec_rotate(fb::kSensorToBone[forearm].L_bone, m_defAng[forearm].conj());
+        QVector3D hdir = vec_rotate(loH, oriented[hand]);
+        QVector3D fdir = vec_rotate(loF, oriented[forearm]);
+        const float hn = hdir.length(), fn = fdir.length();
+        if (hn < 1e-6f || fn < 1e-6f) return;
+        hdir = hdir / hn; fdir = fdir / fn;
+        double d = double(QVector3D::dotProduct(hdir, fdir));
+        d = std::max(-1.0, std::min(1.0, d));
+        const double a = std::acos(d);
+        if (a <= maxBendRad) return;                       // в пределах нормы — не трогаем
+        QVector3D axis = QVector3D::crossProduct(hdir, fdir);
+        const float an = axis.length();
+        if (an < 1e-6f) return;
+        axis = axis / an;
+        const double corr = a - maxBendRad;                // довернуть кисть назад к предплечью
+        const double h2 = corr * 0.5, s = std::sin(h2);
+        const Quat qCorr(std::cos(h2), axis.x()*s, axis.y()*s, axis.z()*s);
+        oriented[hand] = quat_mult(qCorr, oriented[hand]).normalized();
+    };
+    clampWristBend(fb::kSEG_RHand, fb::kSEG_RForearm, M_PI * 0.5);
+    clampWristBend(fb::kSEG_LHand, fb::kSEG_LForearm, M_PI * 0.5);
+
     const auto global = addDummySegments(oriented);
 
     std::array<QVector3D, kXsensSegmentCountWithDummies> boneVec{};
