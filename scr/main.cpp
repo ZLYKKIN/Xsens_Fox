@@ -4170,6 +4170,14 @@ void MocapReceiver::run()
     using namespace xda;
 
     auto& I = *m_impl;
+
+    // §connect: ВЕСЬ рабочий цикл XDA под единым SEH-стражем. Если драйвер падает
+    //   (нет костюма/донгла, сбой радио, кривой COM) — структурное исключение
+    //   перехватывается здесь, поток завершается ШТАТНО (статус Failed), а НЕ роняет
+    //   процесс. onStatusTick затем снова включает кнопку «Подключить костюм» для
+    //   повторной попытки. Точечные sehCall на путях очистки ниже оставлены, чтобы
+    //   в обычном случае показать мягкий NoDevice и спокойно завершиться.
+    const bool runOk = sehCall([&]() {
     I.setStatus(ConnStatus::Scanning, "loading XDA driver…", this);
 
     if (I.test) {
@@ -5273,6 +5281,14 @@ void MocapReceiver::run()
     sehCall([&]{ if (api.controlDestruct) api.controlDestruct(control); });
     sehCall([&]{ unloadApi(api); });
     I.setStatus(ConnStatus::NotInitialized, "closed", this);
+    });  // end SEH-guarded worker body
+
+    if (!runOk) {
+        I.activeTrackers.store(0);
+        I.setStatus(ConnStatus::Failed,
+                    "Сбой драйвера XDA при подключении — попробуйте подключить ещё раз",
+                    this);
+    }
 }
 
 Lang& Lang::instance() { static Lang g; return g; }
@@ -5627,14 +5643,23 @@ NewSessionWizard::NewSessionWizard(MocapReceiver* rx, bool testMode, QWidget* pa
     setWindowTitle(QString("%1 — %2")
                        .arg(Lang::t("app_title"))
                        .arg(QApplication::applicationVersion()));
-    // §ui: окно выше, чтобы страница калибровки (картинка позы + подсказки + бары
-    //   + кнопка «Старт») помещалась целиком БЕЗ прокрутки — раньше при 640px кнопку
-    //   старта приходилось доскролливать. Страница размеров актёра остаётся со своим
-    //   скроллом (там длинный список — это нормально). resize даёт комфортный старт.
-    setMinimumSize(800, 820);
-    resize(840, 880);
+    // §ui: ШИРЕ (длинный заголовок "Выберите режим и подключите оборудование"
+    //   при 22pt не влезал и срезался с обоих краёв) и НЕ слишком высоко (раньше
+    //   снизу зияла пустота). Эта высота вмещает самую высокую страницу (калибровка:
+    //   картинка позы + подсказки + бары + кнопка «Старт») без прокрутки; страница
+    //   размеров актёра сохраняет свой скролл (длинный список — это нормально).
+    setMinimumSize(900, 720);
+    resize(960, 780);
 
     buildPages();
+
+    // §ui: гарантия «ничего не срежет» — все крупные заголовки переносятся по
+    //   словам и центрируются (на любой ширине/языке вместо горизонтальной обрезки).
+    for (QLabel* h : findChildren<QLabel*>())
+        if (h->objectName() == QLatin1String("heroHeading")) {
+            h->setWordWrap(true);
+            h->setAlignment(Qt::AlignHCenter);
+        }
 
     m_btnBack = new QPushButton(this);
     m_btnNext = new QPushButton(this);
@@ -12101,8 +12126,8 @@ const char* kStyleSheet = R"(
   QLabel#sectionHeader { color: #FF7A1A; font-weight: 700; font-size: 10pt;
                          text-transform: uppercase; letter-spacing: 1px;
                          border-bottom: 1px solid #2A2A2A; padding-bottom: 3px; }
-  QLabel#heroHeading { color: #FF7A1A; font-size: 22pt; font-weight: 800;
-                       letter-spacing: 1px; padding: 6px 0; }
+  QLabel#heroHeading { color: #FF7A1A; font-size: 20pt; font-weight: 800;
+                       letter-spacing: 0.5px; padding: 6px 0; }
   QLabel#countdown  { color: #FF7A1A; font-size: 52pt; font-weight: 900;
                        padding: 10px 0; letter-spacing: 2px; }
 
