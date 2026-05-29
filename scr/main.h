@@ -343,6 +343,14 @@ private:
 
         double    m_offsetRatePrimary = 0.40;
         double    m_offsetRateDouble  = 0.25;
+
+        // §loco-glide: XY таза догоняет контактную оценку 2-м порядком (критически-
+        //   демпфированный SmoothDamp) вместо мгновенного lerp — несёт скорость сквозь
+        //   фазу маха, чтобы корень скользил, а не замирал-рывок. smoothTime в секундах
+        //   (кадро-независим). Больше = глаже, но чуть больше отставание. Скорость
+        //   скольжения m_glideVelX/Y — состояние фильтра.
+        double    m_pelvisGlideTime   = 0.10;
+        double    m_glideVelX = 0.0, m_glideVelY = 0.0;
         double    m_zRatePelvisMoving = 0.40;
         double    m_zRatePelvisStill  = 0.06;
 
@@ -354,6 +362,12 @@ private:
         double    m_lieTiltCosThresh  = 0.50;
         double    m_squatKneeThresh   = 0.30;
         double    m_sitKneeThresh     = 0.55;
+
+        // §pose-hyst: гистерезис порогов классификатора позы. Без него при зависании
+        //   метрики на границе поза дребезжит каждый кадр (в логе 8 смен Stand↔Sit за
+        //   10 с), дёргая целевую высоту таза. band «прилипает» к текущей позе.
+        double    m_poseHystBandM     = 0.07;
+        double    m_poseHystTiltCos   = 0.05;
 
         int       m_lowZTicksRequired = 6;
 
