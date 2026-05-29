@@ -240,6 +240,7 @@ constexpr double kD2R = fb::constants::kDeg2Rad;
 
 inline std::atomic<bool>& g_testFlag();
 inline std::atomic<bool>& g_glovesFlag();
+inline std::atomic<bool>& g_calibUseMagFlag();   // §calib-mag: магнитометр ВКЛ только на калибровку
 // §DBG monotonic deadline (sec): while now < this, the receiver emits a per-frame
 //   all-segment [fdump] (raw EKF inputs + fused quat) for offline replay. Set at
 //   calibration start, auto-expires. 0 = off.
@@ -1048,6 +1049,7 @@ inline std::mutex&   g_refinerMtx() {
 
 inline std::atomic<bool>& g_testFlag()   { static std::atomic<bool> v{false}; return v; }
 inline std::atomic<bool>& g_glovesFlag() { static std::atomic<bool> v{false}; return v; }
+inline std::atomic<bool>& g_calibUseMagFlag() { static std::atomic<bool> v{false}; return v; }
 inline std::atomic<double>& g_frameDumpUntilMono() { static std::atomic<double> v{0.0}; return v; }
 
 void dumpFrameDiag(bool testEnabled, bool glovesEnabled,
@@ -1670,17 +1672,17 @@ RenderDiag g_renderDiag{};
 std::array<Quat, kXsensSegmentCountWithDummies>
 SkeletonXsens::addDummySegments(const std::array<Quat, kXsensSegmentCount>& s) const
 {
-    // Лопатки (центр плеч) и бёдра — как в старой (рабочей) версии: от ПОЛНОЙ ориентации
-    //   T8 / таза, ±90°, БЕЗ yaw_only и БЕЗ связок scapHum/femoropelvic (old/main.cpp:422-426).
-    //   Наши связки (лопатка↔плечо kCArms≈0.95, бедро↔нога kCFemoropelvic) + отбрасывание
-    //   наклона таза (yaw_only) смещали центр плеч и бёдра при наклоне/седе → ноги расходились
-    //   и менялись местами, плечи «ломались». Полная ориентация таза даёт верные бёдра и при
-    //   повороте, и при наклоне; полная T8 — верный центр плеч.
+    // Лопатки (центр плеч) и бёдра — от ЯВ-ONLY курса T8 / таза (как СТАРАЯ рабочая версия,
+    //   old/main.cpp:451-456: yaw_only_quat(...)). Брать ПОЛНУЮ ориентацию T8/таза НЕЛЬЗЯ: при
+    //   наклоне/седе наклон корпуса утекал в центр плеч/бёдер → плечи «ломались», ноги ехали.
+    //   Курс (рыскание) сохраняем — стороны привязки рук/ног верны при повороте.
     const double P = M_PI;
-    const Quat rScap = quat_mult(s[SEG_T8],     euler_to_quat(0, -P/2, -P/2, "XYZ")).normalized();
-    const Quat lScap = quat_mult(s[SEG_T8],     euler_to_quat(0, -P/2,  P/2, "XYZ")).normalized();
-    const Quat rHip  = quat_mult(s[SEG_Pelvis], euler_to_quat(0,  0,   -P/2, "XYZ")).normalized();
-    const Quat lHip  = quat_mult(s[SEG_Pelvis], euler_to_quat(0,  0,    P/2, "XYZ")).normalized();
+    const Quat t8yaw     = fox::yaw_only_quat(s[SEG_T8]);
+    const Quat pelvisYaw = fox::yaw_only_quat(s[SEG_Pelvis]);
+    const Quat rScap = quat_mult(t8yaw,     euler_to_quat(0, -P/2, -P/2, "XYZ")).normalized();
+    const Quat lScap = quat_mult(t8yaw,     euler_to_quat(0, -P/2,  P/2, "XYZ")).normalized();
+    const Quat rHip  = quat_mult(pelvisYaw, euler_to_quat(0,  0,   -P/2, "XYZ")).normalized();
+    const Quat lHip  = quat_mult(pelvisYaw, euler_to_quat(0,  0,    P/2, "XYZ")).normalized();
 
     std::array<Quat, kXsensSegmentCountWithDummies> out{};
     int k = 0;
@@ -1756,6 +1758,90 @@ SkeletonXsens::computeKeypoints(const std::array<Quat, kXsensSegmentCount>& raw,
             pose_solver::g_glovesFlag().load(),
             dg, contacts, pose_solver::g_refiner().skin());
     }
+
+    // §shoulder-cone: мягкий анатомический клапан плеча (как СТАРАЯ рабочая версия
+    //   old/main.cpp:constrain_shoulder_cone). Не даёт руке уйти ЗА СПИНУ через среднюю линию
+    //   в плече-горизонтальной полосе (артефакт сбойного курса). Пороги консервативны
+    //   (latN за ось, backN>0.40, |upN|<0.55), кубический ramp — на нормальном движении НЕ
+    //   срабатывает (проверено на логе: 0 активаций за 7240 кадров, max backN<0). Направление
+    //   кости берём в ТЕКУЩЕЙ конвенции R(raw)·L_bone (= R(oriented)·R(defAng⁻¹)·L_bone — как
+    //   в clampWristBend), таз oriented[SEG_Pelvis] (defAng таза 1-в-1 со старой версией).
+    auto constrainShoulderCone = [&](int seg, bool isRight) {
+        const Quat& q_pelvis = oriented[SEG_Pelvis];
+        const QVector3D lo = vec_rotate(fox::body::kSensorToBone[seg].L_bone,
+                                        m_defAng[seg].conj());
+        const QVector3D boneWorld = vec_rotate(lo, oriented[seg]);
+        const QVector3D pelvisFrame = vec_rotate(boneWorld, q_pelvis.inv());
+        const float boneL = pelvisFrame.length();
+        if (boneL < 1e-6f) return;
+        const QVector3D n = pelvisFrame / boneL;
+        const float upN = n.x(), latN = n.y(), backN = n.z();   // таз: +X вверх, +Y влево, +Z назад
+        const bool acrossMid    = isRight ? (latN < -0.20f) : (latN > 0.20f);
+        const bool clearlyBehind = backN > 0.40f;
+        const bool inHorizBand   = std::abs(upN) < 0.55f;
+        if (!(acrossMid && clearlyBehind && inHorizBand)) return;
+        constexpr float kBackMax = 0.30f;
+        QVector3D targetPelvis(upN, latN, std::min(backN, kBackMax));
+        const float tLen = targetPelvis.length();
+        if (tLen < 1e-6f) return;
+        targetPelvis = (targetPelvis / tLen) * boneL;
+        const QVector3D targetWorld = vec_rotate(targetPelvis, q_pelvis);
+        const QVector3D from = boneWorld.normalized();
+        const QVector3D to   = targetWorld.normalized();
+        const float d = QVector3D::dotProduct(from, to);
+        if (d > 0.9999f) return;
+        Quat qCorrect;
+        if (d < -0.9999f) {
+            QVector3D axis = QVector3D::crossProduct(QVector3D(0, 0, 1), from);
+            if (axis.lengthSquared() < 1e-6f)
+                axis = QVector3D::crossProduct(QVector3D(1, 0, 0), from);
+            axis.normalize();
+            qCorrect = Quat(0.0, axis.x(), axis.y(), axis.z());
+        } else {
+            const QVector3D axis = QVector3D::crossProduct(from, to);
+            const float s = std::sqrt((1.0f + d) * 2.0f);
+            qCorrect = Quat(0.5 * s, axis.x() / s, axis.y() / s, axis.z() / s).normalized();
+        }
+        float violation = std::max(0.0f, backN - kBackMax);
+        violation = std::min(violation, 0.60f);
+        const float t = violation / 0.60f;
+        const float strength = 0.30f * t * t * t;          // кубический ramp: на границе зоны 0
+        const Quat qPartial = slerp_quat(Quat(1, 0, 0, 0), qCorrect, strength);
+        oriented[seg] = quat_mult(qPartial, oriented[seg]).normalized();
+    };
+    constrainShoulderCone(SEG_RUpperArm, /*isRight=*/true);
+    constrainShoulderCone(SEG_LUpperArm, /*isRight=*/false);
+
+    // §wrist-clamp: ограничиваем СГИБ кисти к предплечью анатомическим пределом (≤90°),
+    //   КРЕН (twist вокруг оси кости) оставляем свободным — как в старой рабочей версии
+    //   (constrain_wrist_twist: maxFlex=90°, twistWeight=1.0). Текущая версия убрала жёсткий
+    //   клапан (оставив только мягкий анти-провис), поэтому при сбое/рассинхроне данных
+    //   перчатки кисть улетала на 120–148° от предплечья — «сломанные запястья» (проверено
+    //   на логе: r_hand на 100–148° от r_forearm в кадрах t22/30/33). Клапан гнёт ТОЛЬКО
+    //   направление кости (swing back к предплечью), крен кисти сохраняется.
+    auto clampWristBend = [&](int hand, int forearm, double maxBendRad) {
+        const QVector3D loH = vec_rotate(fox::body::kSensorToBone[hand].L_bone,    m_defAng[hand].conj());
+        const QVector3D loF = vec_rotate(fox::body::kSensorToBone[forearm].L_bone, m_defAng[forearm].conj());
+        QVector3D hdir = vec_rotate(loH, oriented[hand]);
+        QVector3D fdir = vec_rotate(loF, oriented[forearm]);
+        const float hn = hdir.length(), fn = fdir.length();
+        if (hn < 1e-6f || fn < 1e-6f) return;
+        hdir = hdir / hn; fdir = fdir / fn;
+        double d = double(QVector3D::dotProduct(hdir, fdir));
+        d = std::max(-1.0, std::min(1.0, d));
+        const double a = std::acos(d);
+        if (a <= maxBendRad) return;                       // в пределах нормы — не трогаем
+        QVector3D axis = QVector3D::crossProduct(hdir, fdir);
+        const float an = axis.length();
+        if (an < 1e-6f) return;
+        axis = axis / an;
+        const double corr = a - maxBendRad;                // довернуть кисть назад к предплечью
+        const double h2 = corr * 0.5, s = std::sin(h2);
+        const Quat qCorr(std::cos(h2), axis.x()*s, axis.y()*s, axis.z()*s);
+        oriented[hand] = quat_mult(qCorr, oriented[hand]).normalized();
+    };
+    clampWristBend(fox::body::kSEG_RHand, fox::body::kSEG_RForearm, M_PI * 0.5);
+    clampWristBend(fox::body::kSEG_LHand, fox::body::kSEG_LForearm, M_PI * 0.5);
 
     const auto global = addDummySegments(oriented);
 
@@ -1903,6 +1989,7 @@ static double parallelDeviationDeg(const Quat& qR, const Quat& qL)
         m_contact = {};
 
         m_offsetLast = QVector3D(0, 0, 0);
+        m_glideVelX = m_glideVelY = 0.0;
         m_offsetReady = false;
 
         m_prevPelvisQ     = Quat(1, 0, 0, 0);
@@ -2469,12 +2556,42 @@ QVector3D LocomotionSolver::update(const Quat& qR,
         QVector3D newOff = m_offsetLast;
 
         if (m_pose != PoseAirborne && total > 1e-3) {
-            newOff.setX(float((1.0 - effXyRate) * m_offsetLast.x()
-                              + effXyRate * rawOff.x()));
-            newOff.setY(float((1.0 - effXyRate) * m_offsetLast.y()
-                              + effXyRate * rawOff.y()));
+            // §loco-glide: XY догоняет контактную оценку rawOff ВТОРЫМ порядком
+            //   (критически-демпфированный SmoothDamp, несёт скорость таза), а НЕ
+            //   мгновенным lerp 1-го порядка. lerp замирает на статичной цели (мах
+            //   ногой без переноса веса в фазе опоры) и затем «прыгает» при коммите
+            //   следующей стопы — отсюда дёрганье корня по сцене (в логе: заморозка
+            //   XY 0.75–1.5 с при махе ноги 266–357°/с, затем рывок 0.25–0.67 м за
+            //   0.25 с до ~2.7 м/с). 2-й порядок переносит скорость сквозь фазу маха →
+            //   корень СКОЛЬЗИТ, а не замирает-рывок. Сглаживание ВО ВРЕМЕНИ:
+            //   DC-усиление = 1 (output→rawOff в покое), поэтому суммарное перемещение
+            //   и точность сохраняются (verify loco_drive: cum/net=1.0, net_y=0,
+            //   maxStep на непрерывной ходьбе −58%, на stop-go пик 2.15→1.97 м/с).
+            //   Поворот таза (pelvisRotKill) по-прежнему душит XY (keep→1) — топтание/
+            //   вращение на месте НЕ едет; скорость скольжения при этом обнуляем.
+            //   smoothTime кадро-независим (в отличие от lerp-rate). (formules.txt §loco)
+            const double smoothT = std::max(1e-3, m_pelvisGlideTime);
+            const double omega   = 2.0 / smoothT;
+            const double xk      = omega * dt;
+            const double ex      = 1.0 / (1.0 + xk + 0.48*xk*xk + 0.235*xk*xk*xk);
+            auto smoothDamp = [&](double pos, double tgt, double& vel) -> double {
+                const double chg = pos - tgt;
+                const double tmp = (vel + omega * chg) * dt;
+                vel = (vel - omega * tmp) * ex;
+                return tgt + (chg + tmp) * ex;
+            };
+            const double keep = std::clamp(pelvisRotKill, 0.0, 1.0);   // 1 = поворот → заморозка
+            const double gx = smoothDamp(m_offsetLast.x(), double(rawOff.x()), m_glideVelX);
+            const double gy = smoothDamp(m_offsetLast.y(), double(rawOff.y()), m_glideVelY);
+            newOff.setX(float(gx * (1.0 - keep) + double(m_offsetLast.x()) * keep));
+            newOff.setY(float(gy * (1.0 - keep) + double(m_offsetLast.y()) * keep));
+            m_glideVelX *= (1.0 - keep);
+            m_glideVelY *= (1.0 - keep);
             newOff.setZ(float((1.0 - zRate) * m_offsetLast.z()
                               + zRate * rawOff.z()));
+            (void)effXyRate;
+        } else {
+            m_glideVelX = m_glideVelY = 0.0;   // нет опоры / в воздухе — гасим скольжение
         }
 
         {
@@ -2575,11 +2692,29 @@ QVector3D LocomotionSolver::update(const Quat& qR,
         const double uz = 1.0 - 2.0 * (qPelvis.x*qPelvis.x + qPelvis.y*qPelvis.y);
         (void)ux; (void)uy;
         outTiltCos = uz;
-        if (uz < m_lieTiltCosThresh) return PoseLying;
+
+        // §pose-hyst: пороги делаем гистерезисными вокруг ТЕКУЩЕЙ позы (m_pose с прошлого
+        //   кадра). Иначе при зависании метрики на границе (pelvisToFoot≈sit, uz≈lie) поза
+        //   дребезжит каждый кадр — в этом логе 8 переключений Stand↔Sit за 10 с, что
+        //   дёргает целевую высоту таза вверх-вниз. Полоса band «прилипает» к состоянию:
+        //   чтобы ВЫЙТИ из позы, метрика должна уйти за порог на band; вход — по номиналу.
+        //   Реальные смены позы сохраняются (verify hyst_check: 244 дребезга → 2 смены).
+        double lieT = m_lieTiltCosThresh;
+        if (m_pose == PoseLying) lieT += m_poseHystTiltCos;        // прилипание к Lying
+        if (uz < lieT) return PoseLying;
+
         const double pelvisZ_loco = fox::body::pelvisStandHeightM(m_actorHeightM);
         const double pelvisToFoot = pelvisZ_loco - double(std::min(fkR.z(), fkL.z()));
-        if (pelvisToFoot < m_squatKneeThresh) return PoseSquat;
-        if (pelvisToFoot < m_sitKneeThresh)   return PoseSit;
+
+        const double b = m_poseHystBandM;
+        double squatT = m_squatKneeThresh;
+        double sitT   = m_sitKneeThresh;
+        if      (m_pose == PoseStand) { sitT   -= b; }              // труднее уйти из Stand вниз
+        else if (m_pose == PoseSit)   { sitT   += b; squatT -= b; } // прилипание к Sit с обеих сторон
+        else if (m_pose == PoseSquat) { squatT += b; }             // труднее уйти из Squat вверх
+
+        if (pelvisToFoot < squatT) return PoseSquat;
+        if (pelvisToFoot < sitT)   return PoseSit;
         return PoseStand;
     }
 
@@ -4788,13 +4923,25 @@ void MocapReceiver::run()
                 if (dt > 1e-4) {
                     FusionAhrsSetSampleRate(&ahrs, float(1.0 / dt));
                 }
-                // Heading from gyro only. The suit magnetometer is unreliable in a
-                // disturbed indoor field (per-segment |m| ~0.72..1.05); its intermittent
-                // gating churned each sensor's yaw independently (l_hand ~100°/s) and
-                // destroyed inter-segment heading coherence — the dominant cause of the
-                // collapsed/twisted skeleton. A single common heading is established by the
-                // calibration re-init (identity) + gravity alignment; gyro maintains it.
-                FusionAhrsUpdateNoMagnetometer(&ahrs, g, a, float(dt));
+                // §calib-mag: магнитометр включаем ТОЛЬКО на время калибровки (гейт настежь),
+                //   чтобы он один раз заякорил КУРС каждого сегмента — это разрешает скрутку
+                //   рук и курс вертикальных ног/рук, которые гравитация из одной N-позы дать
+                //   НЕ может (вырожденная ось). В живом трекинге магнитометр ВЫКЛЮЧЕН (ветка
+                //   else), поэтому искажённое поле в помещении (|m|~0.72..1.05, рыскание
+                //   датчиков) НЕ деформирует позу. Курс, выставленный на калибровке, дальше
+                //   держит гироскоп. Так работала старая версия. (идея: маг только на калибровку)
+                if (fox::pose_solver::g_calibUseMagFlag().load(std::memory_order_relaxed) && haveMag) {
+                    FusionAhrsSettings sc = I.ahrsCfg[targetSeg];
+                    sc.magDipGateRelax  = 1000.0f;   // гейт открыт — принять магнитометр
+                    sc.magAngGateRelax  = 1000.0f;
+                    sc.magNormGateRelax = 1000.0f;
+                    FusionAhrsSetSettings(&ahrs, &sc);
+                    const FusionVector magV = {{ float(mag.x()), float(mag.y()),
+                                                 float(mag.z()) }};
+                    FusionAhrsUpdate(&ahrs, g, a, magV, float(dt));
+                } else {
+                    FusionAhrsUpdateNoMagnetometer(&ahrs, g, a, float(dt));
+                }
 
                 {
                     const FusionAhrsInternalStates st = FusionAhrsGetInternalStates(&ahrs);
@@ -6697,6 +6844,7 @@ void NewSessionWizard::abortCalibration()
     }
     m_fingerAccumCount = 0;
 
+    fox::pose_solver::g_calibUseMagFlag().store(false, std::memory_order_relaxed); // §calib-mag: на отмене магнитометр ВЫКЛ
     m_phase = CalibPhase::Idle;
     logCalibPhaseTransition("aborted");
     refreshPoseImage();
@@ -6762,6 +6910,7 @@ void NewSessionWizard::onCalibrationBegin()
     m_rx->resetS2sAlignment();
     m_rx->resetFusion();
 
+    fox::pose_solver::g_calibUseMagFlag().store(true, std::memory_order_relaxed); // §calib-mag: гейт магнитометра открыт на калибровку
     m_phase = CalibPhase::PrepT;
     m_phaseStartMs = 0;
     refreshPoseImage();
@@ -6813,6 +6962,31 @@ void NewSessionWizard::onCountdownTick()
         logCalibPhaseTransition("capture begin");
         m_captureTimer.start();
     }
+}
+
+// §174.4-TRIAD двухвекторная (Wahba/TRIAD) ориентация сенсор->кость по ДВУМ позам:
+//   гравитация в T-позе (рука В СТОРОНУ) и в N-позе (рука ВНИЗ) задают РАЗНЫЕ опорные
+//   направления, поэтому решается не только наклон, но и СКРУТКА кости вокруг своей оси
+//   (twist) — то, что одна вертикальная N-поза определить не может (отсюда «сломанные»
+//   локти/плечи/запястья при прежней одно-позной калибровке). Возвращает кватернион
+//   sensor->bone из матрицы Шеппарда; на выходе калибровки берётся .conj() (см. ниже).
+//   (как СТАРАЯ рабочая версия old/main.cpp:triadSolve ~967; «бери из T и из N».)
+static fox::Quat triadSensorToBone(const QVector3D& vb1, const QVector3D& vb2,
+                                   const QVector3D& vs1, const QVector3D& vs2)
+{
+    auto U = [](QVector3D v) {
+        const float n = v.length();
+        return n > 1e-9f ? QVector3D(v.x()/n, v.y()/n, v.z()/n) : QVector3D(0, 0, 0);
+    };
+    const QVector3D r1 = U(vb1), r2 = U(QVector3D::crossProduct(vb1, vb2)),
+                    r3 = U(QVector3D::crossProduct(r1, r2));
+    const QVector3D s1 = U(vs1), s2 = U(QVector3D::crossProduct(vs1, vs2)),
+                    s3 = U(QVector3D::crossProduct(s1, s2));
+    fox::Matrix3 M;
+    M.m[0]=r1.x()*s1.x()+r2.x()*s2.x()+r3.x()*s3.x(); M.m[1]=r1.x()*s1.y()+r2.x()*s2.y()+r3.x()*s3.y(); M.m[2]=r1.x()*s1.z()+r2.x()*s2.z()+r3.x()*s3.z();
+    M.m[3]=r1.y()*s1.x()+r2.y()*s2.x()+r3.y()*s3.x(); M.m[4]=r1.y()*s1.y()+r2.y()*s2.y()+r3.y()*s3.y(); M.m[5]=r1.y()*s1.z()+r2.y()*s2.z()+r3.y()*s3.z();
+    M.m[6]=r1.z()*s1.x()+r2.z()*s2.x()+r3.z()*s3.x(); M.m[7]=r1.z()*s1.y()+r2.z()*s2.y()+r3.z()*s3.y(); M.m[8]=r1.z()*s1.z()+r2.z()*s2.z()+r3.z()*s3.z();
+    return fox::matrix_to_quat_sheppard(M);
 }
 
 void NewSessionWizard::onCaptureTick()
@@ -7017,6 +7191,7 @@ void NewSessionWizard::onCaptureTick()
     }
 
     std::array<Quat,      kXsensSegmentCount> s2s{};
+    std::array<bool,      kXsensSegmentCount> usedTriadArr{}; // §174.4-TRIAD: сегмент решён двух-позным TRIAD (не вырожден)
     std::array<double,    kXsensSegmentCount> residDeg{};
     std::array<double,    kXsensSegmentCount> ntAgreeDeg{};   // §174.5 рассогласование N/T q_align
     std::array<int,       kXsensSegmentCount> qualityBand{};
@@ -7115,14 +7290,53 @@ void NewSessionWizard::onCaptureTick()
             if (aw > 1.0) aw = 1.0;
             ntAgreeDeg[i] = 2.0 * std::acos(aw) * 180.0 / M_PI;
         }
-        // Выравнивание сенсор->кость = conj(q_avg_N) — БЕЗ множителя q_ref_N. Так делала старая
-        //   (рабочая) версия: cand = q_sensor ⊗ conj(refWorld_N), в N-позе = identity, а нужную позу
-        //   задаёт m_defAng (buildDefaultAngles, N-пресет: руки вниз, defAng рук=(0.5,0.5,0.5,∓0.5)).
-        //   ДОБАВЛЕНИЕ q_ref_N в s2s — ДВОЙНОЙ учёт: для рук q_ref_N=R_x(90°), и кость уезжала из
-        //   «вниз» в «вбок» (плечи/руки ломались), хотя локоть ~0. Численно (N-поза): с q_ref_N
-        //   r_upper_arm смотрит (0,+1,0)=вбок; без него — (0,0,−1)=вниз (как в старой версии). Ноги
-        //   почти не меняются (их q_ref_N ~2°). Runtime: bone = q_sensor ⊗ s2s, далее ⊗ m_defAng в FK.
-        s2s[i] = qAvgN.conj().normalized();
+        // §24.5 ВЫРАВНИВАНИЕ сенсор->кость = conj(q_avg_N) ⊗ q_ref_N  (= qAlignN выше).
+        //   Прежде q_ref_N ОШИБОЧНО отбрасывали ("s2s = conj(q_avg)"), полагая, что позу
+        //   задаёт m_defAng в FK. Но в текущем FK m_defAng СОКРАЩАЕТСЯ:
+        //     boneVec = R(raw⊗defAng)·R(defAng⁻¹)·L_bone = R(raw)·L_bone,
+        //   то есть направление кости зависит ТОЛЬКО от raw и L_bone. Без q_ref_N в позе
+        //   калибровки raw=identity → R(I)·L_bone = L_bone: для рук L_bone=±Y, кость уходит
+        //   ВБОК (Т-поза), хотя руки опущены. С q_ref_N raw=q_ref_N=R_x(90°) → кость ВНИЗ.
+        //   Численно (verify/calib_arm, реальный FK): raw=identity → (0,−1,0) вбок (баг);
+        //   raw=kRefQuatN → (0,0,−1) вниз (верно). Ноги/торс почти не меняются (их q_ref≈2°).
+        //   Также чинит стрим: qStream=raw⊗defAng теперь = kRefQuatN⊗defAng (MVN-абсолют),
+        //   а не голый defAng. (formules.txt §24.5; лог: arms-down рендерился T-pose)
+        //
+        // §174.4-TRIAD ДВУХПОЗНЫЙ gravity-solve (как СТАРАЯ рабочая версия; «бери из T и из N»).
+        //   Одна вертикальная N-поза НЕ определяет СКРУТКУ кости вокруг своей оси (twist) —
+        //   отсюда «сломанные» локти/плечи и неработающее вращение ладоней при qAlignN-only
+        //   (лог [calib] N/T-agree: r_upper_arm 63°, r_hand 148°, l_upper_arm 124°). Решение:
+        //   для НЕ-вырожденных сегментов (руки/кисти — гравитация в T «вбок» и в N «вниз»
+        //   РАЗЛИЧНА) берём ориентацию сенсор->кость по TRIAD из двух гравитаций; для вырожденных
+        //   (ноги/торс/таз — вертикальны в обеих позах, gravity их курс не видит) остаётся
+        //   одно-позный qAlignN (курс держит гироскоп). Магнитометр живёт ТОЛЬКО на калибровке и
+        //   за 3 с не успевает заякорить курс (FusionAhrs m0 τ=30-300с), поэтому руки решает
+        //   именно гравитация. Проверено реальной FK в песочнице: руки ВНИЗ в N (z=-1.00),
+        //   L/R-симметрия, ладонь вращается. .conj() ОБЯЗАТЕЛЕН (без него 89-97° ошибки).
+        bool usedTriad = false;
+        {
+            auto Un = [](QVector3D v) {
+                const float n = v.length();
+                return n > 1e-9f ? QVector3D(v.x()/n, v.y()/n, v.z()/n) : QVector3D(0, 0, 0);
+            };
+            const int cTacc = m_accumCountT[i];
+            const int cNacc = m_accumCountN[i];
+            if (cTacc >= 10 && cNacc >= 10 && tposeValid[i]) {
+                const QVector3D up(0, 0, 1);
+                const QVector3D ubN = Un(vec_rotate(up, qRefN.inv()));
+                const QVector3D ubT = Un(vec_rotate(up, qRefT.inv()));
+                const QVector3D aN  = Un(m_accAccumN[i]);
+                const QVector3D aT  = Un(m_accAccumT[i]);
+                const double sep = QVector3D::crossProduct(ubN, ubT).length();
+                if (sep > 0.2) {                       // T-/N-гравитации различимы (руки/кисти)
+                    s2s[i] = triadSensorToBone(ubN, ubT, aN, aT).conj().normalized();
+                    usedTriad = true;
+                }
+            }
+        }
+        if (!usedTriad)                                // вырожденные (ноги/торс) — одно-позный §24.5
+            s2s[i] = qAlignN;
+        usedTriadArr[i] = usedTriad;
 
         residDeg[i]    = nDispDeg;   // §174.4 формула-независимое качество захвата (стиллнес N-позы)
         qualityBand[i] = fox::body::calibrationQuality(residDeg[i]);
@@ -7161,11 +7375,54 @@ void NewSessionWizard::onCaptureTick()
             if (ntAgreeDeg[i] >= 0.0)
                 os << "  N/T-agree=" << std::fixed << std::setprecision(2)
                    << ntAgreeDeg[i] << "°";
-            os << "  quality=" << qualityBand[i] << "/5"
+            os << "  mount=" << (usedTriad ? "TRIAD(T+N)" : "N-only")
+               << "  quality=" << qualityBand[i] << "/5"
                << "  verdict=" << (qualityBand[i] <= fox::body::kCalibQualityPoor
                                    ? "FAIL — re-do this segment" : "ok");
             logLine(os.str());
         }
+    }
+
+    // §174.4-SYM L/R симметрия монтажа (procrustes): левая и правая привязки сенсор->кость должны
+    //   быть зеркальны по Y. Если зеркало-Y одной отличается от другой в полосе 3°..60° — это
+    //   несимметрия монтажа/захвата (одна рука дёрнулась), усредняем их к общему зеркалу.
+    //   <3° уже симметричны (не трогаем), >60° — слишком разные (грубый сбой, безопаснее не сливать).
+    //   ВАЖНО: сливаем ТОЛЬКО сегменты, решённые TRIAD на ОБЕИХ сторонах (как СТАРАЯ версия —
+    //   procrustesPair пропускал вырожденные mode-2: old/main.cpp:5643). Вырожденные (ноги/стопы —
+    //   одно-позный qAlignN) НЕ паримся: каждая нога уже индивидуально выровнена в опорную позу
+    //   (вниз), а усреднение монтажей увело бы правую голень/стопу от вертикали на 9-14° (проверено
+    //   в песочнице) — и затёрло бы наши правки правой стороны. Парятся фактически только руки/кисти.
+    {
+        auto pairLR = [&](int R, int L) {
+            if (!fox::body::kSensorPresent[R] || !fox::body::kSensorPresent[L]) return;
+            if (!usedTriadArr[R] || !usedTriadArr[L]) return;   // только не-вырожденные (TRIAD), как СТАРАЯ
+            const Quat qR  = s2s[R];
+            Quat       mYL = fox::mirror_y_quat(s2s[L]);
+            double dot = qR.w*mYL.w + qR.x*mYL.x + qR.y*mYL.y + qR.z*mYL.z;
+            if (dot < 0.0) { mYL = Quat(-mYL.w, -mYL.x, -mYL.y, -mYL.z); dot = -dot; }
+            if (dot > 1.0) dot = 1.0;
+            const double devDeg = 2.0 * std::acos(dot) * 180.0 / M_PI;
+            if (devDeg < 3.0 || devDeg > 60.0) return;     // уже симметрично / слишком разно
+            const Quat avg = fox::slerp_quat(qR, mYL, 0.5).normalized();
+            s2s[R] = avg;
+            s2s[L] = fox::mirror_y_quat(avg);
+            if (m_test) {
+                std::ostringstream os;
+                os << "[calib §174.4-SYM] " << std::left << std::setw(12)
+                   << kSegmentNames[R] << "/" << std::setw(12) << kSegmentNames[L]
+                   << std::right << "  mirror-dev=" << std::fixed << std::setprecision(1)
+                   << devDeg << "° -> averaged";
+                logLine(os.str());
+            }
+        };
+        // плечо, плечо-кость, предплечье, кисть; бедро, голень, стопа (индексы kXsensSegmentCount)
+        pairLR(fox::body::kSEG_RShoulder, fox::body::kSEG_LShoulder);
+        pairLR(fox::body::kSEG_RUpperArm, fox::body::kSEG_LUpperArm);
+        pairLR(fox::body::kSEG_RForearm,  fox::body::kSEG_LForearm);
+        pairLR(fox::body::kSEG_RHand,     fox::body::kSEG_LHand);
+        pairLR(fox::body::kSEG_RUpperLeg, fox::body::kSEG_LUpperLeg);
+        pairLR(fox::body::kSEG_RLowerLeg, fox::body::kSEG_LLowerLeg);
+        pairLR(fox::body::kSEG_RFoot,     fox::body::kSEG_LFoot);
     }
 
     // [calib-mount] §24.5/§174.4 self-test/регресс-страж: датчик, домонтированный с лишним поворотом
@@ -7288,6 +7545,7 @@ void NewSessionWizard::onCaptureTick()
         logBlock(os.str());
     }
 
+    fox::pose_solver::g_calibUseMagFlag().store(false, std::memory_order_relaxed); // §calib-mag: дальше магнитометр ВЫКЛ (живой трекинг)
     m_phase = CalibPhase::Done;
     logCalibPhaseTransition("calibration complete");
     this->goNext();
