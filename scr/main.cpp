@@ -6895,6 +6895,27 @@ void NewSessionWizard::onCountdownTick()
     }
 }
 
+// §174.4-2pose: двухпозный (T+N) гравитационный solve монтировки сенсор->кость, как в старой
+//   рабочей версии (TRIAD по двум векторам гравитации). ОДНА N-поза НЕ определяет КРЕН кости
+//   вокруг её продольной оси (для вертикальной конечности гравитация вырождена в одну ось) —
+//   крен тогда берётся из НЕнадёжного курса AHRS, и сегмент неверен с ПЕРВОГО кадра движения
+//   (в логе N/T-agree до 112° для плеча/руки). Две позы (рука в N опущена, в T отведена)
+//   фиксируют крен ГЕОМЕТРИЧЕСКИ. v1 делаем точной (N-поза первой → гравитация в покое идеальна),
+//   v2 (T-поза) задаёт крен. Возвращает sensor->bone (R·v_s=v_b); вызывающий берёт conj() = s2s.
+static fox::Quat triadSensorToBone(const QVector3D& vb1, const QVector3D& vb2,
+                                   const QVector3D& vs1, const QVector3D& vs2)
+{
+    auto U = [](QVector3D v) { const float n = v.length();
+        return n > 1e-9f ? QVector3D(v.x()/n, v.y()/n, v.z()/n) : QVector3D(0, 0, 0); };
+    const QVector3D r1=U(vb1), r2=U(QVector3D::crossProduct(vb1,vb2)), r3=U(QVector3D::crossProduct(r1,r2));
+    const QVector3D s1=U(vs1), s2=U(QVector3D::crossProduct(vs1,vs2)), s3=U(QVector3D::crossProduct(s1,s2));
+    fox::Matrix3 M;
+    M.m[0]=r1.x()*s1.x()+r2.x()*s2.x()+r3.x()*s3.x(); M.m[1]=r1.x()*s1.y()+r2.x()*s2.y()+r3.x()*s3.y(); M.m[2]=r1.x()*s1.z()+r2.x()*s2.z()+r3.x()*s3.z();
+    M.m[3]=r1.y()*s1.x()+r2.y()*s2.x()+r3.y()*s3.x(); M.m[4]=r1.y()*s1.y()+r2.y()*s2.y()+r3.y()*s3.y(); M.m[5]=r1.y()*s1.z()+r2.y()*s2.z()+r3.y()*s3.z();
+    M.m[6]=r1.z()*s1.x()+r2.z()*s2.x()+r3.z()*s3.x(); M.m[7]=r1.z()*s1.y()+r2.z()*s2.y()+r3.z()*s3.y(); M.m[8]=r1.z()*s1.z()+r2.z()*s2.z()+r3.z()*s3.z();
+    return fox::matrix_to_quat_sheppard(M);
+}
+
 void NewSessionWizard::onCaptureTick()
 {
     const SuitPose fr = m_rx->snapshot();
@@ -7206,7 +7227,28 @@ void NewSessionWizard::onCaptureTick()
         //   raw=kRefQuatN → (0,0,−1) вниз (верно). Ноги/торс почти не меняются (их q_ref≈2°).
         //   Также чинит стрим: qStream=raw⊗defAng теперь = kRefQuatN⊗defAng (MVN-абсолют),
         //   а не голый defAng. (formules.txt §24.5; лог: arms-down рендерился T-pose)
-        s2s[i] = qAlignN;
+        // §174.4-2pose: для НЕвырожденных сегментов (руки — гравитация в T/N сильно разнесена)
+        //   решаем монтировку по ДВУМ гравитациям (TRIAD, как старая рабочая версия), чтобы
+        //   определить КРЕН кости, который одна N-поза не даёт. Для вырожденных (ноги/торс/таз/
+        //   плечо — конечность вертикальна в обеих позах, гравитация вырождена) оставляем
+        //   одно-N-позную §24.5 qAlignN (как раньше). Чинит крен рук без регрессий на ногах.
+        //   Verify offline (triad_final, реальный лог): N-грав-резид≈0, крен правится на ~N/T-agree
+        //   (плечо/рука до ~98–152°), вырожденные → fallback. ТРЕБУЕТ проверки на костюме.
+        Quat qAlign = qAlignN;
+        if (tposeValid[i] && m_accumCountT[i] >= 10 && m_accumCountN[i] >= 10) {
+            const QVector3D up(0.0f, 0.0f, 1.0f);
+            const QVector3D aN = m_accAccumN[i] / float(m_accumCountN[i]);   // mean acc (sensor), N-pose
+            const QVector3D aT = m_accAccumT[i] / float(m_accumCountT[i]);   // mean acc (sensor), T-pose
+            const QVector3D ubN = vec_rotate(up, qRefN.inv());               // body-frame up, N
+            const QVector3D ubT = vec_rotate(up, qRefT.inv());               // body-frame up, T
+            const float sep = QVector3D::crossProduct(ubN.normalized(),
+                                                      ubT.normalized()).length();
+            if (sep > 0.20f && aN.length() > 1e-3f && aT.length() > 1e-3f) {
+                // N first => N-pose gravity exact; T resolves the bone roll/twist.
+                qAlign = triadSensorToBone(ubN, ubT, aN, aT).conj().normalized();
+            }
+        }
+        s2s[i] = qAlign;
 
         residDeg[i]    = nDispDeg;   // §174.4 формула-независимое качество захвата (стиллнес N-позы)
         qualityBand[i] = fox::body::calibrationQuality(residDeg[i]);
