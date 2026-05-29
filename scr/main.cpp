@@ -7115,14 +7115,18 @@ void NewSessionWizard::onCaptureTick()
             if (aw > 1.0) aw = 1.0;
             ntAgreeDeg[i] = 2.0 * std::acos(aw) * 180.0 / M_PI;
         }
-        // Выравнивание сенсор->кость = conj(q_avg_N) — БЕЗ множителя q_ref_N. Так делала старая
-        //   (рабочая) версия: cand = q_sensor ⊗ conj(refWorld_N), в N-позе = identity, а нужную позу
-        //   задаёт m_defAng (buildDefaultAngles, N-пресет: руки вниз, defAng рук=(0.5,0.5,0.5,∓0.5)).
-        //   ДОБАВЛЕНИЕ q_ref_N в s2s — ДВОЙНОЙ учёт: для рук q_ref_N=R_x(90°), и кость уезжала из
-        //   «вниз» в «вбок» (плечи/руки ломались), хотя локоть ~0. Численно (N-поза): с q_ref_N
-        //   r_upper_arm смотрит (0,+1,0)=вбок; без него — (0,0,−1)=вниз (как в старой версии). Ноги
-        //   почти не меняются (их q_ref_N ~2°). Runtime: bone = q_sensor ⊗ s2s, далее ⊗ m_defAng в FK.
-        s2s[i] = qAvgN.conj().normalized();
+        // §24.5 ВЫРАВНИВАНИЕ сенсор->кость = conj(q_avg_N) ⊗ q_ref_N  (= qAlignN выше).
+        //   Прежде q_ref_N ОШИБОЧНО отбрасывали ("s2s = conj(q_avg)"), полагая, что позу
+        //   задаёт m_defAng в FK. Но в текущем FK m_defAng СОКРАЩАЕТСЯ:
+        //     boneVec = R(raw⊗defAng)·R(defAng⁻¹)·L_bone = R(raw)·L_bone,
+        //   то есть направление кости зависит ТОЛЬКО от raw и L_bone. Без q_ref_N в позе
+        //   калибровки raw=identity → R(I)·L_bone = L_bone: для рук L_bone=±Y, кость уходит
+        //   ВБОК (Т-поза), хотя руки опущены. С q_ref_N raw=q_ref_N=R_x(90°) → кость ВНИЗ.
+        //   Численно (verify/calib_arm, реальный FK): raw=identity → (0,−1,0) вбок (баг);
+        //   raw=kRefQuatN → (0,0,−1) вниз (верно). Ноги/торс почти не меняются (их q_ref≈2°).
+        //   Также чинит стрим: qStream=raw⊗defAng теперь = kRefQuatN⊗defAng (MVN-абсолют),
+        //   а не голый defAng. (formules.txt §24.5; лог: arms-down рендерился T-pose)
+        s2s[i] = qAlignN;
 
         residDeg[i]    = nDispDeg;   // §174.4 формула-независимое качество захвата (стиллнес N-позы)
         qualityBand[i] = fox::body::calibrationQuality(residDeg[i]);
