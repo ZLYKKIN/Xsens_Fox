@@ -355,6 +355,12 @@ private:
         double    m_squatKneeThresh   = 0.30;
         double    m_sitKneeThresh     = 0.55;
 
+        // §pose-hyst: гистерезис порогов классификатора позы. Без него при зависании
+        //   метрики на границе поза дребезжит каждый кадр (в логе 8 смен Stand↔Sit за
+        //   10 с), дёргая целевую высоту таза. band «прилипает» к текущей позе.
+        double    m_poseHystBandM     = 0.07;
+        double    m_poseHystTiltCos   = 0.05;
+
         int       m_lowZTicksRequired = 6;
 
         double    m_lowZBandM         = 0.04;

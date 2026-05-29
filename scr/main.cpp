@@ -2575,11 +2575,29 @@ QVector3D LocomotionSolver::update(const Quat& qR,
         const double uz = 1.0 - 2.0 * (qPelvis.x*qPelvis.x + qPelvis.y*qPelvis.y);
         (void)ux; (void)uy;
         outTiltCos = uz;
-        if (uz < m_lieTiltCosThresh) return PoseLying;
+
+        // §pose-hyst: пороги делаем гистерезисными вокруг ТЕКУЩЕЙ позы (m_pose с прошлого
+        //   кадра). Иначе при зависании метрики на границе (pelvisToFoot≈sit, uz≈lie) поза
+        //   дребезжит каждый кадр — в этом логе 8 переключений Stand↔Sit за 10 с, что
+        //   дёргает целевую высоту таза вверх-вниз. Полоса band «прилипает» к состоянию:
+        //   чтобы ВЫЙТИ из позы, метрика должна уйти за порог на band; вход — по номиналу.
+        //   Реальные смены позы сохраняются (verify hyst_check: 244 дребезга → 2 смены).
+        double lieT = m_lieTiltCosThresh;
+        if (m_pose == PoseLying) lieT += m_poseHystTiltCos;        // прилипание к Lying
+        if (uz < lieT) return PoseLying;
+
         const double pelvisZ_loco = fox::body::pelvisStandHeightM(m_actorHeightM);
         const double pelvisToFoot = pelvisZ_loco - double(std::min(fkR.z(), fkL.z()));
-        if (pelvisToFoot < m_squatKneeThresh) return PoseSquat;
-        if (pelvisToFoot < m_sitKneeThresh)   return PoseSit;
+
+        const double b = m_poseHystBandM;
+        double squatT = m_squatKneeThresh;
+        double sitT   = m_sitKneeThresh;
+        if      (m_pose == PoseStand) { sitT   -= b; }              // труднее уйти из Stand вниз
+        else if (m_pose == PoseSit)   { sitT   += b; squatT -= b; } // прилипание к Sit с обеих сторон
+        else if (m_pose == PoseSquat) { squatT += b; }             // труднее уйти из Squat вверх
+
+        if (pelvisToFoot < squatT) return PoseSquat;
+        if (pelvisToFoot < sitT)   return PoseSit;
         return PoseStand;
     }
 
