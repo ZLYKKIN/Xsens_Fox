@@ -1765,8 +1765,8 @@ SkeletonXsens::computeKeypoints(const std::array<Quat, kXsensSegmentCount>& raw,
     //   на логе: r_hand на 100–148° от r_forearm в кадрах t22/30/33). Клапан гнёт ТОЛЬКО
     //   направление кости (swing back к предплечью), крен кисти сохраняется.
     auto clampWristBend = [&](int hand, int forearm, double maxBendRad) {
-        const QVector3D loH = vec_rotate(fb::kSensorToBone[hand].L_bone,    m_defAng[hand].conj());
-        const QVector3D loF = vec_rotate(fb::kSensorToBone[forearm].L_bone, m_defAng[forearm].conj());
+        const QVector3D loH = vec_rotate(fox::body::kSensorToBone[hand].L_bone,    m_defAng[hand].conj());
+        const QVector3D loF = vec_rotate(fox::body::kSensorToBone[forearm].L_bone, m_defAng[forearm].conj());
         QVector3D hdir = vec_rotate(loH, oriented[hand]);
         QVector3D fdir = vec_rotate(loF, oriented[forearm]);
         const float hn = hdir.length(), fn = fdir.length();
@@ -1785,8 +1785,8 @@ SkeletonXsens::computeKeypoints(const std::array<Quat, kXsensSegmentCount>& raw,
         const Quat qCorr(std::cos(h2), axis.x()*s, axis.y()*s, axis.z()*s);
         oriented[hand] = quat_mult(qCorr, oriented[hand]).normalized();
     };
-    clampWristBend(fb::kSEG_RHand, fb::kSEG_RForearm, M_PI * 0.5);
-    clampWristBend(fb::kSEG_LHand, fb::kSEG_LForearm, M_PI * 0.5);
+    clampWristBend(fox::body::kSEG_RHand, fox::body::kSEG_RForearm, M_PI * 0.5);
+    clampWristBend(fox::body::kSEG_LHand, fox::body::kSEG_LForearm, M_PI * 0.5);
 
     const auto global = addDummySegments(oriented);
 
