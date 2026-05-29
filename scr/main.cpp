@@ -1903,6 +1903,7 @@ static double parallelDeviationDeg(const Quat& qR, const Quat& qL)
         m_contact = {};
 
         m_offsetLast = QVector3D(0, 0, 0);
+        m_glideVelX = m_glideVelY = 0.0;
         m_offsetReady = false;
 
         m_prevPelvisQ     = Quat(1, 0, 0, 0);
@@ -2469,12 +2470,42 @@ QVector3D LocomotionSolver::update(const Quat& qR,
         QVector3D newOff = m_offsetLast;
 
         if (m_pose != PoseAirborne && total > 1e-3) {
-            newOff.setX(float((1.0 - effXyRate) * m_offsetLast.x()
-                              + effXyRate * rawOff.x()));
-            newOff.setY(float((1.0 - effXyRate) * m_offsetLast.y()
-                              + effXyRate * rawOff.y()));
+            // §loco-glide: XY догоняет контактную оценку rawOff ВТОРЫМ порядком
+            //   (критически-демпфированный SmoothDamp, несёт скорость таза), а НЕ
+            //   мгновенным lerp 1-го порядка. lerp замирает на статичной цели (мах
+            //   ногой без переноса веса в фазе опоры) и затем «прыгает» при коммите
+            //   следующей стопы — отсюда дёрганье корня по сцене (в логе: заморозка
+            //   XY 0.75–1.5 с при махе ноги 266–357°/с, затем рывок 0.25–0.67 м за
+            //   0.25 с до ~2.7 м/с). 2-й порядок переносит скорость сквозь фазу маха →
+            //   корень СКОЛЬЗИТ, а не замирает-рывок. Сглаживание ВО ВРЕМЕНИ:
+            //   DC-усиление = 1 (output→rawOff в покое), поэтому суммарное перемещение
+            //   и точность сохраняются (verify loco_drive: cum/net=1.0, net_y=0,
+            //   maxStep на непрерывной ходьбе −58%, на stop-go пик 2.15→1.97 м/с).
+            //   Поворот таза (pelvisRotKill) по-прежнему душит XY (keep→1) — топтание/
+            //   вращение на месте НЕ едет; скорость скольжения при этом обнуляем.
+            //   smoothTime кадро-независим (в отличие от lerp-rate). (formules.txt §loco)
+            const double smoothT = std::max(1e-3, m_pelvisGlideTime);
+            const double omega   = 2.0 / smoothT;
+            const double xk      = omega * dt;
+            const double ex      = 1.0 / (1.0 + xk + 0.48*xk*xk + 0.235*xk*xk*xk);
+            auto smoothDamp = [&](double pos, double tgt, double& vel) -> double {
+                const double chg = pos - tgt;
+                const double tmp = (vel + omega * chg) * dt;
+                vel = (vel - omega * tmp) * ex;
+                return tgt + (chg + tmp) * ex;
+            };
+            const double keep = std::clamp(pelvisRotKill, 0.0, 1.0);   // 1 = поворот → заморозка
+            const double gx = smoothDamp(m_offsetLast.x(), double(rawOff.x()), m_glideVelX);
+            const double gy = smoothDamp(m_offsetLast.y(), double(rawOff.y()), m_glideVelY);
+            newOff.setX(float(gx * (1.0 - keep) + double(m_offsetLast.x()) * keep));
+            newOff.setY(float(gy * (1.0 - keep) + double(m_offsetLast.y()) * keep));
+            m_glideVelX *= (1.0 - keep);
+            m_glideVelY *= (1.0 - keep);
             newOff.setZ(float((1.0 - zRate) * m_offsetLast.z()
                               + zRate * rawOff.z()));
+            (void)effXyRate;
+        } else {
+            m_glideVelX = m_glideVelY = 0.0;   // нет опоры / в воздухе — гасим скольжение
         }
 
         {
@@ -2575,11 +2606,29 @@ QVector3D LocomotionSolver::update(const Quat& qR,
         const double uz = 1.0 - 2.0 * (qPelvis.x*qPelvis.x + qPelvis.y*qPelvis.y);
         (void)ux; (void)uy;
         outTiltCos = uz;
-        if (uz < m_lieTiltCosThresh) return PoseLying;
+
+        // §pose-hyst: пороги делаем гистерезисными вокруг ТЕКУЩЕЙ позы (m_pose с прошлого
+        //   кадра). Иначе при зависании метрики на границе (pelvisToFoot≈sit, uz≈lie) поза
+        //   дребезжит каждый кадр — в этом логе 8 переключений Stand↔Sit за 10 с, что
+        //   дёргает целевую высоту таза вверх-вниз. Полоса band «прилипает» к состоянию:
+        //   чтобы ВЫЙТИ из позы, метрика должна уйти за порог на band; вход — по номиналу.
+        //   Реальные смены позы сохраняются (verify hyst_check: 244 дребезга → 2 смены).
+        double lieT = m_lieTiltCosThresh;
+        if (m_pose == PoseLying) lieT += m_poseHystTiltCos;        // прилипание к Lying
+        if (uz < lieT) return PoseLying;
+
         const double pelvisZ_loco = fox::body::pelvisStandHeightM(m_actorHeightM);
         const double pelvisToFoot = pelvisZ_loco - double(std::min(fkR.z(), fkL.z()));
-        if (pelvisToFoot < m_squatKneeThresh) return PoseSquat;
-        if (pelvisToFoot < m_sitKneeThresh)   return PoseSit;
+
+        const double b = m_poseHystBandM;
+        double squatT = m_squatKneeThresh;
+        double sitT   = m_sitKneeThresh;
+        if      (m_pose == PoseStand) { sitT   -= b; }              // труднее уйти из Stand вниз
+        else if (m_pose == PoseSit)   { sitT   += b; squatT -= b; } // прилипание к Sit с обеих сторон
+        else if (m_pose == PoseSquat) { squatT += b; }             // труднее уйти из Squat вверх
+
+        if (pelvisToFoot < squatT) return PoseSquat;
+        if (pelvisToFoot < sitT)   return PoseSit;
         return PoseStand;
     }
 
@@ -7115,14 +7164,18 @@ void NewSessionWizard::onCaptureTick()
             if (aw > 1.0) aw = 1.0;
             ntAgreeDeg[i] = 2.0 * std::acos(aw) * 180.0 / M_PI;
         }
-        // Выравнивание сенсор->кость = conj(q_avg_N) — БЕЗ множителя q_ref_N. Так делала старая
-        //   (рабочая) версия: cand = q_sensor ⊗ conj(refWorld_N), в N-позе = identity, а нужную позу
-        //   задаёт m_defAng (buildDefaultAngles, N-пресет: руки вниз, defAng рук=(0.5,0.5,0.5,∓0.5)).
-        //   ДОБАВЛЕНИЕ q_ref_N в s2s — ДВОЙНОЙ учёт: для рук q_ref_N=R_x(90°), и кость уезжала из
-        //   «вниз» в «вбок» (плечи/руки ломались), хотя локоть ~0. Численно (N-поза): с q_ref_N
-        //   r_upper_arm смотрит (0,+1,0)=вбок; без него — (0,0,−1)=вниз (как в старой версии). Ноги
-        //   почти не меняются (их q_ref_N ~2°). Runtime: bone = q_sensor ⊗ s2s, далее ⊗ m_defAng в FK.
-        s2s[i] = qAvgN.conj().normalized();
+        // §24.5 ВЫРАВНИВАНИЕ сенсор->кость = conj(q_avg_N) ⊗ q_ref_N  (= qAlignN выше).
+        //   Прежде q_ref_N ОШИБОЧНО отбрасывали ("s2s = conj(q_avg)"), полагая, что позу
+        //   задаёт m_defAng в FK. Но в текущем FK m_defAng СОКРАЩАЕТСЯ:
+        //     boneVec = R(raw⊗defAng)·R(defAng⁻¹)·L_bone = R(raw)·L_bone,
+        //   то есть направление кости зависит ТОЛЬКО от raw и L_bone. Без q_ref_N в позе
+        //   калибровки raw=identity → R(I)·L_bone = L_bone: для рук L_bone=±Y, кость уходит
+        //   ВБОК (Т-поза), хотя руки опущены. С q_ref_N raw=q_ref_N=R_x(90°) → кость ВНИЗ.
+        //   Численно (verify/calib_arm, реальный FK): raw=identity → (0,−1,0) вбок (баг);
+        //   raw=kRefQuatN → (0,0,−1) вниз (верно). Ноги/торс почти не меняются (их q_ref≈2°).
+        //   Также чинит стрим: qStream=raw⊗defAng теперь = kRefQuatN⊗defAng (MVN-абсолют),
+        //   а не голый defAng. (formules.txt §24.5; лог: arms-down рендерился T-pose)
+        s2s[i] = qAlignN;
 
         residDeg[i]    = nDispDeg;   // §174.4 формула-независимое качество захвата (стиллнес N-позы)
         qualityBand[i] = fox::body::calibrationQuality(residDeg[i]);
