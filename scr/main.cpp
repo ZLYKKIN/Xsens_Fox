@@ -8916,15 +8916,21 @@ void LiveStreamSender::pushFrame(quint32 sample,
                << "\n========== [STREAM SNAPSHOT] body-only  sample=" << sample
                << "  -> " << m_cfg.host.toStdString() << ":" << m_cfg.port
                << "  ==========\n"
-               << "  wire=MVN MXTP02; q = absolute calibrated world pose (= qOut); "
-                  "pelvis pos absolute, per-target remap; metres\n";
+               << "  wire=MVN MXTP02; q = ОТНОСИТЕЛЬНО T-позы (segQuat*baseline^-1); "
+                  "pelvis pos relative to baseline, per-target remap; metres\n";
     }
     QByteArray body;
     for (int i = 0; i < kXsensSegmentCount; ++i) {
-        const QVector3D p = (i == SEG_Pelvis)
-                ? mvnWirePelvisPos(pelvisPos, m_cfg.target)
+        // §стрим = ДЕЛЬТА от T-позы (как старая рабочая версия old_sclete:7733-7745). Абсолютная
+        //   поза несла defAng[Pelvis]=Ry(-90°) → ретаргет UE клал персонажа НА ПОЛ. Дельта от
+        //   baseline: в T-позе = identity (персонаж стоит), дальше ретаргет накладывает её на
+        //   свою T-позу. Так стрим совпадает с тем, что мы видим во вьюпорте.
+        const QVector3D pRaw = (i == SEG_Pelvis)
+                ? (pelvisPos - m_impl->baselinePelvisPos)
                 : QVector3D(0, 0, 0);
-        Quat qWire = mvnWireOrient(segQuat[i], m_cfg.target).normalized();
+        const QVector3D p = mvnWirePelvisPos(pRaw, m_cfg.target);
+        const Quat qDelta = quat_mult(segQuat[i], m_impl->baselineBodyQ[i].inv()).normalized();
+        Quat qWire = mvnWireOrient(qDelta, m_cfg.target).normalized();
         qWire = hemisphereContinuous(qWire, m_impl->prevWireBodyQ[i]);
         m_impl->prevWireBodyQ[i] = qWire;
         const Quat q = qWire;
@@ -9052,14 +9058,17 @@ void LiveStreamSender::pushFrameWithGloves(quint32 sample,
                << "\n========== [STREAM SNAPSHOT] body+gloves  sample=" << sample
                << "  -> " << m_cfg.host.toStdString() << ":" << m_cfg.port
                << "  (body=" << int(bodyCount) << " fingers=" << int(fingerCount) << ") ==========\n"
-               << "  wire=MVN MXTP02; q = absolute calibrated world pose (= qOut); pelvis pos absolute, per-target remap; metres\n";
+               << "  wire=MVN MXTP02; q = ОТНОСИТЕЛЬНО T-позы (segQuat*baseline^-1); pelvis pos relative to baseline, per-target remap; metres\n";
     }
     QByteArray body;
     for (int i = 0; i < kXsensSegmentCount; ++i) {
-        const QVector3D p = (i == SEG_Pelvis)
-                ? mvnWirePelvisPos(pelvisPos, m_cfg.target)
+        // §стрим = ДЕЛЬТА от T-позы (как старая версия old_sclete:7795-7809). См. pushFrame выше.
+        const QVector3D pRaw = (i == SEG_Pelvis)
+                ? (pelvisPos - m_impl->baselinePelvisPos)
                 : QVector3D(0, 0, 0);
-        Quat qWire = mvnWireOrient(segQuat[i], m_cfg.target).normalized();
+        const QVector3D p = mvnWirePelvisPos(pRaw, m_cfg.target);
+        const Quat qDelta = quat_mult(segQuat[i], m_impl->baselineBodyQ[i].inv()).normalized();
+        Quat qWire = mvnWireOrient(qDelta, m_cfg.target).normalized();
         qWire = hemisphereContinuous(qWire, m_impl->prevWireBodyQ[i]);
         m_impl->prevWireBodyQ[i] = qWire;
         const Quat q = qWire;
@@ -9089,7 +9098,8 @@ void LiveStreamSender::pushFrameWithGloves(quint32 sample,
                           std::array<Quat, kFingerSegmentsHand>& prevArr) {
         const int mIdx = kXsensSlotToManus[slot];
         if (mIdx < 0) {
-            Quat qWire = mvnWireOrient(segQuat[handSeg], m_cfg.target).normalized();
+            const Quat qDelta = quat_mult(segQuat[handSeg], m_impl->baselineBodyQ[handSeg].inv()).normalized();
+            Quat qWire = mvnWireOrient(qDelta, m_cfg.target).normalized();
             qWire = hemisphereContinuous(qWire, prevArr[slot]);
             prevArr[slot] = qWire;
             const Quat q = qWire;
@@ -9101,10 +9111,9 @@ void LiveStreamSender::pushFrameWithGloves(quint32 sample,
                        << ") pos=(0,0,0) q=(" << q.w << "," << q.x << ","
                        << q.y << "," << q.z << ")  [follows hand]\n";
         } else {
-            (void)baseArr;
             const QVector3D p = pArr[mIdx];
-
-            Quat qWire = mvnWireOrient(qArr[mIdx], m_cfg.target).normalized();
+            const Quat qDelta = quat_mult(qArr[mIdx], baseArr[mIdx].inv()).normalized();
+            Quat qWire = mvnWireOrient(qDelta, m_cfg.target).normalized();
             qWire = hemisphereContinuous(qWire, prevArr[slot]);
             prevArr[slot] = qWire;
             const Quat q = qWire;
