@@ -1903,6 +1903,7 @@ static double parallelDeviationDeg(const Quat& qR, const Quat& qL)
         m_contact = {};
 
         m_offsetLast = QVector3D(0, 0, 0);
+        m_glideVelX = m_glideVelY = 0.0;
         m_offsetReady = false;
 
         m_prevPelvisQ     = Quat(1, 0, 0, 0);
@@ -2469,12 +2470,42 @@ QVector3D LocomotionSolver::update(const Quat& qR,
         QVector3D newOff = m_offsetLast;
 
         if (m_pose != PoseAirborne && total > 1e-3) {
-            newOff.setX(float((1.0 - effXyRate) * m_offsetLast.x()
-                              + effXyRate * rawOff.x()));
-            newOff.setY(float((1.0 - effXyRate) * m_offsetLast.y()
-                              + effXyRate * rawOff.y()));
+            // §loco-glide: XY догоняет контактную оценку rawOff ВТОРЫМ порядком
+            //   (критически-демпфированный SmoothDamp, несёт скорость таза), а НЕ
+            //   мгновенным lerp 1-го порядка. lerp замирает на статичной цели (мах
+            //   ногой без переноса веса в фазе опоры) и затем «прыгает» при коммите
+            //   следующей стопы — отсюда дёрганье корня по сцене (в логе: заморозка
+            //   XY 0.75–1.5 с при махе ноги 266–357°/с, затем рывок 0.25–0.67 м за
+            //   0.25 с до ~2.7 м/с). 2-й порядок переносит скорость сквозь фазу маха →
+            //   корень СКОЛЬЗИТ, а не замирает-рывок. Сглаживание ВО ВРЕМЕНИ:
+            //   DC-усиление = 1 (output→rawOff в покое), поэтому суммарное перемещение
+            //   и точность сохраняются (verify loco_drive: cum/net=1.0, net_y=0,
+            //   maxStep на непрерывной ходьбе −58%, на stop-go пик 2.15→1.97 м/с).
+            //   Поворот таза (pelvisRotKill) по-прежнему душит XY (keep→1) — топтание/
+            //   вращение на месте НЕ едет; скорость скольжения при этом обнуляем.
+            //   smoothTime кадро-независим (в отличие от lerp-rate). (formules.txt §loco)
+            const double smoothT = std::max(1e-3, m_pelvisGlideTime);
+            const double omega   = 2.0 / smoothT;
+            const double xk      = omega * dt;
+            const double ex      = 1.0 / (1.0 + xk + 0.48*xk*xk + 0.235*xk*xk*xk);
+            auto smoothDamp = [&](double pos, double tgt, double& vel) -> double {
+                const double chg = pos - tgt;
+                const double tmp = (vel + omega * chg) * dt;
+                vel = (vel - omega * tmp) * ex;
+                return tgt + (chg + tmp) * ex;
+            };
+            const double keep = std::clamp(pelvisRotKill, 0.0, 1.0);   // 1 = поворот → заморозка
+            const double gx = smoothDamp(m_offsetLast.x(), double(rawOff.x()), m_glideVelX);
+            const double gy = smoothDamp(m_offsetLast.y(), double(rawOff.y()), m_glideVelY);
+            newOff.setX(float(gx * (1.0 - keep) + double(m_offsetLast.x()) * keep));
+            newOff.setY(float(gy * (1.0 - keep) + double(m_offsetLast.y()) * keep));
+            m_glideVelX *= (1.0 - keep);
+            m_glideVelY *= (1.0 - keep);
             newOff.setZ(float((1.0 - zRate) * m_offsetLast.z()
                               + zRate * rawOff.z()));
+            (void)effXyRate;
+        } else {
+            m_glideVelX = m_glideVelY = 0.0;   // нет опоры / в воздухе — гасим скольжение
         }
 
         {

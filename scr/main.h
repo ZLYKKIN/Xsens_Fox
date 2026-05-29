@@ -343,6 +343,14 @@ private:
 
         double    m_offsetRatePrimary = 0.40;
         double    m_offsetRateDouble  = 0.25;
+
+        // §loco-glide: XY таза догоняет контактную оценку 2-м порядком (критически-
+        //   демпфированный SmoothDamp) вместо мгновенного lerp — несёт скорость сквозь
+        //   фазу маха, чтобы корень скользил, а не замирал-рывок. smoothTime в секундах
+        //   (кадро-независим). Больше = глаже, но чуть больше отставание. Скорость
+        //   скольжения m_glideVelX/Y — состояние фильтра.
+        double    m_pelvisGlideTime   = 0.10;
+        double    m_glideVelX = 0.0, m_glideVelY = 0.0;
         double    m_zRatePelvisMoving = 0.40;
         double    m_zRatePelvisStill  = 0.06;
 
