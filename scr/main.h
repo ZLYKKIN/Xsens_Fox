@@ -87,9 +87,9 @@ extern const char* kSegmentNames[kXsensSegmentCount];
 
 struct WristAnatomicalCfg {
 
-    // §XIX/§5 кисть YXZ: предел сгибания запястья ±80° (1.3963 рад), локтевое/лучевое
-    //   отклонение ±30° (0.5236 рад) (formules.txt стр.645, 1530)
-    double maxFlexRad   = 1.3962634015954636;
+    // §XIX/§5 кисть YXZ: предел сгибания запястья ±90° (π/2), локтевое/лучевое
+    //   отклонение ±30° (0.5236 рад) — как в old_sclete (main.h:114, maxFlexRad=M_PI*0.5)
+    double maxFlexRad   = 1.5707963267948966;
     double maxLatDevRad = 0.5235987755982988;
     double twistWeight  = 1.0;
     bool   enabled      = true;

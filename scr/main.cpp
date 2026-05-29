@@ -1463,38 +1463,32 @@ void SkeletonXsens::buildLengths(const ActorConfig& actor)
 
     namespace fb = fox::body;
 
-    auto specLen = [](int seg) {
-        return double(fb::kSensorToBone[seg].L_bone.length());
-    };
-
+    // §ПОЛНАЯ ЗАМЕНА на СТАРУЮ модель костей (old_sclete/main.cpp:371-441):
+    //   кость = простая «палка» [L,0,0] с простыми скалярными длинами. Антропометрическая подгонка
+    //   и 3D-таблица kSensorToBone УБРАНЫ из рук/ног/спины (это была «битая архитектура»:
+    //   огромные плечи, руки/ноги не в свои стороны). ИСКЛЮЧЕНИЕ — стопа+носок (27-цепочка
+    //   {20,21,25,26}): оставляем текущую 3D-геометрию (носок/стопа «крутые»).
     const double h  = actor.heightCm     / 100.0;
     const double fl = actor.footLengthCm / 100.0;
     const double heightScale = (h > 1e-3) ? (h / fb::kRefHeightM) : 1.0;
-    const auto&  anthro = fb::anthroFor(actor.gender);
+    const double trunkScale  = h / 1.75;   // §old: спина и обрубки масштабируются по росту
 
-    const double refArmOneSide =
-        specLen(fb::kSEG_RShoulder) +
-        specLen(fb::kSEG_RShoulder + 1) +
-        specLen(fb::kSEG_RShoulder + 2) +
-        specLen(fb::kSEG_RShoulder + 3);
-    // §57 полуширина лопаток 0.08 м — опорный размах рук для антропометрической подгонки armSpan
-    const double refScapHalfY = 0.08;
-    const double refSpanM = 2.0 * refArmOneSide + 2.0 * refScapHalfY;
-    const double anthroArmSpanM = 2.0 * (anthro.upperArmRatio + anthro.forearmRatio + anthro.handRatio) * h;
-    const double targetArmSpanM = (actor.armSpanCm > 0.0)
-        ? std::max(fb::kAnthroFloors.armSpanMin, actor.armSpanCm / 100.0)
-        : anthroArmSpanM;
-    double armScale = (refSpanM > 1e-6) ? targetArmSpanM / refSpanM : heightScale;
+    // §old:391-404 — armScale/legScale из размаха рук / длины ног (ширина плеч/таза НЕ участвует).
+    double armScale = 1.0;
+    if (actor.armSpanCm > 0.0) {
+        const double bodyWidthM  = 0.30 * trunkScale;
+        const double armPerSideM = std::max(0.10, (actor.armSpanCm / 100.0 - bodyWidthM) * 0.5);
+        const double defArmM     = 0.44 * h;
+        armScale = (defArmM > 1e-6) ? (armPerSideM / defArmM) : 1.0;
+    }
+    double legScale = 1.0;
+    if (actor.legLengthCm > 0.0) {
+        const double legPerSideM = std::max(0.20, actor.legLengthCm / 100.0);
+        const double defLegM     = 0.491 * h;
+        legScale = (defLegM > 1e-6) ? (legPerSideM / defLegM) : 1.0;
+    }
 
-    const double refLegM = specLen(fb::kSEG_RUpperLeg)
-                         + specLen(fb::kSEG_RLowerLeg)
-                         + fb::ankleHeightM(fb::kRefHeightM);
-    const double anthroLegM = (anthro.thighRatio + anthro.shankRatio + anthro.ankleHeightRatio) * h;
-    const double targetLegM = (actor.legLengthCm > 0.0)
-        ? std::max(fb::kAnthroFloors.legLengthMin, actor.legLengthCm / 100.0)
-        : anthroLegM;
-    double legScale = (refLegM > 1e-6) ? targetLegM / refLegM : heightScale;
-
+    // §стопа/носок: длины — split по длине стопы (как в текущей версии), чтобы носок остался «крутым».
     double heelToBallM, ballToTipM;
     {
         const QVector3D footBoneVec = fb::kSensorToBone[fb::kSEG_RFoot].L_bone;
@@ -1512,114 +1506,52 @@ void SkeletonXsens::buildLengths(const ActorConfig& actor)
         }
     }
 
-    const double pelvisHalfM = (actor.hipWidthCm > 0.0)
-        ? std::max(fb::kAnthroFloors.hipHalfMin, actor.hipWidthCm / 200.0)
-        : 0.5 * anthro.hipWidthRatio * h;
-    const double scapHalfM = (actor.shoulderWidthCm > 0.0)
-        ? std::max(fb::kAnthroFloors.scapHalfMin, actor.shoulderWidthCm / 200.0)
-        : 0.5 * anthro.shoulderWidthRatio * h * (0.08 / (0.5 * 0.234));
-
-    double refTrunkM = 0.0;
-    for (int s = 0; s <= 5; ++s) refTrunkM += specLen(s);
-    const double targetTrunkM = (actor.trunkLengthCm > 0.0)
-        ? std::max(fb::kAnthroFloors.trunkLengthMin, actor.trunkLengthCm / 100.0)
-        : anthro.trunkRatio * h;
-    double trunkScale = (refTrunkM > 1e-6) ? targetTrunkM / refTrunkM : heightScale;
-
-    auto spineLen = [&](int s) { return float(specLen(s) * trunkScale); };
-    auto armLen   = [&](int s) { return float(specLen(s) * armScale);   };
-    auto legLen   = [&](int s) { return float(specLen(s) * legScale);   };
-
-    // §57/§XVIII анатомический инсет плеча внутрь от ширины плеч (0.10·trunkScale)
-    const double inShoulderOffsetM = 0.10 * trunkScale;
-
+    // §old:406-439 — скалярные длины в порядке 27-цепочки. Обрубок плеча 0.05·trunkScale (≈5–6 см) —
+    //   это и есть фикс «огромных плеч» (было ~15–22 см). Стопа/носок = heelToBall/ballToTip.
     const std::array<float, kXsensSegmentCountWithDummies> L = {
-
-        spineLen(0),
-        spineLen(1),
-        spineLen(2),
-        spineLen(3),
-        spineLen(4),
-        spineLen(5),
-        spineLen(6),
-
-        float(scapHalfM),
-        float(inShoulderOffsetM),
-        armLen(8),
-        armLen(9),
-        armLen(10),
-
-        float(scapHalfM),
-        float(inShoulderOffsetM),
-        armLen(12),
-        armLen(13),
-        armLen(14),
-
-        float(pelvisHalfM),
-        legLen(15),
-        legLen(16),
-        float(heelToBallM),
-        float(ballToTipM),
-
-        float(pelvisHalfM),
-        legLen(19),
-        legLen(20),
-        float(heelToBallM),
-        float(ballToTipM),
+        float(0.10 * trunkScale), float(0.10 * trunkScale), float(0.10 * trunkScale),
+        float(0.15 * trunkScale), float(0.10 * trunkScale), float(0.05 * trunkScale),
+        float(0.130 * h),
+        float(0.05 * trunkScale), float(0.10 * trunkScale),
+        float(0.186 * h * armScale), float(0.146 * h * armScale), float(0.108 * h * armScale),
+        float(0.05 * trunkScale), float(0.10 * trunkScale),
+        float(0.186 * h * armScale), float(0.146 * h * armScale), float(0.108 * h * armScale),
+        float(0.10 * trunkScale), float(0.245 * h * legScale), float(0.246 * h * legScale),
+        float(heelToBallM), float(ballToTipM),
+        float(0.10 * trunkScale), float(0.245 * h * legScale), float(0.246 * h * legScale),
+        float(heelToBallM), float(ballToTipM),
     };
     m_len = L;
 
-    auto localFor = [&](int chainIdx, int origSeg, double scale) -> QVector3D {
+    // §m_localOffset: «палка» [L,0,0] для ВСЕХ сегментов (= старая FK), КРОМЕ стопы/носка {20,21,25,26},
+    //   где оставляем текущую 3D-геометрию (localFor: L_bone·scale, повёрнутый defAng⁻¹).
+    auto localFor = [&](int origSeg, double scale) -> QVector3D {
         const QVector3D Lspec = fb::kSensorToBone[origSeg].L_bone * float(scale);
         return vec_rotate(Lspec, m_defAng[origSeg].conj());
     };
-
     const double specFootX_m = std::abs(double(fb::kSensorToBone[fb::kSEG_RFoot].L_bone.x()));
     const double specToeX_m  = std::abs(double(fb::kSensorToBone[18].L_bone.x()));
     const double footScaleR  = (specFootX_m > 1e-6) ? heelToBallM / specFootX_m : heightScale;
     const double toeScaleR   = (specToeX_m  > 1e-6) ? ballToTipM  / specToeX_m  : heightScale;
 
-    m_localOffset = {{
+    for (int s = 0; s < kXsensSegmentCountWithDummies; ++s)
+        m_localOffset[s] = QVector3D(m_len[s], 0.0f, 0.0f);
+    m_localOffset[20] = localFor(17, footScaleR);   // RFoot (heel→ball) — 3D «крутая» стопа
+    m_localOffset[21] = localFor(18, toeScaleR);    // RToe  (ball→tip)  — 3D «крутой» носок
+    m_localOffset[25] = localFor(21, footScaleR);   // LFoot
+    m_localOffset[26] = localFor(22, toeScaleR);    // LToe
 
-        localFor(0, 0, trunkScale),  localFor(1, 1, trunkScale),
-        localFor(2, 2, trunkScale),  localFor(3, 3, trunkScale),
-        localFor(4, 4, trunkScale),  localFor(5, 5, trunkScale),
-        localFor(6, 6, trunkScale),
-
-        QVector3D(float(scapHalfM), 0.0f, 0.0f),
-
-        localFor(8,  7,  armScale),  localFor(9,  8,  armScale),
-        localFor(10, 9,  armScale),  localFor(11, 10, armScale),
-
-        QVector3D(float(scapHalfM), 0.0f, 0.0f),
-
-        localFor(13, 11, armScale),  localFor(14, 12, armScale),
-        localFor(15, 13, armScale),  localFor(16, 14, armScale),
-
-        QVector3D(float(pelvisHalfM), 0.0f, 0.0f),
-
-        localFor(18, 15, legScale),  localFor(19, 16, legScale),
-        localFor(20, 17, footScaleR), localFor(21, 18, toeScaleR),
-
-        QVector3D(float(pelvisHalfM), 0.0f, 0.0f),
-
-        localFor(23, 19, legScale),  localFor(24, 20, legScale),
-        localFor(25, 21, footScaleR), localFor(26, 22, toeScaleR),
-    }};
-
-    auto overrideBone = [&](int arrayIdx, int origSeg, double cm) {
+    // §per-actor override длин рук/ног — пишем СКАЛЯРНУЮ «палку» [L,0,0] (как старая модель).
+    auto overrideBone = [&](int arrayIdx, double cm) {
         if (cm <= 0.0) return;
-        const double spec = specLen(origSeg);
-        if (spec < 1e-9) return;
-        const double sc = (cm / 100.0) / spec;
         m_len[arrayIdx] = float(cm / 100.0);
-        m_localOffset[arrayIdx] = localFor(arrayIdx, origSeg, sc);
+        m_localOffset[arrayIdx] = QVector3D(m_len[arrayIdx], 0.0f, 0.0f);
     };
-    overrideBone(9,  8,  actor.upperArmCm); overrideBone(14, 12, actor.upperArmCm);
-    overrideBone(10, 9,  actor.forearmCm);  overrideBone(15, 13, actor.forearmCm);
-    overrideBone(11, 10, actor.handCm);     overrideBone(16, 14, actor.handCm);
-    overrideBone(18, 15, actor.thighCm);    overrideBone(23, 19, actor.thighCm);
-    overrideBone(19, 16, actor.shankCm);    overrideBone(24, 20, actor.shankCm);
+    overrideBone(9,  actor.upperArmCm); overrideBone(14, actor.upperArmCm);
+    overrideBone(10, actor.forearmCm);  overrideBone(15, actor.forearmCm);
+    overrideBone(11, actor.handCm);     overrideBone(16, actor.handCm);
+    overrideBone(18, actor.thighCm);    overrideBone(23, actor.thighCm);
+    overrideBone(19, actor.shankCm);    overrideBone(24, actor.shankCm);
 
     if (fox::pose_solver::g_testFlag().load(std::memory_order_relaxed) &&
         fox::pose_solver::g_glovesFlag().load(std::memory_order_relaxed)) {
@@ -1719,44 +1651,19 @@ SkeletonXsens::computeKeypoints(const std::array<Quat, kXsensSegmentCount>& raw,
         oriented[i] = quat_mult(safeRaw, m_defAng[i]);
     }
 
+    // §ПОЛНАЯ ЗАМЕНА на СТАРЫЙ FK: PoseRefiner УБРАН (old_sclete computeKeypoints — чистый проход
+    //   без refiner). Его единственная правка живой позы (slerp спины) уже делается в render-tick
+    //   (q[L5..Neck], main.cpp ~11073) и приходит сюда в qOut → удаление НЕ меняет позу. contacts/
+    //   CoM/GRF refiner'а нигде не нужны (локомоция считает контакты сама — LocomotionSolver).
+    //   Диагностику [fk] держим на константах, чтобы печать оставалась осмысленной.
     {
-
-        const std::array<Quat, kXsensSegmentCount> sensorTargets = oriented;
-
-        pose_solver::PoseRefiner::FrameContext ctx{};
-        ctx.sensorMeas    = &sensorTargets;
-        ctx.sensorPresent = &fox::body::kSensorPresent;
-        ctx.segCenter     = m_haveLastSegCenter ? &m_lastSegCenter : nullptr;
-        ctx.accLPBody     = m_accLPBodyValid    ? &m_accLPBodyHint : nullptr;
-        ctx.floorLevelZ   = 0.0;
-        ctx.dt            = fox::body::constants::kSampleDtSec;
-
-        pose_solver::ContactDetector::Result contacts;
-        std::lock_guard<std::mutex> lk(pose_solver::g_refinerMtx());
-        const auto dg = pose_solver::g_refiner().refine(oriented, ctx, &contacts);
-
-        g_renderDiag.spineW_L5  = dg.spineFracL5;
-        g_renderDiag.spineW_L3  = dg.spineFracL3;
-        g_renderDiag.spineW_T12 = dg.spineFracT12;
-        {
-            const double cNeck = 0.5 * (fox::body::kCSpine[5] +
-                                        fox::body::kCSpine[6]);
-            const double cHead = 0.5 * (fox::body::kCSpine[7] +
-                                        fox::body::kCSpine[8]);
-            const double sumNH = cNeck + cHead;
-            g_renderDiag.neckW = (sumNH > 1e-9) ? (cNeck / sumNH) : 0.5;
-        }
-        g_renderDiag.scapUpZR   = std::sin(dg.scapThetaRDeg * M_PI / 180.0);
-        g_renderDiag.scapUpZL   = std::sin(dg.scapThetaLDeg * M_PI / 180.0);
-        g_renderDiag.scapActiveR= dg.scapThetaRDeg > 0.0;
-        g_renderDiag.scapActiveL= dg.scapThetaLDeg > 0.0;
-        g_renderDiag.scapAngR   = dg.scapCEffR;
-        g_renderDiag.scapAngL   = dg.scapCEffL;
-
-        pose_solver::dumpFrameDiag(
-            pose_solver::g_testFlag().load(),
-            pose_solver::g_glovesFlag().load(),
-            dg, contacts, pose_solver::g_refiner().skin());
+        g_renderDiag.spineW_L5   = 0.124;
+        g_renderDiag.spineW_L3   = 0.50;
+        g_renderDiag.spineW_T12  = 0.876;
+        g_renderDiag.neckW       = 0.5;
+        g_renderDiag.scapUpZR    = g_renderDiag.scapUpZL    = 0.0;
+        g_renderDiag.scapActiveR = g_renderDiag.scapActiveL = false;
+        g_renderDiag.scapAngR    = g_renderDiag.scapAngL    = 0.0;
     }
 
     // §shoulder-cone: мягкий анатомический клапан плеча (как СТАРАЯ рабочая версия
@@ -1812,36 +1719,10 @@ SkeletonXsens::computeKeypoints(const std::array<Quat, kXsensSegmentCount>& raw,
     constrainShoulderCone(SEG_RUpperArm, /*isRight=*/true);
     constrainShoulderCone(SEG_LUpperArm, /*isRight=*/false);
 
-    // §wrist-clamp: ограничиваем СГИБ кисти к предплечью анатомическим пределом (≤90°),
-    //   КРЕН (twist вокруг оси кости) оставляем свободным — как в старой рабочей версии
-    //   (constrain_wrist_twist: maxFlex=90°, twistWeight=1.0). Текущая версия убрала жёсткий
-    //   клапан (оставив только мягкий анти-провис), поэтому при сбое/рассинхроне данных
-    //   перчатки кисть улетала на 120–148° от предплечья — «сломанные запястья» (проверено
-    //   на логе: r_hand на 100–148° от r_forearm в кадрах t22/30/33). Клапан гнёт ТОЛЬКО
-    //   направление кости (swing back к предплечью), крен кисти сохраняется.
-    auto clampWristBend = [&](int hand, int forearm, double maxBendRad) {
-        const QVector3D loH = vec_rotate(fox::body::kSensorToBone[hand].L_bone,    m_defAng[hand].conj());
-        const QVector3D loF = vec_rotate(fox::body::kSensorToBone[forearm].L_bone, m_defAng[forearm].conj());
-        QVector3D hdir = vec_rotate(loH, oriented[hand]);
-        QVector3D fdir = vec_rotate(loF, oriented[forearm]);
-        const float hn = hdir.length(), fn = fdir.length();
-        if (hn < 1e-6f || fn < 1e-6f) return;
-        hdir = hdir / hn; fdir = fdir / fn;
-        double d = double(QVector3D::dotProduct(hdir, fdir));
-        d = std::max(-1.0, std::min(1.0, d));
-        const double a = std::acos(d);
-        if (a <= maxBendRad) return;                       // в пределах нормы — не трогаем
-        QVector3D axis = QVector3D::crossProduct(hdir, fdir);
-        const float an = axis.length();
-        if (an < 1e-6f) return;
-        axis = axis / an;
-        const double corr = a - maxBendRad;                // довернуть кисть назад к предплечью
-        const double h2 = corr * 0.5, s = std::sin(h2);
-        const Quat qCorr(std::cos(h2), axis.x()*s, axis.y()*s, axis.z()*s);
-        oriented[hand] = quat_mult(qCorr, oriented[hand]).normalized();
-    };
-    clampWristBend(fox::body::kSEG_RHand, fox::body::kSEG_RForearm, M_PI * 0.5);
-    clampWristBend(fox::body::kSEG_LHand, fox::body::kSEG_LForearm, M_PI * 0.5);
+    // §wrist: жёсткий клапан clampWristBend УБРАН из FK (в старой версии его в FK не было).
+    //   Ограничение запястья вынесено в MocapViewport::updatePose, как в old_sclete
+    //   (constrain_wrist_twist, под флагом --wrist-constraint). Естественную кисть в дефолте
+    //   даёт сцепление coupleWristForearm в render-tick (Шаг 5).
 
     const auto global = addDummySegments(oriented);
 
@@ -3336,6 +3217,55 @@ static Quat axisAngleQuat(const QVector3D& axis, double rad)
     const double s = std::sin(h);
     return Quat(std::cos(h),
                 axis.x() * s, axis.y() * s, axis.z() * s).normalized();
+}
+
+// §wrist: ПОРТ ограничения запястья из old_sclete/main.cpp:864-907 (constrain_wrist_twist).
+//   Раскладывает ориентацию кисти относительно предплечья на swing(сгиб/отклонение) + twist(крен),
+//   клампит swing к ±maxFlex/±maxLatDev, оставляет twist (с весом twistWeight). Возвращает мировую
+//   ориентацию кисти. Применяется в MocapViewport::updatePose (как в old:7134-7143).
+static Quat constrain_wrist_twist(const Quat& q_hand_world,
+                                  const Quat& q_forearm_world,
+                                  double maxFlexRad, double maxLatDevRad,
+                                  double twistWeight, bool isRight)
+{
+    (void)isRight;
+    const Quat qFAinv = q_forearm_world.inv();
+    Quat qLocal = quat_mult(qFAinv, q_hand_world).normalized();
+    if (qLocal.w < 0) {
+        qLocal.w = -qLocal.w; qLocal.x = -qLocal.x;
+        qLocal.y = -qLocal.y; qLocal.z = -qLocal.z;
+    }
+
+    Quat swing, twist;
+    swingTwistDecompose(qLocal, QVector3D(1.0f, 0.0f, 0.0f), swing, twist);
+
+    double twistHalf = std::atan2(twist.x, twist.w);
+    double twistAng = 2.0 * twistHalf * twistWeight;
+    Quat twistOut(std::cos(twistAng * 0.5),
+                  std::sin(twistAng * 0.5), 0.0, 0.0);
+
+    if (swing.w < 0) {
+        swing.w = -swing.w; swing.x = -swing.x;
+        swing.y = -swing.y; swing.z = -swing.z;
+    }
+    const double sxy = std::sqrt(swing.y * swing.y + swing.z * swing.z);
+    const double swingAng = 2.0 * std::atan2(sxy, swing.w);
+    const double ay = (sxy > 1e-9) ? swing.y / sxy : 0.0;
+    const double az = (sxy > 1e-9) ? swing.z / sxy : 0.0;
+    const double flexAng = swingAng * ay;
+    const double devAng  = swingAng * az;
+    const double flexC = std::clamp(flexAng, -maxFlexRad, maxFlexRad);
+    const double devC  = std::clamp(devAng,  -maxLatDevRad, maxLatDevRad);
+    const double newAng = std::sqrt(flexC * flexC + devC * devC);
+    Quat swingOut(1.0, 0.0, 0.0, 0.0);
+    if (newAng > 1e-9) {
+        const double half = newAng * 0.5;
+        const double s = std::sin(half) / newAng;
+        swingOut = Quat(std::cos(half), 0.0, flexC * s, devC * s);
+    }
+
+    const Quat qLocalOut = quat_mult(swingOut, twistOut).normalized();
+    return quat_mult(q_forearm_world, qLocalOut).normalized();
 }
 
 struct FingerDiagHand {
@@ -8239,6 +8169,21 @@ void MocapViewport::updatePose(const std::array<Quat, kXsensSegmentCount>& orien
                     }
                 }
 
+                // §wrist: ограничение запястья как в old_sclete (main.cpp:7134-7143). Под флагом
+                //   m_wristCfg*.enabled (по умолчанию ON — как old). Клампит сгиб/отклонение кисти
+                //   к предплечью, крен (twist) оставляет свободным. Пишем в filtered[i] → уходит
+                //   и во вьюпорт, и в стрим (общий qOut).
+                const auto& wcfg = (i == SEG_RHand) ? m_wristCfgR : m_wristCfgL;
+                if (wcfg.enabled && !m_locked[i]) {
+                    const Quat hWorldFiltered = quat_mult(filtered[i],        dA_h).normalized();
+                    const Quat fWorldFiltered = quat_mult(filtered[iForearm], dA_f).normalized();
+                    const Quat hConstrainedWorld = constrain_wrist_twist(
+                            hWorldFiltered, fWorldFiltered,
+                            wcfg.maxFlexRad, wcfg.maxLatDevRad, wcfg.twistWeight,
+                            i == SEG_RHand);
+                    filtered[i] = quat_mult(hConstrainedWorld, dA_h.inv()).normalized();
+                }
+
             }
 
             if (i == SEG_RFoot || i == SEG_LFoot) {
@@ -11074,6 +11019,63 @@ void MainWindow::onRenderTick()
     q[SEG_L3]   = slerp_quat(q[SEG_Pelvis], q[SEG_T8],   0.50);
     q[SEG_T12]  = slerp_quat(q[SEG_Pelvis], q[SEG_T8],   0.876);
     q[SEG_Neck] = slerp_quat(q[SEG_T8],     q[SEG_Head], 0.50);
+
+    // §ВОЗВРАТ сцеплений плеча/кисти из old_sclete/main.cpp:9179-9233 (в scr их НЕ было — из-за
+    //   этого плечи/кисти вели себя иначе). Работают на q[] ДО updatePose → идут одинаково во
+    //   вьюпорт и в стрим (общий qOut). q[toe]=identity НЕ трогаем (стопа/носок «крутые»).
+    if (m_skel) {
+        const Quat dA_pel = m_skel->defAngFor(SEG_Pelvis);
+        const Quat qPelvisWorld = quat_mult(q[SEG_Pelvis], dA_pel).normalized();
+        const Quat qPelvisWorldInv = qPelvisWorld.inv();
+        // Плечо «подтягивается» (шраг ≤0.30 рад) при подъёме руки выше порога; вращение — вокруг
+        //   forward-оси ТЕЛА (через таз-мир), чтобы при повороте корпуса не было асимметрии.
+        auto coupleScapHumeral = [&](int iSh, int iUA, bool isRight) {
+            const Quat dA_sh = m_skel->defAngFor(iSh);
+            const Quat dA_ua = m_skel->defAngFor(iUA);
+            const Quat shWorld = quat_mult(q[iSh], dA_sh).normalized();
+            const Quat uaWorld = quat_mult(q[iUA], dA_ua).normalized();
+            const QVector3D armDir = vec_rotate(QVector3D(1.0f, 0.0f, 0.0f), uaWorld);
+            const double upZ = std::clamp(double(armDir.z()), -1.0, 1.0);
+            const double activate = 0.30;
+            if (upZ < activate) return;
+            const double normalised = (upZ - activate) / (1.0 - activate);
+            const double scapAng = normalised * 0.30;
+            const double signedAng = isRight ? -scapAng : scapAng;
+            const Quat scapBoostBody = axisAngleQuat(QVector3D(1.0, 0.0, 0.0), signedAng);
+            const Quat scapBoostWorld = quat_mult(quat_mult(qPelvisWorld, scapBoostBody),
+                                                  qPelvisWorldInv).normalized();
+            const Quat shWorldNew = quat_mult(scapBoostWorld, shWorld).normalized();
+            q[iSh] = quat_mult(shWorldNew, dA_sh.inv()).normalized();
+        };
+        coupleScapHumeral(SEG_RShoulder, SEG_RUpperArm, true);
+        coupleScapHumeral(SEG_LShoulder, SEG_LUpperArm, false);
+
+        // 20% скрутки кисти передаётся в предплечье — естественный крен запястья «от руки».
+        auto coupleWristForearm = [&](int iH, int iFA) {
+            const Quat dA_h = m_skel->defAngFor(iH);
+            const Quat dA_f = m_skel->defAngFor(iFA);
+            const Quat hWorld = quat_mult(q[iH],  dA_h).normalized();
+            const Quat fWorld = quat_mult(q[iFA], dA_f).normalized();
+            const Quat localHand = quat_mult(fWorld.inv(), hWorld).normalized();
+            Quat hSwing, hTwist;
+            swingTwistDecompose(localHand, QVector3D(1.0f, 0.0f, 0.0f), hSwing, hTwist);
+            (void)hSwing;
+            const double tx = std::clamp(double(hTwist.x), -1.0, 1.0);
+            const double tw = std::clamp(double(hTwist.w),  0.0, 1.0);
+            const double twistHalf = std::atan2(tx, tw);
+            const double couplingFraction = 0.20;
+            const double faAdditionalTwist = twistHalf * 2.0 * couplingFraction;
+            const Quat faTwistAdd = axisAngleQuat(QVector3D(1.0, 0.0, 0.0), faAdditionalTwist);
+            const Quat fWorldNew = quat_mult(fWorld, faTwistAdd).normalized();
+            q[iFA] = quat_mult(fWorldNew, dA_f.inv()).normalized();
+            const Quat faTwistInv = faTwistAdd.inv();
+            const Quat localHandRebal = quat_mult(faTwistInv, localHand).normalized();
+            const Quat hWorldNew = quat_mult(fWorldNew, localHandRebal).normalized();
+            q[iH] = quat_mult(hWorldNew, dA_h.inv()).normalized();
+        };
+        coupleWristForearm(SEG_RHand, SEG_RForearm);
+        coupleWristForearm(SEG_LHand, SEG_LForearm);
+    }
 
     s_lastOut[SEG_L5]   = q[SEG_L5];
     s_lastOut[SEG_L3]   = q[SEG_L3];
