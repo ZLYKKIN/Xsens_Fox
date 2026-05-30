@@ -2971,6 +2971,9 @@ static void unloadApi(Api& api)
 
 struct MocapReceiver::Impl {
     bool             test;
+    bool             recordRaw = false;   // -recordrawsensor: write rawsensorlog.bin while capturing
+    bool             readRaw   = false;   // -readrawsensor: replay rawsensorlog.bin (no hardware)
+    FILE*            rawWrite  = nullptr;  // open record handle (receiver thread only)
     std::atomic<bool> stop{false};
     mutable QMutex   lock;
     SuitPose         frame;
@@ -3076,9 +3079,11 @@ struct MocapReceiver::Impl {
     }
 };
 
-MocapReceiver::MocapReceiver(bool testMode, QObject* parent)
+MocapReceiver::MocapReceiver(bool testMode, bool recordRaw, bool readRaw, QObject* parent)
     : QThread(parent), m_impl(std::make_unique<Impl>(testMode))
 {
+    m_impl->recordRaw = recordRaw;
+    m_impl->readRaw   = readRaw;
 }
 
 MocapReceiver::~MocapReceiver()
@@ -3698,6 +3703,15 @@ bool MocapReceiver::connectGloves()
 {
     auto& I = *m_impl;
 
+    if (I.readRaw) {
+        // §replay: finger data is fed from rawsensorlog (see RawReplaySource), so do NOT
+        //   touch the real Manus SDK. Report faux-ready so the session wizard proceeds.
+        I.manusDllLoaded  = true;
+        I.manusCoreReady  = true;
+        I.manusGloveCount = 2;
+        return true;
+    }
+
     if (I.test) {
         g_ergo.rawDump.store(true);
         g_ergo.rawTicks.store(0);
@@ -4228,6 +4242,279 @@ bool MocapReceiver::hasGloves() const
     return m_impl->frame.hasGloves;
 }
 
+// ============================================================================
+//  §raw-rec/replay — сырой сенсорный лог (тестовая среда без железа).
+//    -recordrawsensor : пишет rawsensorlog.bin — покадровый дамп РОВНО того, что
+//                       отдаёт XDA по каждому из 17 сенсоров (+ перчатки), без
+//                       единой нашей формулы.
+//    -readrawsensor   : подменяет XDA «фейковым драйвером» (mock Api ниже) и
+//                       проигрывает запись в реальном времени. Приёмный цикл и вся
+//                       математика (FusionAhrs -> калибровка -> скелет) исполняются
+//                       тем же кодом, поэтому реплей улучшается вместе с моделью.
+//  Запись/чтение на одной машине (Windows, один порядок байт) — формат бинарный.
+// ============================================================================
+namespace xda {
+
+struct RawSensorSample {
+    int       seg = -1;
+    bool      haveQuat=false, haveAcc=false, haveGyr=false, haveMag=false,
+              haveVelInc=false, haveFreeAcc=false, haveDq=false, haveStf=false;
+    Quat      qo, dq;
+    QVector3D acc, gyr, mag, velInc, freeAcc;
+    quint32   stf = 0;
+    quint32   sampleCounter = 0;
+    float     tempC = 0.0f;
+};
+
+struct RawFrameEnd {
+    double recvTime = 0.0;
+    double nativeHz = 0.0;
+    bool   hasGloves = false;
+    std::array<Quat,      kFingerSegmentsHand> leftGloveQ{}, rightGloveQ{};
+    std::array<QVector3D, kFingerSegmentsHand> leftGloveP{}, rightGloveP{};
+};
+
+static const char kRawMagic[4] = {'F','X','R','S'};
+static const quint32 kRawVersion = 1;
+enum : quint8 { kTagSample = 0x01, kTagFrameEnd = 0x02 };
+
+template<class T> static inline void rawPut(FILE* f, T v) { std::fwrite(&v, sizeof(T), 1, f); }
+template<class T> static inline bool rawGet(FILE* f, T& v) { return std::fread(&v, sizeof(T), 1, f) == 1; }
+static inline void rawPutVec(FILE* f, const QVector3D& v)
+{ float a[3] = { v.x(), v.y(), v.z() }; std::fwrite(a, sizeof(float), 3, f); }
+static inline bool rawGetVec(FILE* f, QVector3D& v)
+{ float a[3]{}; if (std::fread(a, sizeof(float), 3, f) != 3) return false; v = QVector3D(a[0], a[1], a[2]); return true; }
+static inline void rawPutQuat(FILE* f, const Quat& q)
+{ float a[4] = { float(q.w), float(q.x), float(q.y), float(q.z) }; std::fwrite(a, sizeof(float), 4, f); }
+static inline bool rawGetQuat(FILE* f, Quat& q)
+{ float a[4]{}; if (std::fread(a, sizeof(float), 4, f) != 4) return false; q = Quat(a[0], a[1], a[2], a[3]); return true; }
+
+static void rawWriteHeader(FILE* f, double hz, int segCount, bool gloves)
+{
+    std::fwrite(kRawMagic, 1, 4, f);
+    rawPut<quint32>(f, kRawVersion);
+    rawPut<double>(f, hz);
+    rawPut<quint32>(f, quint32(segCount));
+    rawPut<quint8>(f, quint8(gloves ? 1 : 0));
+}
+
+static void rawWriteSample(FILE* f, const RawSensorSample& s)
+{
+    rawPut<quint8>(f, kTagSample);
+    rawPut<qint16>(f, qint16(s.seg));
+    const quint8 flags = quint8((s.haveQuat?1:0)   | (s.haveAcc?2:0)    | (s.haveGyr?4:0)
+                              | (s.haveMag?8:0)     | (s.haveVelInc?16:0)| (s.haveFreeAcc?32:0)
+                              | (s.haveDq?64:0)     | (s.haveStf?128:0));
+    rawPut<quint8>(f, flags);
+    rawPutQuat(f, s.qo);   rawPutVec(f, s.acc);  rawPutVec(f, s.gyr);  rawPutVec(f, s.mag);
+    rawPutVec(f, s.velInc); rawPutVec(f, s.freeAcc); rawPutQuat(f, s.dq);
+    rawPut<quint32>(f, s.stf);  rawPut<float>(f, s.tempC);  rawPut<quint32>(f, s.sampleCounter);
+}
+
+static void rawWriteFrameEnd(FILE* f, const RawFrameEnd& e)
+{
+    rawPut<quint8>(f, kTagFrameEnd);
+    rawPut<double>(f, e.recvTime);
+    rawPut<double>(f, e.nativeHz);
+    rawPut<quint8>(f, quint8(e.hasGloves ? 1 : 0));
+    if (e.hasGloves) {
+        for (const auto& q : e.leftGloveQ)  rawPutQuat(f, q);
+        for (const auto& p : e.leftGloveP)  rawPutVec(f, p);
+        for (const auto& q : e.rightGloveQ) rawPutQuat(f, q);
+        for (const auto& p : e.rightGloveP) rawPutVec(f, p);
+    }
+}
+
+static std::string rawLogPathStd()
+{
+    return (QCoreApplication::applicationDirPath() + "/rawsensorlog.bin").toStdString();
+}
+
+// State machine that feeds the mock Api below from rawsensorlog.bin.
+struct RawReplaySource {
+    FILE*  f = nullptr;
+    double suitHz = 240.0;
+    int    segCount = kXsensSegmentCount;
+    bool   glovesEnabled = false;
+
+    std::array<RawSensorSample, kXsensSegmentCount> cur{};
+    std::array<bool, kXsensSegmentCount> present{};
+    int  presentCount = 0;
+    int  firstSeg = 0;        // trackerSegments.front(): drives one frame advance per receive pass
+    bool haveFrame = false;
+    bool eof = false;
+    RawFrameEnd fe{};
+
+    double firstRecvTime = -1.0, wallStart = 0.0;
+    std::atomic<bool>* stopFlag = nullptr;
+
+    bool readHeader()
+    {
+        char magic[4]{};
+        if (std::fread(magic, 1, 4, f) != 4) return false;
+        if (magic[0]!='F' || magic[1]!='X' || magic[2]!='R' || magic[3]!='S') return false;
+        quint32 ver = 0; if (!rawGet(f, ver) || ver != kRawVersion) return false;
+        if (!rawGet(f, suitHz)) return false;
+        quint32 sc = 0; if (!rawGet(f, sc)) return false; segCount = int(sc);
+        quint8 g = 0; if (!rawGet(f, g)) return false; glovesEnabled = (g != 0);
+        if (!(suitHz > 1.0 && suitHz <= 2000.0)) suitHz = 240.0;
+        return true;
+    }
+
+    bool readOneFrame()
+    {
+        present.fill(false); presentCount = 0;
+        for (;;) {
+            quint8 tag = 0;
+            if (!rawGet(f, tag)) { eof = true; return false; }
+            if (tag == kTagSample) {
+                RawSensorSample s;
+                qint16 seg = 0; if (!rawGet(f, seg)) { eof = true; return false; } s.seg = seg;
+                quint8 flags = 0; rawGet(f, flags);
+                rawGetQuat(f, s.qo);  rawGetVec(f, s.acc);  rawGetVec(f, s.gyr);  rawGetVec(f, s.mag);
+                rawGetVec(f, s.velInc); rawGetVec(f, s.freeAcc); rawGetQuat(f, s.dq);
+                rawGet(f, s.stf); rawGet(f, s.tempC); rawGet(f, s.sampleCounter);
+                s.haveQuat=(flags&1)!=0;   s.haveAcc=(flags&2)!=0;    s.haveGyr=(flags&4)!=0;   s.haveMag=(flags&8)!=0;
+                s.haveVelInc=(flags&16)!=0; s.haveFreeAcc=(flags&32)!=0; s.haveDq=(flags&64)!=0; s.haveStf=(flags&128)!=0;
+                if (s.seg >= 0 && s.seg < kXsensSegmentCount && !present[s.seg]) {
+                    cur[s.seg] = s; present[s.seg] = true; ++presentCount;
+                }
+            } else if (tag == kTagFrameEnd) {
+                fe = RawFrameEnd{};
+                rawGet(f, fe.recvTime); rawGet(f, fe.nativeHz);
+                quint8 hg = 0; rawGet(f, hg); fe.hasGloves = (hg != 0);
+                if (fe.hasGloves) {
+                    for (auto& q : fe.leftGloveQ)  rawGetQuat(f, q);
+                    for (auto& p : fe.leftGloveP)  rawGetVec(f, p);
+                    for (auto& q : fe.rightGloveQ) rawGetQuat(f, q);
+                    for (auto& p : fe.rightGloveP) rawGetVec(f, p);
+                }
+                return true;
+            } else {
+                eof = true; return false;   // unknown tag -> corrupt / truncated
+            }
+        }
+    }
+
+    void paceTo(double recvTime)
+    {
+        if (firstRecvTime < 0.0) { firstRecvTime = recvTime; wallStart = monotonicSec(); return; }
+        const double target = wallStart + (recvTime - firstRecvTime);
+        double s = target - monotonicSec();
+        if (s > 5.0) s = 5.0;   // safety clamp against a bad timestamp gap
+        while (s > 0.0 && (!stopFlag || !stopFlag->load())) {
+            const double chunk = (s < 0.05) ? s : 0.05;
+            QThread::msleep(int(chunk * 1000.0 + 0.5));
+            s = target - monotonicSec();
+        }
+    }
+
+    void pushGlovesToErgo()
+    {
+        QMutexLocker lk(&g_ergo.lock);
+        if (fe.hasGloves) {
+            g_ergo.leftQ  = fe.leftGloveQ;  g_ergo.leftP  = fe.leftGloveP;
+            g_ergo.rightQ = fe.rightGloveQ; g_ergo.rightP = fe.rightGloveP;
+            g_ergo.haveLeft.store(true);    g_ergo.haveRight.store(true);
+            g_ergo.lastTimeMs.store(GetTickCount64());
+        } else {
+            g_ergo.haveLeft.store(false);   g_ergo.haveRight.store(false);
+        }
+    }
+
+    // Advance to the next recorded frame (one per receive pass; paces to real time).
+    bool advanceFrame()
+    {
+        if (eof) { haveFrame = false; return false; }
+        for (;;) {
+            if (!readOneFrame()) { haveFrame = false; return false; }   // sets eof
+            if (presentCount > 0) break;                                 // skip empty frames
+        }
+        paceTo(fe.recvTime);
+        pushGlovesToErgo();
+        haveFrame = true;
+        return true;
+    }
+};
+
+static RawReplaySource* g_replay = nullptr;
+
+static inline RawSensorSample* rawSampleOf(const XsDataPacketBlob* p)
+{ return p ? reinterpret_cast<RawSensorSample*>(p->d) : nullptr; }
+static inline int rawSegOf(void* dev) { return int(reinterpret_cast<intptr_t>(dev)) - 1; }
+
+// ---- mock XDA functions: signatures must match the Fn* typedefs in struct Api ----
+static int mkCount(void* dev)
+{
+    if (!g_replay) return 0;
+    const int seg = rawSegOf(dev);
+    if (seg < 0 || seg >= kXsensSegmentCount) return 0;
+    if (seg == g_replay->firstSeg) g_replay->advanceFrame();  // one new frame at the start of each pass
+    return (g_replay->haveFrame && g_replay->present[seg]) ? 1 : 0;
+}
+static XsDataPacketBlob* mkTake(void* dev, XsDataPacketBlob* store)
+{
+    const int seg = rawSegOf(dev);
+    if (store && g_replay && seg >= 0 && seg < kXsensSegmentCount && g_replay->haveFrame)
+        store->d = &g_replay->cur[seg];
+    else if (store)
+        store->d = nullptr;
+    return store;
+}
+static void mkConstruct(XsDataPacketBlob* p) { if (p) p->d = nullptr; }
+static void mkDestruct (XsDataPacketBlob* p) { if (p) p->d = nullptr; }
+static int  mkContainsOri(const XsDataPacketBlob* p) { auto* s = rawSampleOf(p); return (s && s->haveQuat) ? 1 : 0; }
+static XsQuaternionBlob* mkOriQuat(const XsDataPacketBlob* p, XsQuaternionBlob* q, int)
+{ auto* s = rawSampleOf(p); if (s && q) { q->w=s->qo.w; q->x=s->qo.x; q->y=s->qo.y; q->z=s->qo.z; } return q; }
+static int  mkContainsOriInc(const XsDataPacketBlob* p) { auto* s = rawSampleOf(p); return (s && s->haveDq) ? 1 : 0; }
+static XsQuaternionBlob* mkOriInc(const XsDataPacketBlob* p, XsQuaternionBlob* q)
+{ auto* s = rawSampleOf(p); if (s && q) { q->w=s->dq.w; q->x=s->dq.x; q->y=s->dq.y; q->z=s->dq.z; } return q; }
+static int     mkContainsPC(const XsDataPacketBlob* p) { return rawSampleOf(p) ? 1 : 0; }
+static quint16 mkPC(const XsDataPacketBlob* p) { auto* s = rawSampleOf(p); return s ? quint16(s->sampleCounter) : 0; }
+static int     mkContainsSTF(const XsDataPacketBlob* p) { auto* s = rawSampleOf(p); return (s && s->haveStf) ? 1 : 0; }
+static quint32 mkSTF(const XsDataPacketBlob* p) { auto* s = rawSampleOf(p); return s ? s->stf : 0; }
+
+static XsVectorBlob* mkVec(XsVectorBlob* v, const QVector3D& src, double* buf)
+{ buf[0]=src.x(); buf[1]=src.y(); buf[2]=src.z(); if (v) { v->data=buf; v->size=3; v->flags=0; } return v; }
+static int mkContainsAcc(const XsDataPacketBlob* p) { auto* s = rawSampleOf(p); return (s && s->haveAcc) ? 1 : 0; }
+static XsVectorBlob* mkAcc(const XsDataPacketBlob* p, XsVectorBlob* v) { static double b[3]; auto* s = rawSampleOf(p); return mkVec(v, s ? s->acc : QVector3D(), b); }
+static int mkContainsGyr(const XsDataPacketBlob* p) { auto* s = rawSampleOf(p); return (s && s->haveGyr) ? 1 : 0; }
+static XsVectorBlob* mkGyr(const XsDataPacketBlob* p, XsVectorBlob* v) { static double b[3]; auto* s = rawSampleOf(p); return mkVec(v, s ? s->gyr : QVector3D(), b); }
+static int mkContainsMag(const XsDataPacketBlob* p) { auto* s = rawSampleOf(p); return (s && s->haveMag) ? 1 : 0; }
+static XsVectorBlob* mkMag(const XsDataPacketBlob* p, XsVectorBlob* v) { static double b[3]; auto* s = rawSampleOf(p); return mkVec(v, s ? s->mag : QVector3D(), b); }
+static int mkContainsVel(const XsDataPacketBlob* p) { auto* s = rawSampleOf(p); return (s && s->haveVelInc) ? 1 : 0; }
+static XsVectorBlob* mkVel(const XsDataPacketBlob* p, XsVectorBlob* v) { static double b[3]; auto* s = rawSampleOf(p); return mkVec(v, s ? s->velInc : QVector3D(), b); }
+static int mkContainsFA(const XsDataPacketBlob* p) { auto* s = rawSampleOf(p); return (s && s->haveFreeAcc) ? 1 : 0; }
+static XsVectorBlob* mkFA(const XsDataPacketBlob* p, XsVectorBlob* v) { static double b[3]; auto* s = rawSampleOf(p); return mkVec(v, s ? s->freeAcc : QVector3D(), b); }
+static int mkUpdateRate(void*) { return g_replay ? int(g_replay->suitHz + 0.5) : 240; }
+
+static void buildMockApi(Api& api)
+{
+    api.deviceGetDataPacketCount         = &mkCount;
+    api.deviceTakeFirstDataPacketInQueue = &mkTake;
+    api.dataPacketConstruct              = &mkConstruct;
+    api.dataPacketDestruct               = &mkDestruct;
+    api.dataPacketContainsOrientation    = &mkContainsOri;
+    api.dataPacketOrientationQuaternion  = &mkOriQuat;
+    api.dataPacketContainsOrientationIncrement = &mkContainsOriInc;
+    api.dataPacketOrientationIncrement   = &mkOriInc;
+    api.dataPacketContainsPacketCounter  = &mkContainsPC;
+    api.dataPacketPacketCounter          = &mkPC;
+    api.dataPacketContainsSTF            = &mkContainsSTF;
+    api.dataPacketSTF                    = &mkSTF;
+    api.dataPacketContainsAcc            = &mkContainsAcc;  api.dataPacketAcc     = &mkAcc;
+    api.dataPacketContainsGyro           = &mkContainsGyr;  api.dataPacketGyro    = &mkGyr;
+    api.dataPacketContainsMag            = &mkContainsMag;  api.dataPacketMag     = &mkMag;
+    api.dataPacketContainsVelInc         = &mkContainsVel;  api.dataPacketVelInc  = &mkVel;
+    api.dataPacketContainsFreeAcc        = &mkContainsFA;   api.dataPacketFreeAcc = &mkFA;
+    api.deviceUpdateRate                 = &mkUpdateRate;
+    // Optional paths left null on purpose: dataPacketCoordSysOrient (cs=0),
+    //   dataPacketContainsStoredLocationId (keep targetSeg=seg), vectorDestruct
+    //   (buffers are static), dataPacketContainsTemperature, probes (no channel list).
+}
+
+} // namespace xda
+
 // §XXX сквозной конвейер на датчик->поза (поток приёма): сырые acc/gyr/mag -> нормировка/смещения/s2s ->
 //   FoxKF (§IX FusionAhrs) -> ориентации сегментов + перчатка -> публикация кадра staging (formules.txt)
 void MocapReceiver::run()
@@ -4265,14 +4552,49 @@ void MocapReceiver::run()
         logBlock(sys.str());
     }
 
+    // §raw: handles shared by the live XDA path and the rawsensorlog replay path.
     Api api;
+    void* control = nullptr;
+    std::vector<void*> trackerHandles;
+    std::vector<int>   trackerSegments;
+    alignas(void*) unsigned char packetStorage[128]{};
+
+    if (I.readRaw) {
+        // ---- replay mode: feed the SAME receive loop from rawsensorlog.bin via a mock Api ----
+        const std::string rp = rawLogPathStd();
+        g_replay = new RawReplaySource();
+        g_replay->f = std::fopen(rp.c_str(), "rb");
+        if (!g_replay->f || !g_replay->readHeader()) {
+            if (g_replay->f) std::fclose(g_replay->f);
+            delete g_replay; g_replay = nullptr;
+            I.setStatus(ConnStatus::Failed,
+                        "rawsensorlog.bin не найден или повреждён — сначала запишите его "
+                        "флагом -recordrawsensor.", this);
+            return;
+        }
+        g_replay->stopFlag = &I.stop;
+        I.freqHz = g_replay->suitHz;
+        buildMockApi(api);
+        for (int seg = 0; seg < kXsensSegmentCount; ++seg) {
+            if (!fox::body::kSensorPresent[seg]) continue;
+            trackerHandles.push_back(reinterpret_cast<void*>(static_cast<intptr_t>(seg + 1)));
+            trackerSegments.push_back(seg);
+        }
+        g_replay->firstSeg = trackerSegments.empty() ? 0 : trackerSegments.front();
+        I.activeTrackers.store((int)trackerHandles.size());
+        I.manusDllLoaded = true; I.manusCoreReady = true; I.manusGloveCount = 2; // faux gloves (from file)
+        logLine("[replay] rawsensorlog opened: " + rp + "  hz="
+                + std::to_string(int(g_replay->suitHz)));
+        I.setStatus(ConnStatus::Streaming,
+                    QString("replay rawsensorlog — %1 sensors").arg(trackerHandles.size()), this);
+    } else {
+
     QString detail;
     if (!loadApi(api, detail)) {
         I.setStatus(ConnStatus::NoDriver, detail, this);
         return;
     }
 
-    void* control = nullptr;
     if (!sehCall([&]() { control = api.controlConstruct(); }) || !control) {
         unloadApi(api);
         I.setStatus(ConnStatus::Failed,
@@ -4299,7 +4621,6 @@ void MocapReceiver::run()
 
     alignas(void*) unsigned char portsStorage[64]{};
     alignas(void*) unsigned char deviceIdsStorage[64]{};
-    alignas(void*) unsigned char packetStorage[128]{};
     void* ports     = portsStorage;
     void* deviceIds = deviceIdsStorage;
 
@@ -4382,9 +4703,6 @@ void MocapReceiver::run()
         I.setStatus(ConnStatus::NoDevice, noDevMsg, this);
         return;
     }
-
-    std::vector<void*> trackerHandles;
-    std::vector<int>   trackerSegments;
 
     for (std::size_t i = 0; i < portCount && trackerHandles.empty(); ++i) {
         void* portInfo = api.arrayAt(ports, i);
@@ -4513,6 +4831,23 @@ void MocapReceiver::run()
                     + std::to_string(int(expectedHz)) + " Hz", I.test);
         }
     }
+
+    // §record: open rawsensorlog.bin once the native rate is known (header stores it).
+    if (I.recordRaw) {
+        const std::string rp = rawLogPathStd();
+        I.rawWrite = std::fopen(rp.c_str(), "wb");
+        if (I.rawWrite) {
+            static char s_rawBuf[1 << 20];
+            std::setvbuf(I.rawWrite, s_rawBuf, _IOFBF, sizeof(s_rawBuf));
+            rawWriteHeader(I.rawWrite, I.freqHz, kXsensSegmentCount,
+                           fox::pose_solver::g_glovesFlag().load(std::memory_order_relaxed));
+            logLine("[record] rawsensorlog opened: " + rp);
+        } else {
+            logLine("[record] ERROR: cannot open rawsensorlog for writing: " + rp);
+        }
+    }
+
+    }   // end live-XDA setup (else of if (I.readRaw))
 
     struct SegCal {
         bool   s2sActive = false, magNormActive = false, accNormActive = false,
@@ -4648,6 +4983,27 @@ void MocapReceiver::run()
                 sensorTempC = api.dataPacketTemperature(pkt);
             }
             (void)sensorTempC;
+
+            // §record: dump the raw per-sensor packet exactly as XDA delivered it (mag still
+            //   raw here — the soft-iron/normalisation below only mutates a local copy). No formulas.
+            if (I.recordRaw && I.rawWrite) {
+                xda::RawSensorSample rs;
+                rs.seg = targetSeg;
+                rs.haveQuat    = haveQuat;    rs.qo      = qo;
+                rs.haveAcc     = haveAcc;     rs.acc     = acc;
+                rs.haveGyr     = haveGyr;     rs.gyr     = gyr;
+                rs.haveMag     = haveMag;     rs.mag     = mag;
+                rs.haveVelInc  = haveVelInc;  rs.velInc  = velInc;
+                rs.haveFreeAcc = haveFreeAcc; rs.freeAcc = freeAcc;
+                rs.haveDq      = haveDq;      rs.dq      = dq;
+                rs.haveStf     = haveStf;     rs.stf     = stf;
+                rs.tempC       = float(sensorTempC);
+                rs.sampleCounter = (api.dataPacketContainsPacketCounter && api.dataPacketPacketCounter
+                                    && api.dataPacketContainsPacketCounter(pkt))
+                                       ? api.dataPacketPacketCounter(pkt)
+                                       : quint32(staging.sampleCounter);
+                xda::rawWriteSample(I.rawWrite, rs);
+            }
 
             // §172 защита: freqHz<=0 (сбой/несконфигур. устройство) не должен давать inf dt (formules.txt)
             const double safeFreqHz = (I.freqHz > 1.0) ? I.freqHz : 240.0;
@@ -5032,6 +5388,9 @@ void MocapReceiver::run()
             });
         }
 
+        // §replay: stop cleanly when the recording is exhausted (no hardware to wait on).
+        if (I.readRaw && xda::g_replay && xda::g_replay->eof) break;
+
         const double now = monotonicSec();
 
         if (gotAny) {
@@ -5044,6 +5403,19 @@ void MocapReceiver::run()
                     this);
             }
             emit poseReceived();
+
+            // §record: close the frame (recvTime drives replay real-time pacing; gloves too).
+            if (I.recordRaw && I.rawWrite) {
+                xda::RawFrameEnd fe;
+                fe.recvTime  = staging.recvTime;
+                fe.nativeHz  = I.freqHz;
+                fe.hasGloves = staging.hasGloves;
+                if (staging.hasGloves) {
+                    fe.leftGloveQ  = staging.leftGloveQ;  fe.leftGloveP  = staging.leftGloveP;
+                    fe.rightGloveQ = staging.rightGloveQ; fe.rightGloveP = staging.rightGloveP;
+                }
+                xda::rawWriteFrameEnd(I.rawWrite, fe);
+            }
 
             if (now - fpsT0 >= 1.0) {
                 emit fpsUpdated(framesThisSec / (now - fpsT0));
@@ -5351,12 +5723,28 @@ void MocapReceiver::run()
         }
     }
 
-    // §close/§connect: штатное закрытие XDA тоже под sehCall — фолт драйвера на
-    //   разрыве (выдернут донгл/радиопотеря) не должен ронять рабочий поток.
-    sehCall([&]{ for (void* d : trackerHandles) api.deviceGotoConfig(d); });
-    sehCall([&]{ api.controlClose(control); });
-    sehCall([&]{ if (api.controlDestruct) api.controlDestruct(control); });
-    sehCall([&]{ unloadApi(api); });
+    // §record: flush & close the raw log (live capture path).
+    if (I.rawWrite) {
+        std::fflush(I.rawWrite);
+        std::fclose(I.rawWrite);
+        I.rawWrite = nullptr;
+        logLine("[record] rawsensorlog closed");
+    }
+
+    if (!I.readRaw) {
+        // §close/§connect: штатное закрытие XDA тоже под sehCall — фолт драйвера на
+        //   разрыве (выдернут донгл/радиопотеря) не должен ронять рабочий поток.
+        sehCall([&]{ for (void* d : trackerHandles) api.deviceGotoConfig(d); });
+        sehCall([&]{ api.controlClose(control); });
+        sehCall([&]{ if (api.controlDestruct) api.controlDestruct(control); });
+        sehCall([&]{ unloadApi(api); });
+    } else if (xda::g_replay) {
+        // §replay: close the recording and tear down the mock source.
+        if (xda::g_replay->f) std::fclose(xda::g_replay->f);
+        delete xda::g_replay;
+        xda::g_replay = nullptr;
+        logLine("[replay] rawsensorlog playback finished");
+    }
     I.setStatus(ConnStatus::NotInitialized, "closed", this);
     });  // end SEH-guarded worker body
 
@@ -5819,7 +6207,10 @@ NewSessionWizard::NewSessionWizard(MocapReceiver* rx, bool testMode, QWidget* pa
                     break;
                 case 3:
                     pilot->stop();
-                    testLog("[pilot] reached calibration page — handing over", m_test);
+                    // §auto-calib: in test/replay mode the operator is absent (or the "suit" is a
+                    //   recording), so press "start calibration" ourselves once the page settles.
+                    testLog("[pilot] reached calibration page — auto-starting calibration", m_test);
+                    QTimer::singleShot(800, this, [this]() { onCalibrationBegin(); });
                     break;
                 default:
                     pilot->stop();
@@ -6852,11 +7243,12 @@ void NewSessionWizard::onCalibrationBegin()
         m_poseHint->setText(Lang::t("tpose_hint"));
     testLog("[calib] double-pose sequence started, PrepT "
             "(Madgwick re-init scheduled)", m_test);
-    // §DBG arm the per-frame [fdump] window: calibration (~15 s) + the post-calib T-pose
-    //   hold, so the engine can be replayed offline frame-by-frame. Auto-expires.
+    // §DBG arm the per-frame [fdump] window so the engine can be replayed/analysed frame-by-frame.
+    //   In test/replay mode keep it open for the WHOLE session (was 30 s) so every movement of a
+    //   recorded take is logged — большие логи приемлемы (см. -readrawsensor).
     if (m_test)
         fox::pose_solver::g_frameDumpUntilMono().store(
-            monotonicSec() + 30.0, std::memory_order_relaxed);
+            monotonicSec() + 1.0e9, std::memory_order_relaxed);
     logCalibPhaseTransition("countdown begin");
     m_countTimer.start();
     updateNavButtons();
@@ -12591,6 +12983,8 @@ CliArgs parseCli(int argc, char** argv)
         const std::string a = argv[i];
         if (a == "-test" || a == "--test")          out.test = true;
         else if (a == "--gloves" || a == "-gloves") out.gloves = true;
+        else if (a == "--recordrawsensor" || a == "-recordrawsensor") out.recordRaw = true;
+        else if (a == "--readrawsensor"   || a == "-readrawsensor")   out.readRaw   = true;
         else if (a == "--wrist-constraint")         out.wristConstraint = true;
         else if (a == "--link"   || a == "-link")   { out.suit = SuitType::Link;   suitExplicit = true; }
         else if (a == "--awinda" || a == "-awinda") { out.suit = SuitType::Awinda; suitExplicit = true; }
@@ -12610,6 +13004,12 @@ CliArgs parseCli(int argc, char** argv)
                 "             parent console (cmd/PowerShell) or to fox_mocap.log\n"
                 "             when launched from Explorer.\n"
                 "  --gloves   Reserve space in the session for Manus finger data.\n"
+                "  -recordrawsensor  Write rawsensorlog.bin next to fox_mocap.log: a full\n"
+                "             frame-by-frame dump of the raw per-sensor suit stream (+gloves) —\n"
+                "             only what the suit delivers, no formulas. Can be gigabytes.\n"
+                "  -readrawsensor    Replay rawsensorlog.bin instead of real hardware (implies\n"
+                "             -test): re-runs fusion/calibration/skeleton in real time and writes\n"
+                "             a normal fox_mocap.log. Use as `-readrawsensor -test [--gloves]`.\n"
                 "  --link     Xsens Link suit — 240 Hz update rate (default for -test).\n"
                 "  --awinda   Xsens Awinda suit — 60 Hz update rate (default).\n"
                 "             --link/--awinda override -test's default in ANY order,\n"
@@ -12619,6 +13019,7 @@ CliArgs parseCli(int argc, char** argv)
         }
     }
 
+    if (out.readRaw) out.test = true;   // replay needs the auto-run pilot + auto-calibration
     if (out.test && !suitExplicit) out.suit = SuitType::Link;
     return out;
 }
@@ -12738,7 +13139,7 @@ int main(int argc, char** argv)
     testLog(std::string("[boot] fox_mocap starting, test_mode=")
             + (cli.test ? "true" : "false"), cli.test);
 
-    auto* rx = new MocapReceiver(cli.test, &app);
+    auto* rx = new MocapReceiver(cli.test, cli.recordRaw, cli.readRaw, &app);
 
     NewSessionWizard wiz(rx, cli.test);
 
