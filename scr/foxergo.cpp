@@ -8,10 +8,8 @@ using fox::Euler3;
 
 namespace {
 
-// §30.2/§38 множитель рад->град (эргоуглы суставов выдаются в градусах) (formules.txt)
 constexpr double kRad2Deg = 57.29577951308232;
 
-// §4/§114 [4.1] инженерные углы Эйлера ZYX относительного кватерниона (formules.txt)
 inline Euler3 eulerZYX(const Quat& q)
 {
     Euler3 e;
@@ -26,30 +24,24 @@ inline Euler3 eulerZYX(const Quat& q)
     return e;
 }
 
-// §30.4 тип0: осевые/срединные суставы (позвоночник/шея/голова) — без лево/правой зеркальности (formules.txt)
 JointAngles handlerAxial(const Quat& qRel)
 {
     const Euler3 e = eulerZYX(qRel);
     return { e.e0 * kRad2Deg, e.e1 * kRad2Deg, e.e2 * kRad2Deg };
 }
 
-// §30.4 тип1: правые суставы — опорная сторона без инверсии (formules.txt)
 JointAngles handlerRight(const Quat& qRel)
 {
     const Euler3 e = eulerZYX(qRel);
     return { e.e0 * kRad2Deg, e.e1 * kRad2Deg, e.e2 * kRad2Deg };
 }
 
-// §58.4/§30.4 тип2: левые суставы — abduction(X)/rotation(Z) зеркальны, flexion(Y) общий.
-//   Проверено численно: даёт ПОЛНУЮ лево/право симметрию ISB. Буква §58.2 (инверсия Y слева)
-//   ломала бы симметрию сгибания и здесь СОЗНАТЕЛЬНО не применяется (§58.2 помечен неуверенно). (formules.txt)
 JointAngles handlerLeft(const Quat& qRel)
 {
     const Euler3 e = eulerZYX(qRel);
     return { -e.e0 * kRad2Deg,  e.e1 * kRad2Deg, -e.e2 * kRad2Deg };
 }
 
-// §30.4 тип3/4: стопы (matrix_to_euler_B [4.3]); левая зеркалит abduction и rotation (formules.txt)
 JointAngles handlerFoot(const Quat& qRel, bool leftSide)
 {
     const Matrix3 R = fox::quat_to_matrix(qRel);
@@ -62,22 +54,12 @@ JointAngles handlerFoot(const Quat& qRel, bool leftSide)
     return { abd, flx, rot };
 }
 
-// §30.4 тип5/6: суставы НОГ (бедро/колено/голеностоп/носок). Относительный поворот берётся в
-//   РОДИТЕЛЬСКОЙ системе (parent-local, q_parent^-1 ⊗ q_child) — он инвариантен к курсу; прежняя
-//   мировая форма q_parent ⊗ conj(q_child) смещала углы при повороте корпуса (на 40° курса — до ~79°
-//   у бедра). Ось сгибания (шарнир) в кадре ноги — это локальная X, поэтому flexion извлекается из
-//   e0 (полнодиапазонный atan2 — держит сгиб >90°, чего asin-канал e1 не может), abduction из e1,
-//   rotation из e2. Проверено численно на реальных кадрах fox_mocap.log: курс-инвариантность 0.000°,
-//   L/R-симметрия 0.0000°, сгиб колена r=0.993 к истинному |qRel|.
 JointAngles handlerLegRight(const Quat& qRel)
 {
     const Euler3 e = eulerZYX(qRel);
-    return { e.e1 * kRad2Deg, e.e0 * kRad2Deg, e.e2 * kRad2Deg };   // abduction, flexion, rotation
+    return { e.e1 * kRad2Deg, e.e0 * kRad2Deg, e.e2 * kRad2Deg };
 }
 
-// §58.4 левая нога — зеркало правой: под сагиттальным отражением eulerZYX даёт
-//   (e0,e1,e2)->(-e0,e1,-e2), поэтому для совпадения значений с правой flexion(e0) и rotation(e2)
-//   инвертируются, abduction(e1) общий. (Численно: L/R Δ=0.0000° на зеркальной позе «цапля».)
 JointAngles handlerLegLeft(const Quat& qRel)
 {
     const Euler3 e = eulerZYX(qRel);
@@ -86,9 +68,6 @@ JointAngles handlerLegLeft(const Quat& qRel)
 
 }
 
-// §30/§11.3 угол сустава по ergoTypeOf [30.4]. Для НОГ (тип5/6) относит. поворот берётся parent-local
-//   qRel = conj(qParent) ⊗ qChild — инвариант к курсу; для остальных суставов сохраняется прежняя
-//   мировая форма qRel = qParent ⊗ conj(qChild). (formules.txt)
 JointAngles jointAnglesErgo(int jointIdx, const Quat& qParentWorld, const Quat& qChildWorld)
 {
     const int t = fox::body::ergoTypeOf(jointIdx);
@@ -109,7 +88,6 @@ JointAngles jointAnglesErgo(int jointIdx, const Quat& qParentWorld, const Quat& 
         default: a = handlerAxial(qRel); break;
     }
 
-    // §676/§30.4 клип углов на ROM (kJointRom); штрафной член penalty живёт в решателе МНК (formules.txt)
     if (jointIdx >= 0 && jointIdx < fox::body::kJointCount) {
         const auto& rom = fox::body::kJointRom[jointIdx];
         if (a.abductionDeg < rom.abdMin) a.abductionDeg = rom.abdMin;
@@ -122,7 +100,6 @@ JointAngles jointAnglesErgo(int jointIdx, const Quat& qParentWorld, const Quat& 
     return a;
 }
 
-// §30/§1259 эргоуглы всех суставов из мировых ориентаций сегментов (formules.txt)
 std::array<JointAngles, fox::body::kJointCount>
 jointAnglesErgoAll(const std::array<Quat, fox::body::kSegmentCount>& segWorld)
 {

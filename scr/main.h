@@ -54,17 +54,12 @@ constexpr int     kCalibrationSamples = 720;
 constexpr int     kCountdownSeconds   = 3;
 
 enum class SuitType { Awinda, Link };
-// §2035/§2088 нативная частота костюма: Link 240 Гц, Awinda 60 Гц (полнотельная, 17 сенсоров).
-//   Это дефолт/фолбэк/подсказка UI — в работе частота берётся из реального железа
-//   (deviceUpdateRate, main.cpp ~5745) и пробрасывается в обработку (см. SuitPose::nativeHz). (formules.txt)
 constexpr double nativeRateHz(SuitType s) { return s == SuitType::Link ? 240.0 : 60.0; }
 
 inline int ticksFor(double seconds, double rateHz) {
     const long n = std::lround(seconds * rateHz);
     return n < 1 ? 1 : static_cast<int>(n);
 }
-// dt0=1/90 — ЭТАЛОННАЯ частота, при которой заданы коэффициенты a0 (НЕ частота костюма):
-//   функция сохраняет постоянную времени tau при любом реальном dt. Менять dt0 нельзя — сместит тюнинг.
 inline double rateAdjustAlpha(double a0, double dt, double dt0 = 1.0 / 90.0) {
     if (a0 <= 0.0) return 0.0;
     if (a0 >= 1.0) return 1.0;
@@ -87,8 +82,6 @@ extern const char* kSegmentNames[kXsensSegmentCount];
 
 struct WristAnatomicalCfg {
 
-    // §XIX/§5 кисть YXZ: предел сгибания запястья ±90° (π/2), локтевое/лучевое
-    //   отклонение ±30° (0.5236 рад) — как в old_sclete (main.h:114, maxFlexRad=M_PI*0.5)
     double maxFlexRad   = 1.5707963267948966;
     double maxLatDevRad = 0.5235987755982988;
     double twistWeight  = 1.0;
@@ -105,8 +98,6 @@ struct FingerJointLimit {
 struct SuitPose {
     quint64 sampleCounter = 0;
     double  recvTime      = 0.0;
-    // §2035 разрешённая нативная частота железа (deviceUpdateRate, иначе ожидаемая по типу костюма):
-    //   Awinda 60 Гц / Link 240 Гц / прочие модели 100/120 — обработка подстраивается под неё (formules.txt)
     double  nativeHz      = 0.0;
 
     std::array<Quat, kXsensSegmentCount> quat;
@@ -248,10 +239,6 @@ private:
     Side      m_support     = RIGHT;
     QVector3D m_anchor      {0, 0, 0};
 
-    // НАСТРОЙКИ ДЕТЕКТОРА КОНТАКТА/ПОЗЫ (этот блок и блок m_fkxyStableRange.. ниже):
-    //   engine heuristics — эмпирически подобранный конечный автомат foot-lock/позы для рендера.
-    //   Тематически родственны §XIV (контакт с полом, ZUPT) и §XXIII (активности: стоя/сидя/
-    //   присед/лёжа/полёт), но конкретные пороги/скорости/тики НЕ взяты 1:1 из formules.txt.
     double m_stillRad     = 3.00;
     double m_heightMargin = 0.03;
     int    m_latchTicks   = 3;
@@ -310,8 +297,6 @@ private:
         bool      m_heelLiftR          = false;
         bool      m_heelLiftL          = false;
 
-        // §57 длина стопы по умолчанию 0.26 м (≈ footRatio 0.152 × рост 1.75; уточняется
-        //   калибровкой footSize §2006). Используется в геометрии контакта стопы (formules.txt)
         double    m_footLengthM        = 0.26;
 
         double    m_pelvisZVel         = 0.0;
@@ -322,7 +307,7 @@ private:
         double    m_lastTiltCos        = 1.0;
         int       m_landedTicks        = 0;
 
-        double    m_procRateHz          = 60.0;   // дефолт = частота костюма по умолчанию (Awinda 60 Гц); перезаписывается setProcRate реальной частотой
+        double    m_procRateHz          = 60.0;
         int       m_airborneStableTicks = 5;
         int       m_landedRampTicks     = 12;
         int       m_commitFadeTicks     = 12;
@@ -331,9 +316,6 @@ private:
 
         double    m_pelvisStillRad    = 0.20;
 
-        // §loco-clamp макс. горизонтальная скорость таза (м/с): физический потолок
-        //   XY-смещения корня за кадр (maxStepXY = m_pelvisVMaxXY·dt). Щедрый —
-        //   не режет реальную ходьбу/бег, ловит только аномальные скачки/dt-спайки.
         double    m_pelvisVMaxXY      = 3.0;
 
         double    m_confCommit        = 0.35;
@@ -344,11 +326,6 @@ private:
         double    m_offsetRatePrimary = 0.40;
         double    m_offsetRateDouble  = 0.25;
 
-        // §loco-glide: XY таза догоняет контактную оценку 2-м порядком (критически-
-        //   демпфированный SmoothDamp) вместо мгновенного lerp — несёт скорость сквозь
-        //   фазу маха, чтобы корень скользил, а не замирал-рывок. smoothTime в секундах
-        //   (кадро-независим). Больше = глаже, но чуть больше отставание. Скорость
-        //   скольжения m_glideVelX/Y — состояние фильтра.
         double    m_pelvisGlideTime   = 0.10;
         double    m_glideVelX = 0.0, m_glideVelY = 0.0;
         double    m_zRatePelvisMoving = 0.40;
@@ -363,9 +340,6 @@ private:
         double    m_squatKneeThresh   = 0.30;
         double    m_sitKneeThresh     = 0.55;
 
-        // §pose-hyst: гистерезис порогов классификатора позы. Без него при зависании
-        //   метрики на границе поза дребезжит каждый кадр (в логе 8 смен Stand↔Sit за
-        //   10 с), дёргая целевую высоту таза. band «прилипает» к текущей позе.
         double    m_poseHystBandM     = 0.07;
         double    m_poseHystTiltCos   = 0.05;
 
@@ -945,8 +919,6 @@ public:
 
     void setProcRate(double hz) {
         m_loco.setProcRate(hz);
-        // kRenderFps здесь = потолок частоты ОТРИСОВКИ, НЕ частота сенсора: рисуем не быстрее
-        //   рендер-цели даже на Link 240 Гц (солвер при этом обрабатывает все кадры). Не путать с багом Awinda.
         const double cap = (hz > kRenderFps) ? kRenderFps : (hz > 1.0 ? hz : kRenderFps);
         m_paintMinIntervalSec = 1.0 / cap;
         m_nomDt = 1.0 / ((hz > 1.0) ? hz : 60.0);
@@ -1001,7 +973,6 @@ public:
     QVector3D sceneShift() const { return m_sceneShift; }
     float sceneYaw() const { return m_sceneYaw; }
     QVector3D freezeAnchor() const { return m_freezeAnchor; }
-    // §35 пин корня по XY в МИРОВОЙ системе при включённой заморозке — общий для вьюпорта/стрима/записи (formules.txt)
     QVector3D lockPelvisIfFrozen(const QVector3D& worldPelvis) const {
         if (!m_freezeXY) return worldPelvis;
         return QVector3D(m_freezeAnchor.x(), m_freezeAnchor.y(), worldPelvis.z());
@@ -1038,7 +1009,7 @@ private:
     bool      m_freezeXY   = false;
     QVector3D m_freezeAnchor{0, 0, 0};
     QVector3D m_lastRenderedPelvis{0, 0, 0};
-    QVector3D m_lastWorldPelvis{0, 0, 0};   // §35 таз в мире (до камеры/заморозки) — якорь заморозки
+    QVector3D m_lastWorldPelvis{0, 0, 0};
     QVector3D m_lastLocoOffset{0, 0, 0};
 
     std::array<QVector3D, kXsensKeypointCount> m_lastRenderedKp{};
@@ -1055,7 +1026,7 @@ private:
 
     std::array<Quat, kXsensSegmentCount>   m_condPrev{};
     bool                                    m_haveCond    = false;
-    double                                  m_nomDt       = 1.0 / 60.0;   // дефолт частоты обработки (Awinda 60 Гц); перезаписывается setProcRate
+    double                                  m_nomDt       = 1.0 / 60.0;
     bool                                    m_condVerbose = false;
     std::array<double, kXsensSegmentCount> m_unlockBlend{};
 
@@ -1080,7 +1051,7 @@ private:
     double                                  m_lastRenderT = 0.0;
 
     double                                  m_lastPaintSec = 0.0;
-    double                                  m_paintMinIntervalSec = 1.0 / kRenderFps;   // потолок ОТРИСОВКИ (рендер), не частота сенсора
+    double                                  m_paintMinIntervalSec = 1.0 / kRenderFps;
 
     WristAnatomicalCfg m_wristCfgR{};
     WristAnatomicalCfg m_wristCfgL{};
@@ -1304,7 +1275,7 @@ private:
 
     bool            m_sessionRunning = true;
 
-    double          m_procRateHz   = 60.0;   // дефолт = частота костюма по умолчанию (Awinda 60 Гц); перезаписывается реальной частотой железа
+    double          m_procRateHz   = 60.0;
 
     std::unique_ptr<SkeletonXsens> m_skel;
 
@@ -1344,22 +1315,16 @@ struct CliArgs {
     bool test   = false;
     bool gloves = false;
     bool wristConstraint = false;
-    bool recordRaw = false;   // -recordrawsensor: dump the raw per-sensor suit stream to rawsensorlog.bin
-    bool readRaw   = false;   // -readrawsensor: replay rawsensorlog.bin instead of connecting to hardware
+    bool recordRaw = false;
+    bool readRaw   = false;
     SuitType suit = SuitType::Awinda;
     QString language;
 };
 CliArgs parseCli(int argc, char** argv);
 
-// --- Thread-safe diagnostic logging (test mode only) -----------------------
-// Test output is produced from several threads at once (network worker, Manus
-// SDK callback, GUI/render, main). Every write funnels through one mutex so
-// lines cannot interleave/corrupt, and each is stamped with a program-relative
-// timestamp so the log can be correlated with what the operator was doing
-// (T-pose, N-pose, the moment a limb moved, etc.).
-double logUptimeSec();                     // seconds since the first log call
-void   logLine(const std::string& msg);    // one timestamped line, emitted atomically
-void   logBlock(const std::string& block);  // multi-line block, emitted atomically
+double logUptimeSec();
+void   logLine(const std::string& msg);
+void   logBlock(const std::string& block);
 
 void testLog(const std::string& msg, bool enabled);
 

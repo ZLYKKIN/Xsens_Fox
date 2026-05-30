@@ -3,7 +3,6 @@
 
 namespace fox {
 
-// §2.1/§112 произведение Гамильтона q = a (x) b (композиция поворотов) (formules.txt)
 Quat quat_mult(const Quat& a, const Quat& b)
 {
 
@@ -14,7 +13,6 @@ Quat quat_mult(const Quat& a, const Quat& b)
         a.w*b.z + a.x*b.y - a.y*b.x + a.z*b.w);
 }
 
-// §6/§113 поворот вектора кватернионом v' = v + 2w(qv x v) + 2(qv x (qv x v)) (formules.txt)
 QVector3D vec_rotate(const QVector3D& v, const Quat& q)
 {
 
@@ -23,7 +21,6 @@ QVector3D vec_rotate(const QVector3D& v, const Quat& q)
     return v + float(q.w) * t + QVector3D::crossProduct(qv, t);
 }
 
-// §2137 swing-twist разложение: выделение вращения вокруг анатомической оси (formules.txt)
 void swingTwistDecompose(const Quat& q, const QVector3D& axisU,
                          Quat& outSwing, Quat& outTwist)
 {
@@ -44,7 +41,6 @@ void swingTwistDecompose(const Quat& q, const QVector3D& axisU,
     outSwing = quat_mult(q, twist.inv()).normalized();
 }
 
-// §1/§124 кватернион поворота вокруг одной оси: q=(cos(ang/2), n*sin(ang/2)) (formules.txt)
 static Quat axis_quat(char axis, double ang)
 {
     const double h = ang * 0.5;
@@ -58,7 +54,6 @@ static Quat axis_quat(char axis, double ang)
     return Quat(1, 0, 0, 0);
 }
 
-// §124 углы Эйлера -> кватернион (композиция трёх осевых поворотов по seq) (formules.txt)
 Quat euler_to_quat(double a, double b, double c, const char* seq)
 {
 
@@ -68,7 +63,6 @@ Quat euler_to_quat(double a, double b, double c, const char* seq)
     return quat_mult(quat_mult(qa, qb), qc).normalized();
 }
 
-// §2137 извлечение только рыскания (twist вокруг мировой оси Z) (formules.txt)
 Quat yaw_only_quat(const Quat& q)
 {
     Quat swing, twist;
@@ -81,7 +75,6 @@ Quat yaw_only_quat(const Quat& q)
     return Quat(w * n, 0.0, 0.0, z * n);
 }
 
-// §8/§121/§2098 SLERP; приведение к ближнему полушарию (dot<0 -> инверсия b) (formules.txt)
 Quat slerp_quat(const Quat& a, const Quat& b, double t)
 {
     double dot = a.w*b.w + a.x*b.x + a.y*b.y + a.z*b.z;
@@ -93,7 +86,7 @@ Quat slerp_quat(const Quat& a, const Quat& b, double t)
 
     const double theta0 = clamp_acos(dot);
     const double sinT0  = std::sin(theta0);
-    if (sinT0 < 6.1e-6) {  // §38 порог малого угла SLERP (1e-6..1e-5) -> линейная ветвь (formules.txt)
+    if (sinT0 < 6.1e-6) {
         Quat r(a.w + t*(b2.w - a.w), a.x + t*(b2.x - a.x),
                a.y + t*(b2.y - a.y), a.z + t*(b2.z - a.z));
         return r.normalized();
@@ -105,14 +98,12 @@ Quat slerp_quat(const Quat& a, const Quat& b, double t)
                 s0*a.y + s1*b2.y, s0*a.z + s1*b2.z).normalized();
 }
 
-// §5/§2096 угол поворота кватерниона в градусах: theta = 2*acos(|w|)*180/pi (formules.txt)
 double quat_angle_deg(const Quat& q)
 {
     const double w = std::abs(q.w) > 1.0 ? 1.0 : std::abs(q.w);
     return 2.0 * std::acos(w) * 180.0 / M_PI;
 }
 
-// §5/§1276 экспонента: вектор поворота (rotvec) -> кватернион; малый угол th^2<1e-24 -> I (formules.txt)
 Quat quat_exp_rotvec(double phix, double phiy, double phiz)
 {
 
@@ -124,7 +115,6 @@ Quat quat_exp_rotvec(double phix, double phiy, double phiz)
     return Quat(std::cos(half), s * phix, s * phiy, s * phiz);
 }
 
-// §5/§1277 логарифм: кватернион -> вектор поворота th = 2*atan2(|v|,w) (formules.txt)
 QVector3D quat_log(const Quat& qin)
 {
     const Quat q = (qin.w < 0.0)
@@ -141,7 +131,6 @@ QVector3D quat_log(const Quat& qin)
     return QVector3D(float(k*q.x), float(k*q.y), float(k*q.z));
 }
 
-// §3/§2093 кватернион -> матрица поворота R(q) 3x3 (formules.txt)
 Matrix3 quat_to_matrix(const Quat& q)
 {
 
@@ -156,7 +145,6 @@ Matrix3 quat_to_matrix(const Quat& q)
     return R;
 }
 
-// §4/§114 матрица -> углы Эйлера (раскладка A; зажим asin через clamp_asin §115) (formules.txt)
 Euler3 matrix_to_euler_A(const Matrix3& R)
 {
 
@@ -167,7 +155,6 @@ Euler3 matrix_to_euler_A(const Matrix3& R)
     return e;
 }
 
-// §4/§114 матрица -> углы Эйлера (раскладка B, иной осевой порядок; зажим asin §115) (formules.txt)
 Euler3 matrix_to_euler_B(const Matrix3& R)
 {
 
@@ -178,7 +165,6 @@ Euler3 matrix_to_euler_B(const Matrix3& R)
     return e;
 }
 
-// §123 Шеппард: матрица -> кватернион (выбор макс. из 4 ветвей t0..t3 для устойчивости) (formules.txt)
 Quat matrix_to_quat_sheppard(const Matrix3& R)
 {
 
@@ -221,7 +207,6 @@ Quat matrix_to_quat_sheppard(const Matrix3& R)
     return q.normalized();
 }
 
-// §2098 степень кватерниона q^t = exp(t*log(q)) (для SQUAD/интерполяции) (formules.txt)
 Quat quat_pow(const Quat& q, double t)
 {
 
@@ -229,7 +214,6 @@ Quat quat_pow(const Quat& q, double t)
     return quat_exp_rotvec(t * double(phi.x()), t * double(phi.y()), t * double(phi.z()));
 }
 
-// §1842 угловая скорость из дельта-кватерниона: omega = 2*asin(|v|)/(|v|*dt) * v (formules.txt)
 QVector3D angular_velocity_from_quat(const Quat& dq, double dtSec)
 {
 
@@ -246,7 +230,6 @@ QVector3D angular_velocity_from_quat(const Quat& dq, double dtSec)
     return QVector3D(float(k*x), float(k*y), float(k*z));
 }
 
-// §1824 Якоби-вращения для симметричной 4x4 (собств. разложение матрицы M в методе Markley) (formules.txt)
 void jacobiSym4(double A[4][4], double U[4][4])
 {
     for (int i = 0; i < 4; ++i)
@@ -296,7 +279,6 @@ void jacobiSym4(double A[4][4], double U[4][4])
     }
 }
 
-// §1824 усреднение кватернионов (Markley): собств. вектор макс. собств. значения M=Σ q*q^T (formules.txt)
 Quat quat_avg_markley(const std::vector<Quat>& samples)
 {
     if (samples.empty()) return Quat(1, 0, 0, 0);
