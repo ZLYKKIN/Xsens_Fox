@@ -8,6 +8,7 @@ import bpy
 from mathutils import Vector, Quaternion
 
 from . import segment_maps
+from .logger import FoxLog
 
 SCENE_SCALE_MULTIPLIER = 1
 
@@ -227,6 +228,16 @@ class MocapPose:
         self._scale_transforms()
         self._convert_vectors()
         self._convert_to_quaternions()
+        # --- Log how the incoming segment count was interpreted (gloves / props) ---
+        FoxLog.log(
+            "pose",
+            "stage=convert",
+            actor=self.actor_name,
+            segs=len(self.quaternion_message) if self.quaternion_message else 0,
+            gloves=self.gloves,
+            props=self.prop_count,
+            cluster=self.is_object_cluster,
+        )
 
     def _determine_prop_count(self):
         """

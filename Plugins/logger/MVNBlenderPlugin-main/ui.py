@@ -12,6 +12,7 @@ import bpy
 from mathutils import Vector
 from bpy_extras.io_utils import ImportHelper, ExportHelper
 
+from .logger import FoxLog
 from .rigging import resolve_ik_armature
 from .receiver import start_receiver, stop_receiver
 from .segment_maps import segment_map, auto_remappings
@@ -462,6 +463,17 @@ class WM_OT_StartStream(bpy.types.Operator):
         if context.scene.mvn_online:
             port_number = int(context.scene.mvn_stream_port)
             ip_address = context.scene.mvn_stream_address
+            # --- (Re)create blender_log.log fresh for this streaming session ---
+            FoxLog.reopen(
+                {
+                    "addr": ip_address,
+                    "port": port_number,
+                    "units": context.scene.mvn_scene_units,
+                    "gloves": context.scene.mvn_gloves_enabled,
+                    "scale": context.scene.mvn_scene_scale,
+                    "rate": context.scene.mvn_update_frequency,
+                }
+            )
             start_receiver(ip_address, port_number, PREV_SESSION_TARGET_MAP)
         else:
             try:
@@ -471,9 +483,11 @@ class WM_OT_StartStream(bpy.types.Operator):
                         PREV_SESSION_TARGET_MAP[target_armature.name] = source_armature.name
 
                 stop_receiver()
+                FoxLog.close({"frames": FoxLog.frames, "drops": FoxLog.drops})
             except Exception as e:
                 message = f"Failed to stop receiver: {e}"
                 bpy.ops.logging.logger("INVOKE_DEFAULT", message_type="ERROR", message_text=message)
+                FoxLog.error(f"failed to stop receiver: {e}")
 
         return {"FINISHED"}
 

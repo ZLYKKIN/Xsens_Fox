@@ -10,7 +10,8 @@ import threading
 import bpy
 
 from .pose import MocapPose
-from . import source_manager, source_animator
+from .logger import FoxLog
+from . import source_manager, source_animator, segment_maps
 
 # ===========================================================================================
 HEADER_LENGTH = 24
@@ -67,8 +68,22 @@ def process_message(encoded_data: bytes, previous_session_target_map: dict) -> N
     # --- Parse header and get mocap pose object ---
     unpacked_header: tuple = decode_header(encoded_data)
     message_id: str = unpacked_header[0][-2:].decode("utf-8")
-    character_id: int = unpacked_header[5]
+    sample_counter: int = unpacked_header[1]
+    datagram_counter: int = unpacked_header[2]
     number_of_items: int = unpacked_header[3]
+    frame_time: int = unpacked_header[4]
+    character_id: int = unpacked_header[5]
+
+    # --- Log the parsed MXTP header (every datagram) ---
+    FoxLog.log(
+        "header",
+        msg=message_id,
+        avatar=character_id,
+        items=number_of_items,
+        smp=sample_counter,
+        dgram=hex(datagram_counter),
+        frameTime=frame_time,
+    )
 
     mocap_pose: MocapPose = get_mocap_pose(character_id, number_of_items, message_id)
 
@@ -76,6 +91,8 @@ def process_message(encoded_data: bytes, previous_session_target_map: dict) -> N
     if message_id == "02":  # quaternion message
         if not mocap_pose.actor_name:
             return
+        # Stash the wire frame counter so the apply stage can correlate frames
+        mocap_pose._fox_sample = sample_counter
         quaternion_message: list = decode_quaternion_message(encoded_data, number_of_items)
         apply_quaternion_message(mocap_pose, quaternion_message)
 
@@ -95,6 +112,7 @@ def process_message(encoded_data: bytes, previous_session_target_map: dict) -> N
         apply_timecode_message(mocap_pose, timecode_message)
     else:
         print(f"Received unknown message ID: {message_id}")
+        FoxLog.warn(f"unknown message id={message_id} avatar={character_id} items={number_of_items}")
 
 
 def process_messages(udp_socket: socket.socket, previous_session_target_map: dict) -> None:
@@ -111,19 +129,24 @@ def process_messages(udp_socket: socket.socket, previous_session_target_map: dic
             refresh_scene_armatures = source_manager.remove_previous_sources(mocap_pose_dict)
 
         try:
-            encoded_data, _ = udp_socket.recvfrom(MAX_PACKET_SIZE)
+            encoded_data, sender = udp_socket.recvfrom(MAX_PACKET_SIZE)
             if not encoded_data:
                 continue
 
+            # --- Log the raw datagram reception (size + source) ---
+            FoxLog.log("net", "from=%s:%s" % sender, bytes=len(encoded_data))
             process_message(encoded_data, previous_session_target_map)
 
         except socket.error as e:
             if e.errno == 10038:
                 print("The socket has been closed.")
+                FoxLog.log("net", "socket closed")
                 break
             else:
                 message = f"Socket error: {e}"
                 bpy.ops.logging.logger("INVOKE_DEFAULT", message_type="ERROR", message_text=message)
+                FoxLog.error(message)
+                FoxLog.count_drop()
                 break
 
 
@@ -158,6 +181,17 @@ def decode_quaternion_message(encoded_data: bytes, number_of_items: int) -> list
         segment_data = struct.unpack(data_layout, data)
         quaternion_data.append(segment_data)
         current_byte_index += segment_length
+
+    # --- Full per-segment dump of the raw wire values (segId + pos + quat) ---
+    if FoxLog.is_open():
+        rows = []
+        for seg in quaternion_data:
+            # seg = (segId, posX, posY, posZ, quatW, quatX, quatY, quatZ)
+            name = segment_maps.segment_map.get(seg[0], "?")
+            rows.append(
+                "seg=%d name=%s rawPos=%s rawQuat=%s" % (seg[0], name, FoxLog.vec(seg[1:4]), FoxLog.quat(seg[4:8]))
+            )
+        FoxLog.block("decode", {"segs": number_of_items}, rows)
 
     return quaternion_data
 
@@ -284,6 +318,11 @@ def decode_character_scale_pose_message(encoded_data: bytes, datagram_counter: i
             x, y, z = struct.unpack_from("!fff", encoded_data, current_byte_index)
             current_byte_index += 12
             scale_vectors.append((segment_name, x, y, z))
+
+        # --- Full dump of the T-pose / scale origins per segment ---
+        if FoxLog.is_open():
+            rows = ["seg=%s origin=%s" % (n, FoxLog.vec((x, y, z))) for (n, x, y, z) in scale_vectors]
+            FoxLog.block("scale", {"segs": len(scale_vectors)}, rows)
 
         return scale_vectors
 
@@ -555,6 +594,7 @@ def start_receiver(ip_address: str, port_number: int, previous_session_target_ma
 
     try:
         sock = get_ready_socket(ip_address, port_number)
+        FoxLog.log("boot", "receiver listening", addr=ip_address, port=port_number)
         threading.Thread(target=process_messages, args=(sock, previous_session_target_map,), daemon=True).start()
     except socket.error as e:
         if e.errno == 10048:
@@ -563,9 +603,11 @@ def start_receiver(ip_address: str, port_number: int, previous_session_target_ma
         else:
             message = f"Socket error: {e}"
             bpy.ops.logging.logger("INVOKE_DEFAULT", message_type="ERROR", message_text=message)
+        FoxLog.error(message)
     except Exception as e:
         message = f"Unexpected error when starting MVN Receiver: {e}"
         bpy.ops.logging.logger("INVOKE_DEFAULT", message_type="ERROR", message_text=message)
+        FoxLog.error(message)
 
 
 def stop_receiver() -> None:
@@ -576,6 +618,7 @@ def stop_receiver() -> None:
     """
     message = "Stopping MVN Receiver..."
     bpy.ops.logging.logger("INVOKE_DEFAULT", message_type="INFO", message_text=message)
+    FoxLog.log("net", "receiver stopping")
 
     global sock
     global refresh_scene_armatures
@@ -586,12 +629,14 @@ def stop_receiver() -> None:
     except Exception as e:
         message = f"Error stopping receiver: {e}"
         bpy.ops.logging.logger("INVOKE_DEFAULT", message_type="ERROR", message_text=message)
+        FoxLog.error(message)
     if sock is not None and isinstance(sock, socket.socket):
         try:
             sock.close()
         except Exception as e:
             message = f"Error closing socket: {e}"
             bpy.ops.logging.logger("INVOKE_DEFAULT", message_type="ERROR", message_text=message)
+            FoxLog.error(message)
         sock = None
     else:
         message = "Socket is not a valid socket object."

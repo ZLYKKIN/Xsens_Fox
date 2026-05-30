@@ -1,5 +1,6 @@
 #include "LiveLinkMvnRemapper.h"
 #include "Animation/AnimCurveTypes.h"
+#include "FoxLog.h"
 
 std::map<FName, EXsensMapping, FNameFastLess> ULiveLinkMvnRemapper::s_remap_bones_names{ {"Root", EXsensMapping::Root}, {"Pelvis", EXsensMapping::Pelvis}, {"L5", EXsensMapping::L5}, {"L3", EXsensMapping::L3}, {"T12", EXsensMapping::T12}, {"T8", EXsensMapping::T8}, {"Neck", EXsensMapping::Neck}, {"Head", EXsensMapping::Head},
 					{"RightShoulder", EXsensMapping::RightShoulder}, {"RightUpperArm", EXsensMapping::RightUpperArm},{"RightForeArm", EXsensMapping::RightForeArm},{"RightHand", EXsensMapping::RightHand},
@@ -209,6 +210,18 @@ void FLiveLinkMvnRemapperWorker::RemapSkeletonStaticData(FLiveLinkSkeletonStatic
 	auto TargetBoneNames = PopulateBoneNames(&InOutSkeletonData);
 
 	InOutSkeletonData.SetBoneNames(TargetBoneNames);
+
+	// Log the Xsens -> target skeleton bone-name mapping once per static-data update.
+	if (FFoxLog::Get().IsOpen())
+	{
+		TArray<FString> Rows;
+		Rows.Reserve(BoneNameMap.Num());
+		for (const TPair<FName, FName>& Pair : BoneNameMap)
+		{
+			Rows.Add(FString::Printf(TEXT("xsens=%s -> target=%s"), *Pair.Key.ToString(), *Pair.Value.ToString()));
+		}
+		FFoxLog::Get().Block(TEXT("retarget"), FString::Printf(TEXT("stage=static bones=%d"), TargetBoneNames.Num()), Rows);
+	}
 }
 
 TArray<FName> FLiveLinkMvnRemapperWorker::PopulateBoneNames(const FLiveLinkSkeletonStaticData* InSkeletonData)
@@ -444,6 +457,24 @@ void FLiveLinkMvnRemapperWorker::RemapSkeletonFrameData(const FLiveLinkSkeletonS
 				}
 			}
 		}
+	}
+
+	// Full dump of the final per-bone transforms written onto the displayed skeleton.
+	if (FFoxLog::Get().IsOpen())
+	{
+		TArray<FString> Rows;
+		Rows.Reserve(InOutFrameData.Transforms.Num());
+		for (int32 i = 0; i < InOutFrameData.Transforms.Num(); ++i)
+		{
+			const FName Target = TransformedBoneNames.IsValidIndex(i) ? TransformedBoneNames[i] : NAME_None;
+			const FName* XsKey = BoneNameMap.FindKey(Target);
+			const FTransform& T = InOutFrameData.Transforms[i];
+			Rows.Add(FString::Printf(TEXT("idx=%d xsens=%s -> target=%s pos=%s quat=%s"),
+				i, XsKey ? *XsKey->ToString() : TEXT("?"), *Target.ToString(),
+				*FFoxLog::Vec(T.GetTranslation()), *FFoxLog::Quat(T.GetRotation())));
+		}
+		FFoxLog::Get().Block(TEXT("retarget"),
+			FString::Printf(TEXT("stage=frame bones=%d"), InOutFrameData.Transforms.Num()), Rows);
 	}
 }
 
