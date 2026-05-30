@@ -14,6 +14,8 @@ from math import pi, acos
 from datetime import datetime
 from mathutils import Quaternion
 
+from .logger import FoxLog
+
 # ============================================================================================
 # Global Variables
 values_dict = None
@@ -59,6 +61,7 @@ def start_recording():
 
     take_name = bpy.context.scene.mvn_take_name
     take_number = bpy.context.scene.mvn_take_number
+    FoxLog.log("record", "state=start", take=take_name, num=take_number, rate=bpy.context.scene.mvn_record_rate)
     message = f'<CaptureName> <Name VALUE="{take_name}" /> <Take VALUE="{take_number}" /> </CaptureName>'
     message_xsens(message)
     message = f'<CaptureStart> <Name VALUE="{take_name}" /> <Take VALUE="{take_number}" /> <TimeCode VALUE="" /> <Notes></Notes> </CaptureStart>'
@@ -73,6 +76,7 @@ def stop_recording():
     The message sent to Xsens includes the take name and take number specified in the Blender scene context.
     """
     bpy.context.scene.mvn_recording = False
+    FoxLog.log("record", "state=stop", take=bpy.context.scene.mvn_take_name, num=bpy.context.scene.mvn_take_number)
 
     message = f'<CaptureStop> <Name VALUE="" /> <TimeCode VALUE="" /> <Notes></Notes> </CaptureStop>'
     message_xsens(message)
@@ -126,6 +130,7 @@ def add_record(obj, bone_name="", rotation=None, location=None):
                     prev_frame = values_dict[obj][bone_name][-1][0]
             else:
                 values_dict[obj] = {}
+                FoxLog.log("record", "state=track-begin", obj=obj.name, type="ARMATURE", start_frame=frame)
 
             new = current
 
@@ -185,6 +190,7 @@ def save_recordings():
         if not data:
             message = f"Failed to save recording for {obj.name}!"
             bpy.ops.logging.logger("INVOKE_DEFAULT", message_type="ERROR", message_text=message)
+            FoxLog.error(message)
             return
 
         # --- Create a new action ---
@@ -196,6 +202,15 @@ def save_recordings():
         if obj.animation_data is None:
             obj.animation_data_create()
         obj.animation_data.action = action
+
+        # --- Log a summary of what is being baked into this take ---
+        if obj.type == "ARMATURE":
+            _bone_count = len(data)
+            _frame_count = max((len(v) for v in data.values()), default=0)
+        else:
+            _bone_count = 0
+            _frame_count = len(data)
+        FoxLog.log("record", "state=save", obj=obj.name, take=take_name, bones=_bone_count, frames=_frame_count)
 
         # --- If Armature: Plot Armature ---
         if obj.type == "ARMATURE":

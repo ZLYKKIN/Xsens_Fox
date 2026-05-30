@@ -5,6 +5,7 @@
 #include "LiveLinkComponentController.h"
 #include "Roles/LiveLinkAnimationRole.h"
 #include "Roles/LiveLinkAnimationTypes.h"
+#include "FoxLog.h"
 
 bool ULiveLinkMvnTransformController::IsRoleSupported(const TSubclassOf<ULiveLinkRole>& RoleToSupport)
 {
@@ -41,6 +42,14 @@ void ULiveLinkMvnTransformController::Tick(float DeltaTime, const FLiveLinkSubje
 				}
 
 				SceneComponent->SetRelativeTransform(xfm, false, nullptr, ETeleportType::TeleportPhysics);
+
+				if (FFoxLog::Get().IsOpen())
+				{
+					FFoxLog::Get().Log(TEXT("apply"), FString::Printf(
+						TEXT("stage=component subject=%s seg=%d pos=%s quat=%s"),
+						*GetSelectedSubject().Subject.Name.ToString(), SegmentIndex,
+						*FFoxLog::Vec(xfm.GetLocation()), *FFoxLog::Quat(xfm.GetRotation())));
+				}
 			}
 		}
 	}

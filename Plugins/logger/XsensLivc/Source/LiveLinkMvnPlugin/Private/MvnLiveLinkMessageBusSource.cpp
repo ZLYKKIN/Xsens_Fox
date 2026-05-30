@@ -4,6 +4,7 @@
 #include "LiveLinkMessages.h"
 #include "LiveLinkMvnPlugin.h"
 #include "MvnLiveLinkPresenceDetector.h"
+#include "FoxLog.h"
 
 FMVNLiveLinkMessageBusSource::FMVNLiveLinkMessageBusSource(const FText& InSourceType, const FText& InSourceMachineName, const FMessageAddress& InConnectionAddress, double InMachineTimeOffset)
 	: FLiveLinkMvnSource(InSourceType, InSourceMachineName, InConnectionAddress, InMachineTimeOffset)
@@ -13,6 +14,7 @@ FMVNLiveLinkMessageBusSource::FMVNLiveLinkMessageBusSource(const FText& InSource
 void FMVNLiveLinkMessageBusSource::ReceiveClient(ILiveLinkClient* InClient, FGuid InSourceGuid)
 {
 	FLiveLinkMvnSource::ReceiveClient(InClient, InSourceGuid);
+	FFoxLog::Get().Log(TEXT("boot"), TEXT("message-bus client attached; presence published"));
 	if (FLiveLinkMvnPluginModule::Get().GetPresenceDetector().GetMessageEndpoint().IsValid())
 	{
 		FLiveLinkMvnPluginModule::Get().GetPresenceDetector().GetMessageEndpoint()->Publish<FLiveLinkConnectMessage>(FMessageEndpoint::MakeMessage<FLiveLinkConnectMessage>());

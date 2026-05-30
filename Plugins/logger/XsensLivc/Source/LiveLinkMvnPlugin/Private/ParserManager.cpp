@@ -5,6 +5,7 @@
 #include "QuaternionDatagram.h"
 #include "ScaleDatagram.h"
 #include "MetaDatagram.h"
+#include "FoxLog.h"
 
 ParserManager::ParserManager()
 { 
@@ -64,5 +65,6 @@ Datagram* ParserManager::readDatagram(const TArray<uint8_t>& data)
 //		datagram->printData();
 		return datagram;
 	}
+	FFoxLog::Get().Log(TEXT("warn"), FString::Printf(TEXT("unknown datagram type=0x%02x"), (int)type));
 	return nullptr;
 }

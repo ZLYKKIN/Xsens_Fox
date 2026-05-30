@@ -1,6 +1,7 @@
 // Copyright 2018-2025 Movella Technologies B.V., Inc. All Rights Reserved.
 
 #include "LiveLinkMvnRetargetAsset.h"
+#include "FoxLog.h"
 
 #include "Roles/LiveLinkAnimationTypes.h"
 #include "LiveLinkTypes.h"
@@ -388,6 +389,13 @@ void ULiveLinkMvnRetargetAsset::BuildPoseFromAnimationData(float DeltaTime, cons
 {
 	MYLOG("%hs", "*********************************************");
 	MYLOG("Building for %p", this);
+
+	// Legacy retarget-asset path: record that it ran this frame and how many bones it drove.
+	if (InFrameData && FFoxLog::Get().IsOpen())
+	{
+		FFoxLog::Get().Log(TEXT("retarget"), FString::Printf(
+			TEXT("stage=asset bones=%d"), InFrameData->Transforms.Num()));
+	}
 
 	bool logValid = false;
 	std::map<int, int> parentOverride;

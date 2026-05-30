@@ -27,6 +27,7 @@ public class LiveLinkMvnPlugin : ModuleRules
 			{
 				"Core",
 				// ... add other public dependencies that you statically link with here ...
+				"Projects",   // IPluginManager, for resolving the plugin dir (FoxLog -> ue_log.log)
 				"Networking",
 				"Sockets",
 				"XmlParser",

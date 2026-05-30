@@ -6,6 +6,7 @@ from mathutils import Vector, Quaternion
 
 from . import recorder, source_manager
 from .pose import MocapPose, Bone
+from .logger import FoxLog
 from .utility import add_to_collection
 
 
@@ -22,6 +23,9 @@ def apply_transforms_to_armature(mocap_pose: MocapPose) -> bpy.types.Object:
     else:
         return
 
+    logging = FoxLog.is_open()
+    applied_rows = [] if logging else None
+
     for bone_name, transform_data in mocap_pose.skeleton_transform_dict.items():
         if mocap_pose.props.get(bone_name) is not None:
             apply_transform_to_prop_empty(mocap_pose, bone_name)
@@ -36,11 +40,47 @@ def apply_transforms_to_armature(mocap_pose: MocapPose) -> bpy.types.Object:
             if not bone.parent and bone.name == "Pelvis":
                 apply_vector_to_pelvis(mocap_pose, bone, armature)
                 recorder.add_record(armature, bone_name, bone.rotation_quaternion.copy(), bone.location.copy())
+                if logging:
+                    applied_rows.append(
+                        "bone=%s target=%s pos=%s quat=%s"
+                        % (bone_name, bone_name, FoxLog.vec(bone.location), FoxLog.quat(bone.rotation_quaternion))
+                    )
 
             # --- Apply Quaternion to all children ---
             elif bone.parent and bone.name != "Pelvis":
                 apply_quaterion_to_children(mocap_pose, bone, armature)
                 recorder.add_record(armature, bone_name, bone.rotation_quaternion.copy())
+                if logging:
+                    applied_rows.append(
+                        "bone=%s target=%s parent=%s quat=%s"
+                        % (bone_name, bone_name, bone.parent.name, FoxLog.quat(bone.rotation_quaternion))
+                    )
+
+    # --- Per-frame summary + full dump of what reached the displayed armature ---
+    if logging:
+        frame, dt = FoxLog.tick()
+        FoxLog.log(
+            "pose",
+            "stage=apply",
+            f=frame,
+            smp=getattr(mocap_pose, "_fox_sample", None),
+            dt="%.1fms" % dt,
+            actor=armature_name,
+            bones=len(applied_rows),
+            gloves=mocap_pose.gloves,
+            props=mocap_pose.prop_count,
+        )
+        FoxLog.block(
+            "apply",
+            {"f": frame, "actor": armature_name, "armature": armature_name, "bones": len(applied_rows)},
+            applied_rows,
+        )
+        # In this add-on the streamed armature IS the displayed skeleton, so the
+        # segment -> bone mapping is identity-by-name (retarget to a user character is
+        # handled separately by Blender constraints/drivers from rigging.py).
+        FoxLog.log(
+            "retarget", "stage=frame", actor=armature_name, armature=armature_name, bones=len(applied_rows), map="by-name"
+        )
 
 
 def apply_vector_to_pelvis(mocap_pose: MocapPose, pelvis_bone: Bone, armature: bpy.types.Object) -> bpy.types.Object:
@@ -124,9 +164,19 @@ def apply_transform_to_prop_empty(mocap_pose: MocapPose, bone_name: str):
 
         recorder.add_record(obj, "", obj.rotation_quaternion.copy(), obj.location.copy())
 
+        FoxLog.log(
+            "apply",
+            "stage=prop",
+            bone=bone_name,
+            obj=target_empty_name,
+            pos=FoxLog.vec(obj.location),
+            quat=FoxLog.quat(obj.rotation_quaternion),
+        )
+
     else:
         message = f"Prop empty '{bone_name}' not found in the scene"
         bpy.ops.logging.logger("INVOKE_DEFAULT", message_type="WARNING", message_text=message)
+        FoxLog.warn(message)
 
 
 # --------------------------------------------------------------------------------------------------------------------------------------------
@@ -136,6 +186,7 @@ def apply_transforms_to_trackers(mocap_pose: MocapPose):
     Applies the position and rotation from mocap data to the corresponding tracker empties in the scene.
     """
     vive_objects = mocap_pose.vive_objects
+    tracker_count = 0
     for index, vive_object in enumerate(vive_objects):
         target_empty = f"{mocap_pose.actor_name}_{vive_object}"
         if target_empty in bpy.data.objects:
@@ -155,9 +206,19 @@ def apply_transforms_to_trackers(mocap_pose: MocapPose):
 
                 recorder.add_record(obj, "", obj.rotation_quaternion.copy(), obj.location.copy())
 
+                tracker_count += 1
+                FoxLog.log(
+                    "apply",
+                    "stage=tracker",
+                    obj=target_empty,
+                    pos=FoxLog.vec(obj.location),
+                    quat=FoxLog.quat(obj.rotation_quaternion),
+                )
+
             except IndexError:
                 message = f"Index {index} not found in skeleton transform dict"
                 bpy.ops.logging.logger("INVOKE_DEFAULT", message_type="WARNING", message_text=message)
+                FoxLog.warn(message)
         else:
             vive_objects = source_manager.get_vive_objects_from_pose(mocap_pose, clear_data=True)
             source_manager.delete_tracker_empties(vive_objects)
@@ -165,7 +226,21 @@ def apply_transforms_to_trackers(mocap_pose: MocapPose):
                 mocap_pose.vive_objects.remove(vive_object)
             except ValueError as e:
                 print(f"Error while removing object data from pose: {e}")
+                FoxLog.warn(f"removing tracker {vive_object} failed: {e}")
             mocap_pose.create_object_cluster = True
+
+    # --- Per-frame tracker summary ---
+    if FoxLog.is_open():
+        frame, dt = FoxLog.tick()
+        FoxLog.log(
+            "pose",
+            "stage=trackers",
+            f=frame,
+            smp=getattr(mocap_pose, "_fox_sample", None),
+            dt="%.1fms" % dt,
+            actor=mocap_pose.actor_name,
+            trackers=tracker_count,
+        )
     return None  # important to return None to prevent re-scheduling the function
 
 

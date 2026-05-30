@@ -15,6 +15,7 @@
 #include "LiveLinkMvnMetadataService.h"
 #include "LiveLinkSourceSettings.h"
 #include "LiveLinkMvnSourceFactory.h"
+#include "FoxLog.h"
 
 
 #pragma optimize("", off)
@@ -148,6 +149,8 @@ void FLiveLinkMvnSource::updateRefSkeleton(int avatarId, int numOfSegments)
 			//if ( Client->GetSubjectSettings( SubjectKey ) == nullptr )
 			{
 				Client->PushSubjectStaticData_AnyThread( SubjectKey, ULiveLinkAnimationRole::StaticClass(), MoveTemp( StaticData ) );
+				FFoxLog::Get().Log(TEXT("boot"), FString::Printf(
+					TEXT("static skeleton avatar=%d bones=%d subject=%s"), avatarId, RequiredBoneCount, *SubjectName.ToString()));
 			}
 			//else
 			{
@@ -170,6 +173,8 @@ void FLiveLinkMvnSource::Start()
 void FLiveLinkMvnSource::Stop()
 {
 	Stopping = true;
+	// Write the session summary and close ue_log.log (idempotent: no-op if already closed).
+	FFoxLog::Get().Close(FString::Printf(TEXT("frames=%lld drops=%lld"), FFoxLog::Get().Frames, FFoxLog::Get().Drops));
 }
 
 uint32 FLiveLinkMvnSource::Run()
@@ -198,10 +203,11 @@ uint32 FLiveLinkMvnSource::Run()
 			{
 				#if UE_VERSION_OLDER_THAN(5, 5, 0)
 					Reader->RemoveAt(Read, Reader->Num() - Read, false);
-				#else 
+				#else
 					Reader->RemoveAt(Read, Reader->Num() - Read, EAllowShrinking::No);
 				#endif
-				
+
+				FFoxLog::Get().Log(TEXT("net"), FString::Printf(TEXT("from=%s bytes=%d"), *Sender->ToString(true), Read));
 				Recv(Reader, FIPv4Endpoint(Sender));
 			}
 		}
@@ -230,11 +236,41 @@ void FLiveLinkMvnSource::Recv(const FArrayReaderPtr& ArrayReaderPtr, const FIPv4
 
 			StreamingProtocol proto = (StreamingProtocol)d->messageType();
 			MvnTPose& tPose = m_atposesPos[avatarId];
+
+			// Log the parsed 24-byte MXTP header for every datagram.
+			FFoxLog::Get().Log(TEXT("header"), FString::Printf(
+				TEXT("msg=0x%02x avatar=%u items=%u smp=%d dgram=0x%02x frameTime=%d body=%u props=%u fingers=%u"),
+				(int)proto, avatarId, (unsigned)d->dataCount(), d->sampleCounter(), (int)d->datagramCounter(),
+				d->frameTime(), segmentCount, propCount, fingerSegCount));
+
 			if (proto == StreamingProtocol::SPPoseQuaternion)
 			{
 				TSharedPtr<Pose, ESPMode::ThreadSafe> NewPose(new Pose());
 
 				QuaternionDatagram *q = static_cast<QuaternionDatagram *>(d.get());
+
+				// Full per-segment dump of the raw wire values (segId + pos + quat w,x,y,z).
+				if (FFoxLog::Get().IsOpen())
+				{
+					if ((int)q->m_data.size() != (int)d->dataCount())
+					{
+						FFoxLog::Get().Log(TEXT("warn"), FString::Printf(
+							TEXT("segment count mismatch parsed=%d dataCount=%u dgram=0x%02x"),
+							(int)q->m_data.size(), (unsigned)d->dataCount(), (int)d->datagramCounter()));
+					}
+					TArray<FString> Rows;
+					Rows.Reserve((int32)q->m_data.size());
+					for (const auto& kin : q->m_data)
+					{
+						Rows.Add(FString::Printf(
+							TEXT("seg=%d rawPos=(%.3f,%.3f,%.3f) rawQuat=q(%.4f,%.4f,%.4f,%.4f)"),
+							kin.segmentId, kin.sensorPos[0], kin.sensorPos[1], kin.sensorPos[2],
+							kin.quatRotation[0], kin.quatRotation[1], kin.quatRotation[2], kin.quatRotation[3]));
+					}
+					FFoxLog::Get().Block(TEXT("decode"),
+						FString::Printf(TEXT("avatar=%u segs=%d smp=%d"), avatarId, (int)q->m_data.size(), d->sampleCounter()),
+						Rows);
+				}
 
 				bool haveFingers = (fingerSegCount > 0);
 				int firstFinger = (haveFingers ? SegmentIndexes::Prop1 + propCount : q->m_data.size());
@@ -273,6 +309,24 @@ void FLiveLinkMvnSource::Recv(const FArrayReaderPtr& ArrayReaderPtr, const FIPv4
 						seg->Set(kin, segmentIndex);
 				}
 
+				// Full per-bone dump of the converted (MVN -> Unreal) local transforms.
+				if (FFoxLog::Get().IsOpen())
+				{
+					TArray<FString> Rows;
+					Rows.Reserve((int32)NewPose->Segments.size());
+					for (int si = 0; si < (int)NewPose->Segments.size(); ++si)
+					{
+						const FTransform& T = NewPose->Segments[si].Transform;
+						const FName BoneName = SegmentInformation::SegmentBoneNames.IsValidIndex(si + 1)
+							? SegmentInformation::SegmentBoneNames[si + 1] : NAME_None;
+						Rows.Add(FString::Printf(TEXT("seg=%d name=%s pos=%s quat=%s"),
+							si, *BoneName.ToString(), *FFoxLog::Vec(T.GetLocation()), *FFoxLog::Quat(T.GetRotation())));
+					}
+					FFoxLog::Get().Block(TEXT("apply"),
+						FString::Printf(TEXT("stage=convert avatar=%u bones=%d"), avatarId, (int)NewPose->Segments.size()),
+						Rows);
+				}
+
 				FLiveLinkSubjectName SubjectName = FLiveLinkSubjectName(GetSubjectName(avatarId, port));
 				FLiveLinkMvnMetadataService::getInstance().SetSegmentCount(SourceGuid, SubjectName, NewPose->Segments.size());
 
@@ -297,6 +351,20 @@ void FLiveLinkMvnSource::Recv(const FArrayReaderPtr& ArrayReaderPtr, const FIPv4
 					{
 						tPose[s] = FVector(q->m_data[s].segmentOriginPos[0] * 100, -q->m_data[s].segmentOriginPos[1] * 100, q->m_data[s].segmentOriginPos[2] * 100);
 						segmentNames.Add(FString(q->m_data[s].segmentName.c_str()));
+					}
+
+					// Full dump of the T-pose / scale origins (converted to Unreal space).
+					if (FFoxLog::Get().IsOpen())
+					{
+						TArray<FString> Rows;
+						Rows.Reserve((int32)q->m_data.size());
+						for (int s = 0; s < (int)q->m_data.size(); s++)
+						{
+							Rows.Add(FString::Printf(TEXT("seg=%s origin=%s"),
+								*FString(q->m_data[s].segmentName.c_str()), *FFoxLog::Vec(tPose[s])));
+						}
+						FFoxLog::Get().Block(TEXT("scale"),
+							FString::Printf(TEXT("avatar=%u segs=%d"), avatarId, (int)q->m_data.size()), Rows);
 					}
 
 					FLiveLinkSubjectName SubjectName = FLiveLinkSubjectName(GetSubjectName(avatarId, port));
@@ -334,6 +402,7 @@ void FLiveLinkMvnSource::Recv(const FArrayReaderPtr& ArrayReaderPtr, const FIPv4
 						CurrentSkeletonSegmentCount[avatarId] = 0; // to force subject update
 
 						m_AvatarNames.Add(avatarId, NewSubjectName);
+						FFoxLog::Get().Log(TEXT("boot"), FString::Printf(TEXT("avatar %u name=%s"), avatarId, *NewSubjectName));
 					}
 				}
 			}
@@ -375,6 +444,27 @@ void FLiveLinkMvnSource::Send(int avatarId)
 	{
 		SegData* seg = &Segment;
 		Transforms.Add(seg->Transform);
+	}
+
+	// This frame is about to drive the displayed skeleton: log the summary + full transforms.
+	FFoxLog::Get().Frames++;
+	if (FFoxLog::Get().IsOpen())
+	{
+		FFoxLog::Get().Log(TEXT("pose"), FString::Printf(
+			TEXT("stage=push avatar=%d frame=%d bones=%d subject=%s"),
+			avatarId, LatestPose->FrameId, Transforms.Num(), *SubjectName.ToString()));
+		TArray<FString> Rows;
+		Rows.Reserve(Transforms.Num());
+		for (int32 i = 0; i < Transforms.Num(); ++i)
+		{
+			const FName BoneName = SegmentInformation::SegmentBoneNames.IsValidIndex(i)
+				? SegmentInformation::SegmentBoneNames[i] : NAME_None;
+			Rows.Add(FString::Printf(TEXT("idx=%d bone=%s pos=%s quat=%s"),
+				i, *BoneName.ToString(), *FFoxLog::Vec(Transforms[i].GetLocation()), *FFoxLog::Quat(Transforms[i].GetRotation())));
+		}
+		FFoxLog::Get().Block(TEXT("apply"),
+			FString::Printf(TEXT("stage=final avatar=%d frame=%d bones=%d"), avatarId, LatestPose->FrameId, Transforms.Num()),
+			Rows);
 	}
 
 	//direct communication with client
@@ -443,6 +533,9 @@ void FLiveLinkMvnSource::InitializeSettings( ULiveLinkSourceSettings* Settings )
 			{
 				MvnRemoteControlManager::GetInstance()->AddReservedPort( port );
 			}
+
+			// (Re)create ue_log.log fresh for this streaming session, then start receiving.
+			FFoxLog::Get().Reopen( FString::Printf( TEXT( "addr=0.0.0.0:%d proto=MXTP units=cm gloves=auto" ), port ) );
 
 			Start();
 		}
