@@ -576,7 +576,8 @@ const char* connStatusName(ConnStatus s);
 class MocapReceiver : public QThread {
     Q_OBJECT
 public:
-    explicit MocapReceiver(bool testMode, QObject* parent=nullptr);
+    explicit MocapReceiver(bool testMode, bool recordRaw=false,
+                           bool readRaw=false, QObject* parent=nullptr);
     ~MocapReceiver() override;
 
     void stop();
@@ -1343,6 +1344,8 @@ struct CliArgs {
     bool test   = false;
     bool gloves = false;
     bool wristConstraint = false;
+    bool recordRaw = false;   // -recordrawsensor: dump the raw per-sensor suit stream to rawsensorlog.bin
+    bool readRaw   = false;   // -readrawsensor: replay rawsensorlog.bin instead of connecting to hardware
     SuitType suit = SuitType::Awinda;
     QString language;
 };
