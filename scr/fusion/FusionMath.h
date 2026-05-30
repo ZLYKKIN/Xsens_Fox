@@ -67,7 +67,6 @@ typedef union {
 #define M_PI (3.14159265358979323846)
 #endif
 
-// §38 переводы градусы<->радианы (formules.txt)
 static inline float FusionDegreesToRadians(const float degrees) {
     return degrees * ((float) M_PI / 180.0f);
 }
@@ -76,7 +75,6 @@ static inline float FusionRadiansToDegrees(const float radians) {
     return radians * (180.0f / (float) M_PI);
 }
 
-// §115/§1280 безопасный asin с зажимом аргумента в [-1,1] (formules.txt)
 static inline float FusionArcSin(const float value) {
     if (value <= -1.0f) {
         return (float) M_PI / -2.0f;
@@ -89,7 +87,6 @@ static inline float FusionArcSin(const float value) {
 
 #ifndef FUSION_USE_NORMAL_SQRT
 
-// §181/§1283 быстрый обратный квадратный корень (bit-hack + 1 итерация Ньютона-Рафсона) (formules.txt)
 static inline float FusionFastInverseSqrt(const float x) {
     typedef union {
         float f;

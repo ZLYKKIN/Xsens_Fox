@@ -73,7 +73,7 @@ typedef struct {
     bool  magGateOpen;
     bool  accUsedThisFrame;
     bool  zruActiveThisFrame;
-    bool  qSeeded;            // ориентация засеяна от акселерометра на 1-м кадре (см. FusionAhrsUpdate)
+    bool  qSeeded;
 
     FusionAhrsSettings settings;
 } FusionAhrs;

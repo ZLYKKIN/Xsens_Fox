@@ -4,31 +4,23 @@
 #include <string.h>
 #include <float.h>
 
-// ===== §IX FoxKF — расширенный фильтр Калмана на ОДИН датчик (конфиг сверен с FoxKF/FoxCal/FoxHW дампом xsb) =====
-// §41.1 гравитация модели
 #define KFA_GRAVITY_MS2          9.812687f
 
-// §XXXIII/§IX σ измерений (W2-чип): acc после LPA ≈0.05 м/с², gyr 0.20°/с, mag 0.028 (норм.)
 #define KFA_SIGMA_ACC_MS2        0.05f
 #define KFA_SIGMA_GYR_DEG_S      0.20f
 #define KFA_SIGMA_MAG_NORM       0.028f
 
-// §IX/§43 полно-ориентационная гравитационная коррекция (эталон Ozonised/Kalman-AHRS):
-//   ширина доверия по |a|≈g; σ невязки (рад) для статики/динамики; пол диагонали P ориентации.
-#define KFA_ACC_TRUST_WIDTH      0.10f      // доля g: |a| в пределах ±10% g => «статика»
-#define KFA_ACC_SIG_STATIC_RAD   0.05f      // статика: малая σ => быстрое выравнивание по гравитации
-#define KFA_ACC_SIG_DYN_RAD      5.0f       // динамика: большая σ => акселерометр почти игнорируется
-#define KFA_ACC_P_ORIENT_FLOOR   1.218e-3f  // (2°)² рад²: держит усиление коррекции живым
+#define KFA_ACC_TRUST_WIDTH      0.10f
+#define KFA_ACC_SIG_STATIC_RAD   0.05f
+#define KFA_ACC_SIG_DYN_RAD      5.0f
+#define KFA_ACC_P_ORIENT_FLOOR   1.218e-3f
 
-// §IX начальные СКО состояния (диагональ P0): ориент. 3°, смещ. гиро 0.4°, смещ. акс. 0.10 м/с², mag 0.20, скорость 2 м/с
 #define KFA_INIT_SD_ORIENT_DEG   3.0f
 #define KFA_INIT_SD_GYRBIAS_DEG  0.4f
 #define KFA_INIT_SD_ACCBIAS_MS2  0.10f
 #define KFA_INIT_SD_MAG_NORM     0.20f
 #define KFA_INIT_SD_VEL_MS       2.0f
 
-// §IX/§XII шум процесса (acc-LP, mag random-walk), пределы смещения гиро 0.005..0.07°/с;
-//   §XII магнитная невязка: порог 0.03, tau вверх/вниз 0.6/3.0 с; переопределение курса (closed 5с, ramp 2с, downscale 0.10)
 #define KFA_S_QV_ACC_LP          0.04f
 #define KFA_S_QV_MAG_RW          0.01f
 #define KFA_GYR_BIAS_MIN_DEG     0.005f
@@ -40,8 +32,6 @@
 #define KFA_REDEF_RAMP_S         2.0f
 #define KFA_REDEF_SIGMA_DOWNSCALE 0.10f
 
-// §XII/§XXI LPA ускорения tau 10 с; детектор расхождения ускорения (accDiv) 0.5/3.0/2.0/0.5с;
-//   boost доверия к ускорению до 1000 (ramp вверх/вниз 5/60 с); tau скорости 2 с
 #define KFA_LPA_TAU_S            10.0f
 #define KFA_ACCDIV_THRESH_LOW    0.5f
 #define KFA_ACCDIV_THRESH_HIGH   3.0f
@@ -52,47 +42,34 @@
 #define KFA_FACCBOOST_RAMP_DN_S  60.0f
 #define KFA_VEL_TAU_S            2.0f
 
-// §XII магнитные gate (kMagnet): норма 1.0/допуск 0.03, наклонение dip 3.5°, угол 6.0°.
-//   ВНИМАНИЕ: расширять эти gate НЕЛЬЗЯ. Магнитометры костюма искажены ПОСЕГМЕНТНО по-разному
-//   (soft-iron: dip −51°…−82° между сенсорами, |m| 0.78…1.15), т.е. поле НЕ единое. При широком
-//   gate каждый сенсор тянется к своему кривому полю → относительные курсы сегментов рассыпаются,
-//   скелет сворачивается (руки/торс в клубок). Поэтому строгий gate ≈ магнит фактически выключен,
-//   курс — по гироскопу (лучше посегментный дрейф, чем искажение от кривого магнита).
 #define KFA_MAG_NORM_REF         1.0f
 #define KFA_MAG_NORM_GATE        0.03f
 #define KFA_MAG_DIP_GATE_DEG     3.5f
 #define KFA_MAG_ANG_GATE_DEG     6.0f
 
-// §XII усреднение опорного поля m0: tau быстрое/среднее/медленное 30/120/300 с; обучение поля при ω<10°/с, normdiff 0.1
 #define KFA_TAU_M0_FAST_S        30.0f
 #define KFA_TAU_M0_MED_S         120.0f
 #define KFA_TAU_M0_SLOW_S        300.0f
 #define KFA_MAG_LEARN_OMEGA_DEG  10.0f
 #define KFA_MAG_LEARN_NORMDIFF   0.1f
 
-// §XIII ZRU (zero-velocity/rate update): дисперсия 9.0, мин. 15 сэмплов, частота обновления 2
 #define KFA_ZRU_VARIANCE         9.0f
 #define KFA_ZRU_MIN_SAMPLES      15
 #define KFA_ZRU_UPDATE_RATE      2
 
-// §XIII детектор неподвижности: ω<0.3°/с, удержание 5 с, полоса ускорения 0.5 м/с²
 #define KFA_STILLNESS_OMEGA_DEG  0.3f
 #define KFA_STILLNESS_HOLD_S     5.0f
 #define KFA_STILLNESS_ACC_BAND_MS2 0.5f
 
-// §XI skin-артефакт: постоянная времени Гаусса-Маркова 0.15 с
 #define KFA_SKIN_TAU_S           0.15f
 
-// §IX зажим диагонали ковариации P (численная устойчивость)
 #define KFA_P_DIAG_MIN           1.0e-12f
 #define KFA_P_DIAG_MAX           1.0e+6f
 
-// §IX вектор состояния FoxKF: 17 = 15 баз. (ориент./смещения/скорость) + magnorm[15] + skinphi[16]
 #define N15 17
 #define IDX_MAGNORM 15
 #define IDX_SKINPHI 16
 
-// §38 переводы градусы<->радианы
 static inline float DegToRad(float d) { return d * 0.017453292519943295f; }
 static inline float RadToDeg(float r) { return r * 57.29577951308232f; }
 
@@ -169,7 +146,6 @@ static int InvSym3(const float M[9], float Inv[9]) {
     return 1;
 }
 
-// §II.10/§1276 экспонента кватерниона из вектора поворота; малый угол через Тейлор (cos≈1-n²/8, sin/n≈½(1-n²/24))
 static FusionQuaternion ExpQuat(FusionVector phi) {
     const float n = sqrtf(phi.axis.x * phi.axis.x +
                           phi.axis.y * phi.axis.y +
@@ -213,7 +189,6 @@ static FusionVector RotByQInv(FusionQuaternion q, FusionVector v) {
     return RotByQ(q, v);
 }
 
-// §8/§2098 SLERP; при dot>0.9995 переход на NLERP (линейная ветвь) — порог по спецификации (formules.txt)
 static FusionQuaternion Slerp(FusionQuaternion a, FusionQuaternion b, float t) {
     float dot = a.element.w * b.element.w + a.element.x * b.element.x +
                 a.element.y * b.element.y + a.element.z * b.element.z;
@@ -272,7 +247,6 @@ static void ApplyDeltaX(FusionAhrs *ahrs, const float dx[N15]) {
     ahrs->skinPhiScalar += dx[IDX_SKINPHI];
 }
 
-// §XXX/§XII дефолтные настройки FoxKF: конвенция NWU (§VI), 240 Гц (§XXX), наклонение поля 78° (FoxCal.e_dip_mag)
 const FusionAhrsSettings fusionAhrsDefaultSettings = {
     .convention             = FusionConventionNwu,
     .sampleRateHz           = 240.0f,
@@ -378,7 +352,6 @@ void FusionAhrsSetSampleRate(FusionAhrs *ahrs, float sampleRateHz)
     if (sampleRateHz > 1.0f) ahrs->settings.sampleRateHz = sampleRateHz;
 }
 
-// §IX шаг ПРЕДСКАЗАНИЯ FoxKF: strapdown-интегрирование ориентации по гироскопу, прогон ковариации P (formules.txt)
 static void Predict(FusionAhrs *ahrs, FusionVector gyroDegS, float dt) {
     FusionVector omega = {{
         DegToRad(gyroDegS.axis.x) - ahrs->b_g.axis.x,
@@ -439,7 +412,6 @@ static void Predict(FusionAhrs *ahrs, FusionVector gyroDegS, float dt) {
     Symm15(ahrs->P);
 }
 
-// §XII НЧ-фильтр ускорения (LPA, tau 10с) + монитор расхождения ускорения (accDiv) для доверия к acc-обновлению (formules.txt)
 static void UpdateLPAAndDivMon(FusionAhrs *ahrs, FusionVector aSensorMs2, float dt) {
     FusionVector aCorr = {{
         aSensorMs2.axis.x - ahrs->b_a.axis.x,
@@ -497,13 +469,6 @@ static void UpdateLPAAndDivMon(FusionAhrs *ahrs, FusionVector aSensorMs2, float 
     else                                                        ahrs->tauM0 = KFA_TAU_M0_MED_S;
 }
 
-// §IX/§43 шаг КОРРЕКЦИИ FoxKF по акселерометру — ПОЛНО-ОРИЕНТАЦИОННАЯ коррекция гравитации.
-//   Невязка = поворот, совмещающий ПРЕДСКАЗАННОЕ направление гравитации с ИЗМЕРЕННЫМ; он определён
-//   вплоть до 180°, поэтому «перевёрнутая» оценка ВЫРАВНИВАЕТСЯ обратно, а не залипает. Прежняя
-//   линеаризованная невязка r=a−R(q)⁻¹g с H=skew(hAcc) при ошибке ~180° вырождалась (невязка
-//   становилась радиальной, в нуль-пространстве H) — сегмент «кувыркался» и держал accErr≈2g всю
-//   сцену. Доверие к акселерометру задаётся по |a|≈g (статика ⇒ доверяем, динамика ⇒ ведёт гироскоп),
-//   что отвергает линейное ускорение без жёсткого гейта. (Эталон: Ozonised/Kalman-AHRS.) (formules.txt §43)
 static void ApplyAccUpdate(FusionAhrs *ahrs, FusionVector aSensorMs2) {
     const FusionVector aCorr = {{
         aSensorMs2.axis.x - ahrs->b_a.axis.x,
@@ -513,7 +478,6 @@ static void ApplyAccUpdate(FusionAhrs *ahrs, FusionVector aSensorMs2) {
     const float aN = FusionVectorNorm(aCorr);
     if (aN < 1e-6f) { ahrs->accUsedThisFrame = false; return; }
 
-    // предсказанное (gHat) и измеренное (aHat) направление гравитации в системе датчика
     const FusionVector zUp = {{ 0.0f, 0.0f, 1.0f }};
     FusionVector gHat = RotByQInv(ahrs->q, zUp);
     const float gHatN = FusionVectorNorm(gHat);
@@ -524,8 +488,6 @@ static void ApplyAccUpdate(FusionAhrs *ahrs, FusionVector aSensorMs2) {
                                  aCorr.axis.y * invAN,
                                  aCorr.axis.z * invAN }};
 
-    // поворот gHat→aHat (ось/угол); коррекция тела = его обратный (−ось*угол), валидно и при 180°
-    //   (антипараллельно — поворот π вокруг любой перпендикулярной к gHat оси).
     const FusionVector cr = {{
         gHat.axis.y * aHat.axis.z - gHat.axis.z * aHat.axis.y,
         gHat.axis.z * aHat.axis.x - gHat.axis.x * aHat.axis.z,
@@ -535,7 +497,7 @@ static void ApplyAccUpdate(FusionAhrs *ahrs, FusionVector aSensorMs2) {
     const float dotga = gHat.axis.x * aHat.axis.x + gHat.axis.y * aHat.axis.y + gHat.axis.z * aHat.axis.z;
     FusionVector axis = zUp; float angle = 0.0f;
     if (sn < 1e-7f) {
-        if (dotga <= 0.0f) {                       // 180°: ось — любой перпендикуляр к gHat
+        if (dotga <= 0.0f) {
             FusionVector t = {{ 1.0f, 0.0f, 0.0f }};
             if (fabsf(gHat.axis.x) > 0.9f) { t.axis.x = 0.0f; t.axis.y = 1.0f; }
             FusionVector p = {{
@@ -551,16 +513,12 @@ static void ApplyAccUpdate(FusionAhrs *ahrs, FusionVector aSensorMs2) {
         axis.axis.x = cr.axis.x / sn; axis.axis.y = cr.axis.y / sn; axis.axis.z = cr.axis.z / sn;
         angle = atan2f(sn, dotga);
     }
-    // невязка = поворот-вектор коррекции тела (−ось*угол), |·| ≤ π
     const float r[3] = { -axis.axis.x * angle, -axis.axis.y * angle, -axis.axis.z * angle };
 
-    // H = единичная на блоке ориентации (3 x N15); смещение гиро правится через кросс-ковариацию P.
-    //   Смещение акселерометра (6..8) НЕ наблюдается гравитацией (иначе ориентация теряет наблюдаемость).
     float H[3 * N15];
     memset(H, 0, sizeof(H));
     H[0 * N15 + 0] = 1.0f; H[1 * N15 + 1] = 1.0f; H[2 * N15 + 2] = 1.0f;
 
-    // доверие к акселерометру по |a|≈g: статика ⇒ малая σ (большое усиление), динамика ⇒ большая σ.
     const float errG  = fabsf(aN - KFA_GRAVITY_MS2) / KFA_GRAVITY_MS2;
     const float tw    = errG / KFA_ACC_TRUST_WIDTH;
     const float trust = expf(-tw * tw);
@@ -606,23 +564,17 @@ static void ApplyAccUpdate(FusionAhrs *ahrs, FusionVector aSensorMs2) {
     float dx[N15];
     for (int i = 0; i < N15; ++i)
         dx[i] = K[i * 3 + 0] * r[0] + K[i * 3 + 1] * r[1] + K[i * 3 + 2] * r[2];
-    // never inject a non-finite correction: it would NaN the quaternion and force a
-    //   re-seed that loses heading (a ~100° yaw jump). Skip this update instead.
     for (int i = 0; i < N15; ++i)
         if (!isfinite(dx[i])) { ahrs->accUsedThisFrame = false; return; }
-    // keep accel-bias frozen: never let the gravity update move b_a, even via the
-    //   orientation/bias cross-covariance (see note on H above).
     dx[6] = dx[7] = dx[8] = 0.0f;
     ApplyDeltaX(ahrs, dx);
 
     Joseph_3x15(ahrs->P, H, K, Rdiag);
 
-    // пол ковариации ориентации — усиление гравитационной коррекции остаётся живым (быстрое выравнивание)
     for (int i = 0; i < 3; ++i)
         if (ahrs->P[i * N15 + i] < KFA_ACC_P_ORIENT_FLOOR)
             ahrs->P[i * N15 + i] = KFA_ACC_P_ORIENT_FLOOR;
 
-    // §XII диагностика: остаточная невязка гравитации (м/с²) по СКОРРЕКТИРОВАННОЙ ориентации -> [ahrs] лог
     {
         const FusionVector gW = {{ 0.0f, 0.0f, KFA_GRAVITY_MS2 }};
         const FusionVector gS = RotByQInv(ahrs->q, gW);
@@ -634,7 +586,6 @@ static void ApplyAccUpdate(FusionAhrs *ahrs, FusionVector aSensorMs2) {
     ahrs->accUsedThisFrame = true;
 }
 
-// §XII gating магнитометра: приём измерения только при норме/наклонении/угле поля в пределах gate (6°/3.5°/0.03) (formules.txt)
 static bool MagGate(FusionAhrs *ahrs, FusionVector m) {
     const float mNorm = sqrtf(m.axis.x * m.axis.x + m.axis.y * m.axis.y + m.axis.z * m.axis.z);
     if (mNorm < 1e-6f) return false;
@@ -680,7 +631,6 @@ static bool MagGate(FusionAhrs *ahrs, FusionVector m) {
     return true;
 }
 
-// §XII обучение опорного магнитного поля m0 при неподвижности (ω<10°/с), усреднение tau 30/120/300 с (formules.txt)
 static void LearnMagFieldIfStill(FusionAhrs *ahrs, FusionVector m, FusionVector gyroDegS, float dt) {
     if (!ahrs->settings.learnMagField) return;
     const float mNorm = sqrtf(m.axis.x * m.axis.x + m.axis.y * m.axis.y + m.axis.z * m.axis.z);
@@ -712,7 +662,6 @@ static void LearnMagFieldIfStill(FusionAhrs *ahrs, FusionVector m, FusionVector 
     }
 }
 
-// §XII шаг КОРРЕКЦИИ FoxKF по магнитометру (курс): невязка к опорному полю m0, коррекция рыскания (formules.txt)
 static void ApplyMagUpdate(FusionAhrs *ahrs, FusionVector m, float dt) {
 
     if (m.axis.x == 0.0f && m.axis.y == 0.0f && m.axis.z == 0.0f) {
@@ -857,7 +806,6 @@ static void ApplyMagUpdate(FusionAhrs *ahrs, FusionVector m, float dt) {
     }
 }
 
-// §XIII ZRU (zero-rate update): при неподвижности гасит дрейф угловой скорости/смещения гиро (formules.txt)
 static void ApplyZruIfStill(FusionAhrs *ahrs, FusionVector gyroDegS, FusionVector aSensorMs2, float dt) {
     ahrs->zruActiveThisFrame = false;
 
@@ -933,7 +881,6 @@ static void ApplyZruIfStill(FusionAhrs *ahrs, FusionVector gyroDegS, FusionVecto
     ahrs->zruActiveThisFrame = true;
 }
 
-// §XI пост-фильтр skin-артефакта (мягкие ткани): Гаусс-Марков с tau 0.15 с поверх ориентации (formules.txt)
 static void ApplySkinPostFilter(FusionAhrs *ahrs, float dt) {
     if (!ahrs->qSkinReady) {
         ahrs->qSkin = ahrs->q;
@@ -945,7 +892,6 @@ static void ApplySkinPostFilter(FusionAhrs *ahrs, float dt) {
     ahrs->qSkin = FusionQuaternionNormalise(ahrs->qSkin);
 }
 
-// §IX/§XXX главный шаг FoxKF на кадр: Predict -> LPA/divMon -> acc-update -> mag-update -> ZRU -> skin (formules.txt)
 void FusionAhrsUpdate(FusionAhrs *ahrs,
                       FusionVector gyroscope,
                       FusionVector accelerometer,
@@ -959,23 +905,16 @@ void FusionAhrsUpdate(FusionAhrs *ahrs,
         accelerometer.axis.z * KFA_GRAVITY_MS2,
     }};
 
-    // §IX БУТСТРАП ориентации от акселерометра на 1-м кадре. EKF стартует с q=identity и
-    //   init-SD ориентации всего 3° (KFA_INIT_SD_ORIENT_DEG) — то есть «считает себя выровненным».
-    //   Но датчик смонтирован под произвольным углом (напр. q_bs таза ~174°), поэтому без засева
-    //   dAcc огромен, акселерометр гейтится (dAccHighTime>0.5с -> accUsedThisFrame=false) и
-    //   ориентация НЕ сходится -> дрейф/вращение неподвижного сегмента. Засев выравнивает q к
-    //   измеренной гравитации (рыскание=0, его задаёт mag/калибровка): R(q)·â = world_up.
-    //   (formules.txt §IX/§43)
     if (!ahrs->qSeeded) {
         const float aN = FusionVectorNorm(aMs2);
         if (aN > 0.5f * KFA_GRAVITY_MS2 && aN < 1.8f * KFA_GRAVITY_MS2) {
-            const FusionVector u = FusionVectorNormalise(aMs2);   // "вверх" в системе сенсора
+            const FusionVector u = FusionVectorNormalise(aMs2);
             FusionQuaternion qs;
             const float w = 1.0f + u.axis.z;
-            if (w < 1.0e-6f) {                 // сенсор перевёрнут (â≈-Z): 180° вокруг X
+            if (w < 1.0e-6f) {
                 qs.element.w = 0.0f; qs.element.x = 1.0f;
                 qs.element.y = 0.0f; qs.element.z = 0.0f;
-            } else {                           // кратчайшая дуга â -> (0,0,1)
+            } else {
                 qs.element.w = w;  qs.element.x =  u.axis.y;
                 qs.element.y = -u.axis.x; qs.element.z = 0.0f;
             }
