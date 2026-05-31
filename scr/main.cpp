@@ -2150,6 +2150,12 @@ struct MocapReceiver::Impl {
     std::array<FusionAhrsSettings,   kXsensSegmentCount> ahrsCfg{};
     double           freqHz       = 240.0;   // queried from XsDevice_updateRate
 
+    // ---- raw-sensor record / replay (flag-guarded; live path unaffected) ----
+    bool        recordRaw = false;   // --recordrawsensor
+    bool        replayRaw = false;   // --readrawsensor
+    std::string rawPath;             // rawsensorlog.bin next to fox_mocap.log
+    int         suitType  = 1;       // 0 = Awinda (60 Hz), 1 = Link (240 Hz)
+
     // Sensor-to-segment alignment — identity by default, overwritten when
     // the wizard finalises calibration.  Applied as inv(s2s[i]) to acc /
     // gyr / mag before they enter the fusion filter.
@@ -2181,6 +2187,22 @@ struct MocapReceiver::Impl {
 
     explicit Impl(bool t) : test(t) {}
 
+    // Run one raw suit sample through the EXACT live pipeline:
+    //   SDI reconstruction → acc/gyr/mag staging → hipose calibration
+    //   (acc_magn / gyr_bias / mag soft-iron|magn / s2s) → xio Fusion AHRS
+    // and write the fused world quaternion into `staging`.  Shared by the
+    // replay loop (runReplay) so recorded input reproduces the same skeleton.
+    // NOTE: this MUST stay numerically identical to the inline block in
+    // MocapReceiver::run() — change both together.
+    void fuseSegment(int targetSeg,
+                     Quat qo, bool haveQuat,
+                     QVector3D acc, bool haveAcc,
+                     QVector3D gyr, bool haveGyr,
+                     QVector3D mag, bool haveMag,
+                     QVector3D velInc, bool haveVelInc,
+                     Quat dq, bool haveDq,
+                     SuitPose& staging);
+
     void setStatus(ConnStatus s, const QString& detail,
                    MocapReceiver* parent)
     {
@@ -2209,6 +2231,15 @@ MocapReceiver::~MocapReceiver()
 }
 
 void MocapReceiver::stop() { m_impl->stop.store(true); }
+
+void MocapReceiver::setRawSensorIo(bool record, bool replay, const std::string& path)
+{
+    m_impl->recordRaw = record;
+    m_impl->replayRaw = replay;
+    m_impl->rawPath   = path;
+}
+
+bool MocapReceiver::isReplayingRaw() const { return m_impl->replayRaw; }
 
 void MocapReceiver::setTransport(Transport t)
 {
@@ -2293,6 +2324,108 @@ struct ManusErgoSnapshot {
     bool emaRightInit = false;
 };
 static ManusErgoSnapshot g_ergo;
+
+// ============================================================================
+//  Raw-sensor recorder  (--recordrawsensor)
+//  Streams the RAW pre-fusion suit channels (per packet) and the RAW Manus
+//  ergonomics input (per tick) to rawsensorlog.bin so the whole pipeline can
+//  be replayed deterministically with --readrawsensor.  No formulas are
+//  stored — only what arrives from the suit / gloves.
+//  Two producer threads write here (XDA poll thread + Manus callback) → QMutex.
+//  Binary layout (native endian, single-machine record→replay):
+//    magic "FOXRAW",1,0 (8) | suitType u8 | glovesOn u8 | segCount u16
+//                           | freqHz f64   | gloveHz  f64
+//    then tagged records:
+//    SUIT  : tag=1 u8 | sample u64 | t f64 | seg i32 | flags u8
+//            | [quat f32x4][acc f32x3][gyr f32x3][mag f32x3][velInc f32x3][dq f32x4]
+//            (each block present only if its flag bit is set)
+//    GLOVE : tag=2 u8 | t f64 | count u32 | count×{ id u32 | isUserID u32 | data f32x40 }
+// ============================================================================
+struct RawSensorRecorder {
+    std::atomic<bool> active { false };
+    QMutex            lock;
+    FILE*             fp = nullptr;
+
+    static constexpr quint8 kTagSuit  = 1;
+    static constexpr quint8 kTagGlove = 2;
+
+    void open(const std::string& path, int suitType, bool glovesOn,
+              double freqHz, double gloveHz, int segCount)
+    {
+        QMutexLocker lk(&lock);
+        if (fp) { std::fclose(fp); fp = nullptr; }
+#ifdef _WIN32
+        fopen_s(&fp, path.c_str(), "wb");
+#else
+        fp = std::fopen(path.c_str(), "wb");
+#endif
+        if (!fp) { active.store(false); return; }
+        const char magic[8] = { 'F','O','X','R','A','W', 1, 0 };
+        std::fwrite(magic, 1, 8, fp);
+        const quint8  st = quint8(suitType);
+        const quint8  gv = glovesOn ? 1 : 0;
+        const quint16 sc = quint16(segCount);
+        std::fwrite(&st,      sizeof(st),      1, fp);
+        std::fwrite(&gv,      sizeof(gv),      1, fp);
+        std::fwrite(&sc,      sizeof(sc),      1, fp);
+        std::fwrite(&freqHz,  sizeof(freqHz),  1, fp);
+        std::fwrite(&gloveHz, sizeof(gloveHz), 1, fp);
+        active.store(true);
+    }
+
+    void writeSuit(quint64 sample, double t, qint32 seg,
+                   const float* quat4, const float* acc3, const float* gyr3,
+                   const float* mag3, const float* velInc3, const float* dq4)
+    {
+        if (!active.load()) return;
+        quint8 fl = 0;
+        if (quat4)   fl |= quint8(1u << 0);
+        if (acc3)    fl |= quint8(1u << 1);
+        if (gyr3)    fl |= quint8(1u << 2);
+        if (mag3)    fl |= quint8(1u << 3);
+        if (velInc3) fl |= quint8(1u << 4);
+        if (dq4)     fl |= quint8(1u << 5);
+        QMutexLocker lk(&lock);
+        if (!fp) return;
+        const quint8 tag = kTagSuit;
+        std::fwrite(&tag,    1, 1, fp);
+        std::fwrite(&sample, sizeof(sample), 1, fp);
+        std::fwrite(&t,      sizeof(t),      1, fp);
+        std::fwrite(&seg,    sizeof(seg),    1, fp);
+        std::fwrite(&fl,     1, 1, fp);
+        if (quat4)   std::fwrite(quat4,   4, 4, fp);
+        if (acc3)    std::fwrite(acc3,    4, 3, fp);
+        if (gyr3)    std::fwrite(gyr3,    4, 3, fp);
+        if (mag3)    std::fwrite(mag3,    4, 3, fp);
+        if (velInc3) std::fwrite(velInc3, 4, 3, fp);
+        if (dq4)     std::fwrite(dq4,     4, 4, fp);
+    }
+
+    void writeGlove(double t, quint32 count, const quint32* ids,
+                    const quint32* isUserIds, const float* data40)
+    {
+        if (!active.load()) return;
+        QMutexLocker lk(&lock);
+        if (!fp) return;
+        const quint8 tag = kTagGlove;
+        std::fwrite(&tag,   1, 1, fp);
+        std::fwrite(&t,     sizeof(t),     1, fp);
+        std::fwrite(&count, sizeof(count), 1, fp);
+        for (quint32 i = 0; i < count; ++i) {
+            std::fwrite(&ids[i],       4, 1, fp);
+            std::fwrite(&isUserIds[i], 4, 1, fp);
+            std::fwrite(data40 + i * 40, 4, 40, fp);
+        }
+    }
+
+    void close()
+    {
+        QMutexLocker lk(&lock);
+        active.store(false);
+        if (fp) { std::fflush(fp); std::fclose(fp); fp = nullptr; }
+    }
+};
+static RawSensorRecorder g_rawRec;
 
 // Per-finger bone lengths in metres — approximate adult-male anatomy.
 // kFingerBoneLen[finger][joint].  joint 0 = MCP/CMC, joint 3 = tip.
@@ -2515,6 +2648,22 @@ static void __cdecl foxManusErgonomicsCb(const void* raw)
     const auto* s = reinterpret_cast<const ManusErgoStream*>(raw);
     g_ergo.lastTimeMs.store(GetTickCount64());
     g_ergo.lastCount.store(s->dataCount);
+
+    // ---- Raw recording (--recordrawsensor): capture the exact ergo input.
+    //      Inactive during replay (g_rawRec stays closed), so feeding a
+    //      reconstructed stream back through this callback never re-records. --
+    if (g_rawRec.active.load()) {
+        const std::uint32_t nrec = std::min<std::uint32_t>(s->dataCount, 32);
+        quint32 ids[32] = {};
+        quint32 isU[32] = {};
+        float   dat[32 * 40] = {};
+        for (std::uint32_t i = 0; i < nrec; ++i) {
+            ids[i] = s->data[i].id;
+            isU[i] = s->data[i].isUserID;
+            for (int k = 0; k < 40; ++k) dat[i * 40 + k] = s->data[i].data[k];
+        }
+        g_rawRec.writeGlove(double(s->publishTime), nrec, ids, isU, dat);
+    }
 
     // ---- Test-mode raw dump ------------------------------------------
     // First 20 frames go out in full so the exact layout of stream->data
@@ -2747,6 +2896,15 @@ bool MocapReceiver::connectGloves()
     if (I.test) {
         g_ergo.rawDump.store(true);
         g_ergo.rawTicks.store(0);
+    }
+
+    // Raw-sensor replay: no physical gloves.  runReplay() feeds the recorded
+    // ergonomics stream straight into foxManusErgonomicsCb, so just report the
+    // SDK as ready; glovesReady() flips once runReplay() reads the header.
+    if (I.replayRaw) {
+        I.manusDllLoaded = true;
+        I.manusCoreReady = true;
+        return true;
     }
 
     auto dllDir = [](){
@@ -3113,11 +3271,307 @@ bool MocapReceiver::hasGloves() const
     return m_impl->frame.hasGloves;
 }
 
+// Shared raw-sample → fused-quaternion pipeline (see declaration in Impl).
+// Faithful copy of the inline math in MocapReceiver::run(); keep in sync.
+void MocapReceiver::Impl::fuseSegment(int targetSeg,
+        Quat qo, bool haveQuat,
+        QVector3D acc, bool haveAcc,
+        QVector3D gyr, bool haveGyr,
+        QVector3D mag, bool haveMag,
+        QVector3D velInc, bool haveVelInc,
+        Quat dq, bool haveDq,
+        SuitPose& staging)
+{
+    if (targetSeg < 0 || targetSeg >= kXsensSegmentCount) return;
+
+    const double dt = 1.0 / freqHz;
+    constexpr double kRadToDeg = 57.29577951308232;
+    constexpr double kMs2ToG   = 1.0 / 9.80665;
+    QVector3D accForFilter, gyrForFilter;
+    bool fuseReady = false;
+    if (haveVelInc && haveDq) {
+        const QVector3D accSI(float(velInc.x() * freqHz),
+                              float(velInc.y() * freqHz),
+                              float(velInc.z() * freqHz));
+        const QVector3D gyrSI(float(2.0 * dq.x * freqHz),
+                              float(2.0 * dq.y * freqHz),
+                              float(2.0 * dq.z * freqHz));
+        accForFilter = accSI * float(kMs2ToG);     // m/s² → g
+        gyrForFilter = gyrSI * float(kRadToDeg);   // rad/s → deg/s
+        fuseReady = true;
+    } else if (haveAcc && haveGyr) {
+        accForFilter = acc * float(kMs2ToG);
+        gyrForFilter = gyr * float(kRadToDeg);
+        fuseReady = true;
+    }
+
+    if (fuseReady) {
+        QMutexLocker raw(&lock);
+        staging.accSensor[targetSeg] = accForFilter;   // g
+        staging.gyrSensor[targetSeg] = gyrForFilter;   // deg/s
+        if (haveMag) staging.magSensor[targetSeg] = mag;
+    }
+
+    if (accNormActive) {
+        const double a = accMagn[targetSeg];
+        if (a > 1e-6) accForFilter = accForFilter / float(a);
+    }
+    if (gyrBiasActive) {
+        gyrForFilter = gyrForFilter - gyrBias[targetSeg];
+    }
+    if (magSoftActive && haveMag) {
+        const auto& M = magSoftMat[targetSeg];
+        const QVector3D off = magSoftOff[targetSeg];
+        const double dx = double(mag.x()) - double(off.x());
+        const double dy = double(mag.y()) - double(off.y());
+        const double dz = double(mag.z()) - double(off.z());
+        const double rx = M[0]*dx + M[1]*dy + M[2]*dz;
+        const double ry = M[3]*dx + M[4]*dy + M[5]*dz;
+        const double rz = M[6]*dx + M[7]*dy + M[8]*dz;
+        mag = QVector3D(float(rx), float(ry), float(rz));
+    } else if (magNormActive && haveMag) {
+        const double m = magMagn[targetSeg];
+        if (m > 1e-6) mag = mag / float(m);
+    }
+    if (s2sActive) {
+        const Quat& inv = s2sInv[targetSeg];
+        accForFilter = vec_rotate(accForFilter, inv);
+        gyrForFilter = vec_rotate(gyrForFilter, inv);
+        if (haveMag) mag = vec_rotate(mag, inv);
+    }
+
+    Quat fusedQuat;
+    bool haveFused = false;
+    if (fuseReady) {
+        FusionAhrs& ahrs = fusion[targetSeg];
+        FusionAhrsSettings& s = ahrsCfg[targetSeg];
+        if (!fusionReady[targetSeg]) {
+            FusionAhrsInitialise(&ahrs);
+            s = fusionAhrsDefaultSettings;
+            s.convention            = FusionConventionNwu;
+            s.gain                  = (segGainActive && segGain[targetSeg] > 0.0f)
+                                      ? segGain[targetSeg] : 0.7f;
+            s.gyroscopeRange        = 2000.0f;
+            s.accelerationRejection = 30.0f;
+            s.magneticRejection     = 50.0f;
+            s.recoveryTriggerPeriod = int(freqHz / 2);
+            FusionAhrsSetSettings(&ahrs, &s);
+            ahrs.startup    = false;
+            ahrs.rampedGain = s.gain;
+            fusionReady[targetSeg] = true;
+        }
+        FusionBias& biasRef = bias[targetSeg];
+        if (!biasReady[targetSeg]) {
+            FusionBiasInitialise(&biasRef);
+            FusionBiasSettings bs = fusionBiasDefaultSettings;
+            bs.sampleRate          = float(std::max(60.0, freqHz));
+            bs.stationaryThreshold = 1.5f;
+            bs.stationaryPeriod    = 1.0f;
+            FusionBiasSetSettings(&biasRef, &bs);
+            biasReady[targetSeg] = true;
+        }
+        FusionVector g = {{ float(gyrForFilter.x()),
+                            float(gyrForFilter.y()),
+                            float(gyrForFilter.z()) }};
+        g = FusionBiasUpdate(&biasRef, g);
+        const FusionVector a = {{ float(accForFilter.x()),
+                                  float(accForFilter.y()),
+                                  float(accForFilter.z()) }};
+        const float aLen = std::sqrt(a.axis.x*a.axis.x + a.axis.y*a.axis.y + a.axis.z*a.axis.z);
+        const float aErr = std::abs(aLen - 1.0f);
+        const float beta = std::exp(-3.0f * aErr * aErr);
+        const float dynAccRej = 30.0f + (80.0f - 30.0f) * (1.0f - beta);
+        const bool useMag = haveMag && (mag.length() > 1e-6);
+        float dynMagRej = 50.0f;
+        if (useMag) {
+            const float mLen = std::sqrt(float(mag.x()*mag.x() + mag.y()*mag.y() + mag.z()*mag.z()));
+            const float mErr = std::abs(mLen - 1.0f);
+            if (mErr > 0.40f)      dynMagRej = 30.0f;
+            else if (mErr > 0.20f) dynMagRej = 40.0f;
+            else                   dynMagRej = 50.0f;
+        }
+        if (s.accelerationRejection != dynAccRej || s.magneticRejection != dynMagRej) {
+            s.accelerationRejection = dynAccRej;
+            s.magneticRejection     = dynMagRej;
+            FusionAhrsSetSettings(&ahrs, &s);
+        }
+        if (useMag) {
+            const FusionVector m = {{ float(mag.x()), float(mag.y()), float(mag.z()) }};
+            FusionAhrsUpdate(&ahrs, g, a, m, float(dt));
+        } else {
+            FusionAhrsUpdateNoMagnetometer(&ahrs, g, a, float(dt));
+        }
+        const FusionQuaternion fq = FusionAhrsGetQuaternion(&ahrs);
+        fusedQuat = Quat(fq.element.w, fq.element.x,
+                         fq.element.y, fq.element.z).normalized();
+        haveFused = true;
+    }
+
+    QMutexLocker lk(&lock);
+    if      (haveFused) staging.quat[targetSeg] = fusedQuat;
+    else if (haveQuat)  staging.quat[targetSeg] = qo;
+    staging.segValid[targetSeg] = haveFused || haveQuat;
+    staging.segLastT[targetSeg] = monotonicSec();
+}
+
+// ----------------------------------------------------------------------------
+//  Raw-sensor replay (--readrawsensor): no real hardware.  Reads
+//  rawsensorlog.bin, feeds the recorded suit samples through the identical
+//  fusion/calibration pipeline (fuseSegment) and the recorded glove ticks
+//  through the identical Manus callback, pacing to the recorded suit clock so
+//  the skeleton reproduces the captured motion in real time.
+// ----------------------------------------------------------------------------
+void MocapReceiver::runReplay()
+{
+    auto& I = *m_impl;
+
+    FILE* fp = nullptr;
+#ifdef _WIN32
+    fopen_s(&fp, I.rawPath.c_str(), "rb");
+#else
+    fp = std::fopen(I.rawPath.c_str(), "rb");
+#endif
+    if (!fp) {
+        I.setStatus(ConnStatus::Failed,
+                    QString::fromStdString("rawsensorlog.bin not found: " + I.rawPath),
+                    this);
+        return;
+    }
+
+    char magic[8] = {};
+    const bool magicOk =
+        (std::fread(magic, 1, 8, fp) == 8) &&
+        magic[0]=='F' && magic[1]=='O' && magic[2]=='X' &&
+        magic[3]=='R' && magic[4]=='A' && magic[5]=='W';
+    if (!magicOk) {
+        std::fclose(fp);
+        I.setStatus(ConnStatus::Failed, "rawsensorlog.bin: bad header", this);
+        return;
+    }
+    quint8  st = 1, gv = 0;
+    quint16 sc = quint16(kXsensSegmentCount);
+    double  fhz = 240.0, ghz = 60.0;
+    std::fread(&st,  1, 1, fp);
+    std::fread(&gv,  1, 1, fp);
+    std::fread(&sc,  sizeof(sc),  1, fp);
+    std::fread(&fhz, sizeof(fhz), 1, fp);
+    std::fread(&ghz, sizeof(ghz), 1, fp);
+    I.freqHz   = (fhz > 1.0) ? fhz : 240.0;
+    I.suitType = int(st);
+    if (gv) { I.manusDllLoaded = true; I.manusCoreReady = true; I.manusGloveCount = 2; }
+    g_ergo.rawDump.store(I.test);
+    testLog("[replay] header suitType=" + std::to_string(int(st))
+            + " gloves=" + std::to_string(int(gv))
+            + " freq=" + std::to_string(I.freqHz) + "Hz gloveHz="
+            + std::to_string(ghz), I.test);
+
+    I.setStatus(ConnStatus::Streaming, "replaying rawsensorlog.bin", this);
+
+    SuitPose staging;
+    double   firstRecT = -1.0;
+    double   startWall = monotonicSec();
+    int      framesThisSec = 0;
+    double   fpsT0 = monotonicSec();
+
+    while (!I.stop.load()) {
+        quint8 tag = 0;
+        if (std::fread(&tag, 1, 1, fp) != 1) {
+            testLog("[replay] EOF — playback finished", I.test);
+            break;
+        }
+
+        if (tag == RawSensorRecorder::kTagSuit) {
+            quint64 sample = 0; double t = 0; qint32 seg = 0; quint8 fl = 0;
+            std::fread(&sample, sizeof(sample), 1, fp);
+            std::fread(&t,      sizeof(t),      1, fp);
+            std::fread(&seg,    sizeof(seg),    1, fp);
+            std::fread(&fl,     1,              1, fp);
+            float q4[4]={0,0,0,0}, a3[3]={0,0,0}, g3[3]={0,0,0},
+                  m3[3]={0,0,0}, vi3[3]={0,0,0}, d4[4]={1,0,0,0};
+            const bool hQ = fl & (1u<<0), hA = fl & (1u<<1), hG = fl & (1u<<2),
+                       hM = fl & (1u<<3), hV = fl & (1u<<4), hD = fl & (1u<<5);
+            if (hQ) std::fread(q4,  4, 4, fp);
+            if (hA) std::fread(a3,  4, 3, fp);
+            if (hG) std::fread(g3,  4, 3, fp);
+            if (hM) std::fread(m3,  4, 3, fp);
+            if (hV) std::fread(vi3, 4, 3, fp);
+            if (hD) std::fread(d4,  4, 4, fp);
+
+            // Real-time pacing off the recorded suit clock.
+            if (firstRecT < 0) { firstRecT = t; startWall = monotonicSec(); }
+            const double target = startWall + (t - firstRecT);
+            double nowW = monotonicSec();
+            while ((target - nowW) > 0.0005 && !I.stop.load()) {
+                QThread::msleep((target - nowW) > 0.005 ? 2 : 1);
+                nowW = monotonicSec();
+            }
+
+            I.fuseSegment(int(seg),
+                Quat(q4[0],q4[1],q4[2],q4[3]).normalized(), hQ,
+                QVector3D(a3[0],a3[1],a3[2]),  hA,
+                QVector3D(g3[0],g3[1],g3[2]),  hG,
+                QVector3D(m3[0],m3[1],m3[2]),  hM,
+                QVector3D(vi3[0],vi3[1],vi3[2]), hV,
+                Quat(d4[0],d4[1],d4[2],d4[3]), hD,
+                staging);
+
+            {
+                QMutexLocker lk(&I.lock);
+                staging.sampleCounter = sample;
+                staging.recvTime      = monotonicSec();
+                const bool haveL = g_ergo.haveLeft.load();
+                const bool haveR = g_ergo.haveRight.load();
+                if (haveL || haveR) {
+                    QMutexLocker lk2(&g_ergo.lock);
+                    if (haveL) { staging.leftGloveQ  = g_ergo.leftQ;  staging.leftGloveP  = g_ergo.leftP;  }
+                    if (haveR) { staging.rightGloveQ = g_ergo.rightQ; staging.rightGloveP = g_ergo.rightP; }
+                    staging.hasGloves = (haveL || haveR);
+                }
+                I.frame = staging;
+            }
+            emit poseReceived();
+
+            ++framesThisSec;
+            const double now = monotonicSec();
+            if (now - fpsT0 >= 1.0) {
+                emit fpsUpdated(framesThisSec / (now - fpsT0));
+                framesThisSec = 0;
+                fpsT0 = now;
+            }
+        }
+        else if (tag == RawSensorRecorder::kTagGlove) {
+            double   t = 0; quint32 count = 0;
+            std::fread(&t,     sizeof(t),     1, fp);
+            std::fread(&count, sizeof(count), 1, fp);
+            if (count > 32) count = 32;
+            ManusErgoStream es{};
+            es.publishTime = std::uint64_t(t);
+            es.dataCount   = count;
+            for (quint32 i = 0; i < count; ++i) {
+                std::fread(&es.data[i].id,       4, 1,  fp);
+                std::fread(&es.data[i].isUserID, 4, 1,  fp);
+                std::fread(es.data[i].data,      4, 40, fp);
+            }
+            // Reuse the EXACT live glove path (parse + EMA + g_ergo update).
+            // g_rawRec is inactive in replay, so this never re-records.
+            foxManusErgonomicsCb(&es);
+        }
+        else {
+            testLog("[replay] unknown record tag — aborting", I.test);
+            break;
+        }
+    }
+
+    std::fclose(fp);
+    I.setStatus(ConnStatus::NotInitialized, "replay finished", this);
+}
+
 void MocapReceiver::run()
 {
     using namespace xda;
 
     auto& I = *m_impl;
+    if (I.replayRaw) { runReplay(); return; }   // --readrawsensor: no hardware
     I.setStatus(ConnStatus::Scanning, "loading XDA driver…", this);
 
     Api api;
@@ -3309,6 +3763,20 @@ void MocapReceiver::run()
         testLog("[xda] native update rate = " + std::to_string(I.freqHz) + " Hz",
                 I.test);
     }
+    // Infer suit type from the native rate so the recording header is honest
+    // (Awinda ≈ 60 Hz, Link ≈ 240 Hz).
+    I.suitType = (I.freqHz < 120.0) ? 0 : 1;
+
+    // ---- Open the raw-sensor recorder (--recordrawsensor) --------------
+    // Header is written here, now that the real freqHz is known.  Inactive
+    // unless the flag was set; replay never reaches this code path.
+    if (I.recordRaw && !g_rawRec.active.load()) {
+        g_rawRec.open(I.rawPath, I.suitType, /*glovesOn=*/true,
+                      I.freqHz, /*gloveHz=*/60.0, kXsensSegmentCount);
+        testLog("[raw] recording → " + I.rawPath
+                + "  suitType=" + std::to_string(I.suitType)
+                + "  freq=" + std::to_string(I.freqHz) + "Hz", I.test);
+    }
 
     // ---- Poll loop -----------------------------------------------------
     SuitPose staging;
@@ -3399,6 +3867,31 @@ void MocapReceiver::run()
             if (api.dataPacketContainsSTF && api.dataPacketSTF &&
                 api.dataPacketContainsSTF(pkt)) {
                 stf = api.dataPacketSTF(pkt); haveStf = true;
+            }
+
+            // ---- Raw recording (--recordrawsensor): exactly what the suit
+            //      sent for this segment, captured BEFORE any SDI / calibration
+            //      / fusion formula touches it. ----
+            if (g_rawRec.active.load() && targetSeg >= 0 &&
+                targetSeg < kXsensSegmentCount) {
+                quint64 sc = 0;
+                if (api.dataPacketContainsPacketCounter &&
+                    api.dataPacketPacketCounter &&
+                    api.dataPacketContainsPacketCounter(pkt))
+                    sc = api.dataPacketPacketCounter(pkt);
+                const float q4r[4]  = { float(qo.w), float(qo.x), float(qo.y), float(qo.z) };
+                const float a3r[3]  = { float(acc.x()), float(acc.y()), float(acc.z()) };
+                const float g3r[3]  = { float(gyr.x()), float(gyr.y()), float(gyr.z()) };
+                const float m3r[3]  = { float(mag.x()), float(mag.y()), float(mag.z()) };
+                const float vi3r[3] = { float(velInc.x()), float(velInc.y()), float(velInc.z()) };
+                const float d4r[4]  = { float(dq.w), float(dq.x), float(dq.y), float(dq.z) };
+                g_rawRec.writeSuit(sc, monotonicSec(), qint32(targetSeg),
+                                   haveQuat   ? q4r  : nullptr,
+                                   haveAcc    ? a3r  : nullptr,
+                                   haveGyr    ? g3r  : nullptr,
+                                   haveMag    ? m3r  : nullptr,
+                                   haveVelInc ? vi3r : nullptr,
+                                   haveDq     ? d4r  : nullptr);
             }
 
             // --- Reconstruct acc / gyr from SDI (Body Pack V2 path) ------
@@ -3843,6 +4336,7 @@ void MocapReceiver::run()
     }
 
     // ---- Teardown ------------------------------------------------------
+    g_rawRec.close();   // flush + close rawsensorlog.bin if we were recording
     for (void* d : trackerHandles) api.deviceGotoConfig(d);
     api.controlClose(control);
     if (api.controlDestruct) api.controlDestruct(control);
@@ -4728,32 +5222,13 @@ void NewSessionWizard::buildPages()
         m_pages->addWidget(p);
     }
 
-    // ---------- Page 5 : Ready ---------------------------------------------
-    {
-        auto* p = new QWidget();
-        m_readyTitle = new QLabel(p);
-        m_readyTitle->setObjectName("heroHeading");
-        m_readyTitle->setAlignment(Qt::AlignCenter);
-        m_readySummary = new QLabel(p);
-        m_readySummary->setWordWrap(true);
-        m_readySummary->setAlignment(Qt::AlignCenter);
-        m_readySummary->setObjectName("subtle");
-
-        m_btnFinish = new QPushButton(p);
-        m_btnFinish->setObjectName("hero");
-        connect(m_btnFinish, &QPushButton::clicked, this, &QDialog::accept);
-
-        auto* lay = new QVBoxLayout(p);
-        lay->addStretch(1);
-        lay->addWidget(m_readyTitle);
-        lay->addSpacing(18);
-        lay->addWidget(m_readySummary);
-        lay->addStretch(1);
-        lay->addWidget(m_btnFinish, 0, Qt::AlignHCenter);
-        lay->addStretch(1);
-
-        m_pages->addWidget(p);
-    }
+    // ---------- (Removed) Page 5 : Ready -----------------------------------
+    // The old "Everything is ready → Finish" page was a redundant extra click
+    // after calibration.  Calibration (page 3) is now the LAST page, so its
+    // completion calls goNext(), which falls through to accept() (see goNext)
+    // and the live scene opens immediately.  Start lives in the main window —
+    // there is no second "start session" prompt.  m_readyTitle / m_readySummary
+    // / m_btnFinish stay nullptr; every reference to them is `if (ptr)`-guarded.
 
     refreshPoseImage();
 }
@@ -4959,6 +5434,10 @@ void NewSessionWizard::goNext()
         m_pages->setCurrentIndex(m_pageIdx);
         updateNavButtons();
         retranslate();
+    } else {
+        // Last page (Calibration) finished → no separate "Ready/Finish" page
+        // any more, so close the wizard and open the live scene directly.
+        accept();
     }
 }
 
@@ -9646,6 +10125,7 @@ void MainWindow::onOpenLiveWizard()
         return;
     }
     m_streamStartMs = QDateTime::currentMSecsSinceEpoch();
+    m_liveTarget    = cfg.target;        // HUD shows Blender vs Unreal
     if (statusBar()) statusBar()->showMessage(Lang::t("live_running"), 1500);
     logTest("[stream] started → " + w.result().host.toStdString() + ":"
             + std::to_string(w.result().port));
@@ -9888,6 +10368,15 @@ void MainWindow::layoutHud()
             const QString dot = QString::fromUtf8("\xE2\x97\x8F");   // ●
             // Blink the dot every second — professional "live" feel.
             const bool blink = (total % 2 == 0);
+            // Badge word + WHERE we stream (Blender vs Unreal).  "\xE2\x86\x92" = "→".
+            QString modeWord = mode.contains("REC")
+                                 ? (streaming ? QStringLiteral("REC\xC2\xB7LIVE") : QStringLiteral("REC"))
+                                 : QStringLiteral("LIVE");
+            if (streaming) {
+                modeWord += (m_liveTarget == LiveTarget::XsensLivc)
+                                ? QString::fromUtf8(" \xE2\x86\x92 Unreal")
+                                : QString::fromUtf8(" \xE2\x86\x92 Blender");
+            }
             m_modeHud->setText(QString("<span style='color:%1'>%2</span>"
                                        "&nbsp;&nbsp;<b>%3</b>&nbsp;&nbsp;"
                                        "<span style='font-family:Consolas,monospace;"
@@ -9895,8 +10384,7 @@ void MainWindow::layoutHud()
                                        "letter-spacing:2px'>%4:%5:%6</span>")
                 .arg(blink ? color : "#555555")
                 .arg(dot)
-                .arg(mode.contains("REC") ? "REC" :
-                     mode.contains("LIVE") ? "LIVE" : "REC·LIVE")
+                .arg(modeWord)
                 .arg(h, 2, 10, QChar('0'))
                 .arg(m, 2, 10, QChar('0'))
                 .arg(s, 2, 10, QChar('0')));
@@ -10163,6 +10651,24 @@ const char* kStyleSheet = R"(
   QLabel#sectionSub { color: #6E6E6E; font-size: 8pt;
                       font-weight: 500; letter-spacing: 0.5px;
                       margin-top: -2px; margin-bottom: 4px; }
+
+  /* Global fallbacks so widget types that had no explicit style (text
+     fields, lists, trees, dialogs, tooltips) match the dark theme instead
+     of the OS default light look. */
+  QLineEdit, QTextEdit, QPlainTextEdit {
+      background: #151515; color: #EAEAEA; border: 1px solid #2A2A2A;
+      border-radius: 6px; padding: 4px 8px; selection-background-color: #FF7A1A; }
+  QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus { border-color: #FF7A1A; }
+  QLineEdit:disabled, QTextEdit:disabled { color: #6E6E6E; background: #121212; }
+  QListWidget, QTreeWidget, QListView, QTreeView {
+      background: #151515; color: #EAEAEA; border: 1px solid #2A2A2A;
+      border-radius: 6px; outline: none; }
+  QListWidget::item:selected, QTreeWidget::item:selected,
+  QListView::item:selected, QTreeView::item:selected {
+      background: #FF7A1A; color: #101010; }
+  QDialog { background: #0E0E0E; }
+  QToolTip { background: #1A1A1A; color: #EAEAEA; border: 1px solid #FF7A1A;
+             padding: 4px 6px; border-radius: 4px; }
 )";
 
 // ============================================================================
@@ -10177,6 +10683,8 @@ CliArgs parseCli(int argc, char** argv)
         if (a == "-test" || a == "--test")          out.test   = true;
         else if (a == "--gloves" || a == "-gloves") out.gloves = true;
         else if (a == "--wrist-constraint")         out.wristConstraint = true;
+        else if (a == "--recordrawsensor" || a == "-recordrawsensor") out.recordRawSensor = true;
+        else if (a == "--readrawsensor"   || a == "-readrawsensor")   out.readRawSensor   = true;
         else if (a == "-h" || a == "--help") {
             std::cout <<
                 "Fox Mocap — MVN-style Xsens Link client\n"
@@ -10189,7 +10697,12 @@ CliArgs parseCli(int argc, char** argv)
                 "             changes and sample-level dumps are logged to the\n"
                 "             parent console (cmd/PowerShell) or to fox_mocap.log\n"
                 "             when launched from Explorer.\n"
-                "  --gloves   Reserve space in the session for Manus finger data.\n";
+                "  --gloves   Reserve space in the session for Manus finger data.\n"
+                "  --recordrawsensor  Record the raw suit + glove sensor input to\n"
+                "             rawsensorlog.bin (next to fox_mocap.log) for later replay.\n"
+                "  --readrawsensor    Replay rawsensorlog.bin instead of real hardware:\n"
+                "             skips device scan, auto-runs calibration and drives the\n"
+                "             skeleton from the recorded stream.  Use with -test [--gloves].\n";
             std::exit(0);
         }
     }
@@ -10275,6 +10788,25 @@ int main(int argc, char** argv)
     // Mode page has a "Connect suit" button that triggers scan on demand so
     // the user sees explicit progress instead of a silent background poll.
     auto* rx = new MocapReceiver(cli.test, &app);
+
+    // Raw-sensor record / replay: place rawsensorlog.bin next to fox_mocap.log
+    // (same dir as the exe).  Must be configured before the wizard starts the
+    // capture thread.
+    if (cli.recordRawSensor || cli.readRawSensor) {
+        std::string rawPath = "rawsensorlog.bin";
+#ifdef _WIN32
+        char rb[MAX_PATH]{};
+        GetModuleFileNameA(nullptr, rb, MAX_PATH);
+        std::string ed(rb);
+        const std::size_t sl = ed.find_last_of("\\/");
+        if (sl != std::string::npos) ed.resize(sl);
+        rawPath = ed + "\\rawsensorlog.bin";
+#endif
+        rx->setRawSensorIo(cli.recordRawSensor, cli.readRawSensor, rawPath);
+        testLog(std::string("[boot] raw-sensor ")
+                + (cli.readRawSensor ? "REPLAY from " : "RECORD to ") + rawPath,
+                cli.test);
+    }
 
     // ---- New-session wizard -----------------------------------------------
     NewSessionWizard wiz(rx, cli.test);
