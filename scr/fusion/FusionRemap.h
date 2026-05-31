@@ -1,36 +1,62 @@
+/**
+ * @file FusionRemap.h
+ * @author Seb Madgwick
+ * @brief Remaps the sensor axes to the body frame.
+ */
 
 #ifndef FUSION_REMAP_H
 #define FUSION_REMAP_H
 
+//------------------------------------------------------------------------------
+// Includes
+
 #include "FusionMath.h"
 
+//------------------------------------------------------------------------------
+// Definitions
+
+/**
+ * @brief Alignment of the sensor axes relative to the body frame. For example,
+ * if the body X axis is aligned with the sensor Y axis and the body Y axis is
+ * aligned with the sensor X axis but pointing the opposite direction, then
+ * alignment is +Y-X+Z.
+ */
 typedef enum {
-    FusionRemapAlignmentPXPYPZ,
-    FusionRemapAlignmentPXPZNY,
-    FusionRemapAlignmentPXNZPY,
-    FusionRemapAlignmentPXNYNZ,
-    FusionRemapAlignmentPYPXNZ,
-    FusionRemapAlignmentPYPZPX,
-    FusionRemapAlignmentPYNZNX,
-    FusionRemapAlignmentPYNXPZ,
-    FusionRemapAlignmentPZPXPY,
-    FusionRemapAlignmentPZPYNX,
-    FusionRemapAlignmentPZNYPX,
-    FusionRemapAlignmentPZNXNY,
-    FusionRemapAlignmentNZPXNY,
-    FusionRemapAlignmentNZPYPX,
-    FusionRemapAlignmentNZNYNX,
-    FusionRemapAlignmentNZNXPY,
-    FusionRemapAlignmentNYPXPZ,
-    FusionRemapAlignmentNYPZNX,
-    FusionRemapAlignmentNYNZPX,
-    FusionRemapAlignmentNYNXNZ,
-    FusionRemapAlignmentNXPYNZ,
-    FusionRemapAlignmentNXPZPY,
-    FusionRemapAlignmentNXNZNY,
-    FusionRemapAlignmentNXNYPZ,
+    FusionRemapAlignmentPXPYPZ, /* +X+Y+Z (no remap) */
+    FusionRemapAlignmentPXPZNY, /* +X+Z-Y */
+    FusionRemapAlignmentPXNZPY, /* +X-Z+Y */
+    FusionRemapAlignmentPXNYNZ, /* +X-Y-Z */
+    FusionRemapAlignmentPYPXNZ, /* +Y+X-Z */
+    FusionRemapAlignmentPYPZPX, /* +Y+Z+X */
+    FusionRemapAlignmentPYNZNX, /* +Y-Z-X */
+    FusionRemapAlignmentPYNXPZ, /* +Y-X+Z */
+    FusionRemapAlignmentPZPXPY, /* +Z+X+Y */
+    FusionRemapAlignmentPZPYNX, /* +Z+Y-X */
+    FusionRemapAlignmentPZNYPX, /* +Z-Y+X */
+    FusionRemapAlignmentPZNXNY, /* +Z-X-Y */
+    FusionRemapAlignmentNZPXNY, /* -Z+X-Y */
+    FusionRemapAlignmentNZPYPX, /* -Z+Y+X */
+    FusionRemapAlignmentNZNYNX, /* -Z-Y-X */
+    FusionRemapAlignmentNZNXPY, /* -Z-X+Y */
+    FusionRemapAlignmentNYPXPZ, /* -Y+X+Z */
+    FusionRemapAlignmentNYPZNX, /* -Y+Z-X */
+    FusionRemapAlignmentNYNZPX, /* -Y-Z+X */
+    FusionRemapAlignmentNYNXNZ, /* -Y-X-Z */
+    FusionRemapAlignmentNXPYNZ, /* -X+Y-Z */
+    FusionRemapAlignmentNXPZPY, /* -X+Z+Y */
+    FusionRemapAlignmentNXNZNY, /* -X-Z-Y */
+    FusionRemapAlignmentNXNYPZ, /* -X-Y+Z */
 } FusionRemapAlignment;
 
+//------------------------------------------------------------------------------
+// Inline functions
+
+/**
+ * @brief Remaps the sensor axes to the body frame.
+ * @param sensor Sensor.
+ * @param alignment Alignment.
+ * @return Sensor remapped to the body frame.
+ */
 static inline FusionVector FusionRemap(const FusionVector sensor, const FusionRemapAlignment alignment) {
     FusionVector result;
     switch (alignment) {
@@ -152,7 +178,10 @@ static inline FusionVector FusionRemap(const FusionVector sensor, const FusionRe
             result.axis.z = +sensor.axis.z;
             return result;
     }
-    return sensor;
+    return sensor; // avoid compiler warning
 }
 
 #endif
+
+//------------------------------------------------------------------------------
+// End of file
