@@ -492,6 +492,14 @@ public:
 
     void stop();
 
+    // Configure raw-sensor record / replay BEFORE the capture thread starts.
+    //   record=true → dump the raw pre-fusion suit + glove input to `path`.
+    //   replay=true → drive the pipeline from `path` instead of real hardware
+    //                 (skips device scan; fusion / calibration / skeleton run
+    //                  unchanged).  See --recordrawsensor / --readrawsensor.
+    void setRawSensorIo(bool record, bool replay, const std::string& path);
+    bool isReplayingRaw() const;     // true when --readrawsensor is active
+
     // Stop any previous attempt (if running) and kick off a fresh XDA scan.
     // Safe to call any time — used by the wizard's "Connect suit" button.
     void restart();
@@ -571,6 +579,7 @@ protected:
     void run() override;
 
 private:
+    void runReplay();                     // raw-sensor replay (--readrawsensor)
     struct Impl;
     std::unique_ptr<Impl> m_impl;
 };
@@ -1181,6 +1190,7 @@ private:
     std::vector<RecordedFrame> m_recBuffer;
     qint64                     m_recStartMs = 0;
     qint64                     m_streamStartMs = 0;
+    LiveTarget                 m_liveTarget    = LiveTarget::BlenderMVN; // HUD: where we stream
     // HUD overlay in top-left of viewport showing REC/STREAM mode + seconds.
     QLabel*                    m_modeHud = nullptr;
     QTimer*                    m_modeHudTimer = nullptr;
@@ -1214,6 +1224,8 @@ struct CliArgs {
     bool test   = false;
     bool gloves = false;                     // --gloves : enable hand skeleton in -test
     bool wristConstraint = false;
+    bool recordRawSensor = false;            // --recordrawsensor : dump raw suit+glove input to rawsensorlog.bin
+    bool readRawSensor   = false;            // --readrawsensor  : replay rawsensorlog.bin instead of real hardware
 };
 CliArgs parseCli(int argc, char** argv);
 
