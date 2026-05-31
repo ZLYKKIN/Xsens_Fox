@@ -134,29 +134,27 @@ Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion; Components: docs
 Source: "..\LICENSE";   DestDir: "{app}"; Flags: ignoreversion; Components: main
 Source: "..\image\*";   DestDir: "{app}\image"; Flags: ignoreversion recursesubdirs createallsubdirs; Components: docs
 
-; --- Blender plugin + test project
-Source: "..\Plugins\MVNBlenderPlugin-main.zip"; \
-    DestDir: "{app}\Plugins"; Flags: ignoreversion; \
-    Components: plugins\blender
-Source: "..\Plugins\BlenderProject\*"; \
-    DestDir: "{app}\Plugins\BlenderProject"; \
+; --- Blender plugin (MVN Live add-on). Ships the "standart" variant; the
+;     "logger" variant carries extra diagnostic logging and is dev-only.
+Source: "..\Plugins\standart\MVNBlenderPlugin-main\*"; \
+    DestDir: "{app}\Plugins\MVNBlenderPlugin-main"; \
     Flags: ignoreversion recursesubdirs createallsubdirs; \
     Components: plugins\blender
 
 ; --- Unreal Engine 5.6 LiveLink plugin source (drop into a UE project's
 ;     Plugins/ folder; UBT builds Binaries/Intermediate on first launch).
-Source: "..\Plugins\XsensLivc\LiveLinkMvnPlugin.uplugin"; \
+Source: "..\Plugins\standart\XsensLivc\LiveLinkMvnPlugin.uplugin"; \
     DestDir: "{app}\Plugins\XsensLivc"; Flags: ignoreversion; \
     Components: plugins\unreal
-Source: "..\Plugins\XsensLivc\Source\*"; \
+Source: "..\Plugins\standart\XsensLivc\Source\*"; \
     DestDir: "{app}\Plugins\XsensLivc\Source"; \
     Flags: ignoreversion recursesubdirs createallsubdirs; \
     Components: plugins\unreal
-Source: "..\Plugins\XsensLivc\Resources\*"; \
+Source: "..\Plugins\standart\XsensLivc\Resources\*"; \
     DestDir: "{app}\Plugins\XsensLivc\Resources"; \
     Flags: ignoreversion recursesubdirs createallsubdirs; \
     Components: plugins\unreal
-Source: "..\Plugins\XsensLivc\Content\*"; \
+Source: "..\Plugins\standart\XsensLivc\Content\*"; \
     DestDir: "{app}\Plugins\XsensLivc\Content"; \
     Flags: ignoreversion recursesubdirs createallsubdirs; \
     Components: plugins\unreal
