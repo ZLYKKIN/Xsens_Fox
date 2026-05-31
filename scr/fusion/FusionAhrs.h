@@ -1,94 +1,71 @@
+/**
+ * @file FusionAhrs.h
+ * @author Seb Madgwick
+ * @brief Attitude and Heading Reference System (AHRS) algorithm.
+ */
 
 #ifndef FUSION_AHRS_H
 #define FUSION_AHRS_H
+
+//------------------------------------------------------------------------------
+// Includes
 
 #include "FusionConvention.h"
 #include "FusionMath.h"
 #include <stdbool.h>
 
+//------------------------------------------------------------------------------
+// Definitions
+
+/**
+ * @brief Settings.
+ */
 typedef struct {
     FusionConvention convention;
-    float            sampleRateHz;
-    float            magDipModelDeg;
-    float            magDeclinationDeg;
-
-    float            magNormReferenceLocal;
-
-    float            magDipGateRelax;
-    float            magAngGateRelax;
-
-    float            magNormGateRelax;
-
-    bool             learnMagField;
+    float gain;
+    float gyroscopeRange;
+    float accelerationRejection;
+    float magneticRejection;
+    unsigned int recoveryTriggerPeriod;
 } FusionAhrsSettings;
 
+/**
+ * @brief AHRS structure. All members are private.
+ */
 typedef struct {
-
-    FusionQuaternion q;
-    FusionVector     b_g;
-    FusionVector     b_a;
-    FusionVector     m0;
-    FusionVector     v_lp;
-
-    float magNormBias;
-    float skinPhiScalar;
-
-    float P[17 * 17];
-
-    FusionVector a_lp;
-    bool         a_lp_ready;
-
-    FusionVector a_lin_body;
-    FusionVector a_lin_world;
-    bool         a_lin_ready;
-
-    float fAccBoost;
-    float dAccHighTime;
-
-    float sBg;
-
-    float        tauM0;
-    FusionVector m0_avg;
-    bool         m0_avg_ready;
-
-    float        magClearStreakSec;
-
-    float        magClosedStreakSec;
-    float        magRedefBoostTimer;
-    bool         magWasClosed;
-
-    float stillnessTime;
-    int   zruSampleCount;
-    int   zruFrameCounter;
-
-    FusionQuaternion qSkin;
-    bool             qSkinReady;
-
-    float sigmaAcc;
-    float sigmaGyr;
-    float sigmaMag;
-
-    float dAcc;
-    float magResidualNorm;
-    bool  magGateOpen;
-    bool  accUsedThisFrame;
-    bool  zruActiveThisFrame;
-    bool  qSeeded;
-
     FusionAhrsSettings settings;
+    FusionQuaternion quaternion;
+    FusionVector accelerometer;
+    FusionVector halfGravity;
+    bool startup;
+    float rampedGain;
+    float rampedGainStep;
+    bool angularRateRecovery;
+    FusionVector halfAccelerometerFeedback;
+    FusionVector halfMagnetometerFeedback;
+    bool accelerometerIgnored;
+    int accelerationRecoveryTrigger;
+    int accelerationRecoveryTimeout;
+    bool magnetometerIgnored;
+    int magneticRecoveryTrigger;
+    int magneticRecoveryTimeout;
 } FusionAhrs;
 
+/**
+ * @brief Internal states.
+ */
 typedef struct {
     float accelerationError;
-    bool  accelerometerIgnored;
+    bool accelerometerIgnored;
     float accelerationRecoveryTrigger;
     float magneticError;
-    bool  magnetometerIgnored;
+    bool magnetometerIgnored;
     float magneticRecoveryTrigger;
-    float magNormBias;
-    float skinPhiDeg;
 } FusionAhrsInternalStates;
 
+/**
+ * @brief Flags.
+ */
 typedef struct {
     bool startup;
     bool angularRateRecovery;
@@ -96,36 +73,43 @@ typedef struct {
     bool magneticRecovery;
 } FusionAhrsFlags;
 
+//------------------------------------------------------------------------------
+// Variable declarations
+
 extern const FusionAhrsSettings fusionAhrsDefaultSettings;
 
-void FusionAhrsInitialise(FusionAhrs *ahrs);
-void FusionAhrsRestart(FusionAhrs *ahrs);
-void FusionAhrsSetSettings(FusionAhrs *ahrs, const FusionAhrsSettings *settings);
+//------------------------------------------------------------------------------
+// Function declarations
 
-void FusionAhrsSetNoise(FusionAhrs *ahrs,
-                        float sigmaAccMs2,
-                        float sigmaGyrDegS,
-                        float sigmaMagNorm);
+void FusionAhrsInitialise(FusionAhrs *const ahrs);
 
-void FusionAhrsSetSampleRate(FusionAhrs *ahrs, float sampleRateHz);
+void FusionAhrsRestart(FusionAhrs *const ahrs);
 
-void FusionAhrsUpdate(FusionAhrs *ahrs,
-                      FusionVector gyroscope,
-                      FusionVector accelerometer,
-                      FusionVector magnetometer,
-                      float dt);
-void FusionAhrsUpdateNoMagnetometer(FusionAhrs *ahrs,
-                                    FusionVector gyroscope,
-                                    FusionVector accelerometer,
-                                    float dt);
+void FusionAhrsSetSettings(FusionAhrs *const ahrs, const FusionAhrsSettings *const settings);
 
-FusionQuaternion FusionAhrsGetQuaternion(const FusionAhrs *ahrs);
-void             FusionAhrsSetQuaternion(FusionAhrs *ahrs, FusionQuaternion q);
-FusionVector     FusionAhrsGetGravity(const FusionAhrs *ahrs);
-FusionVector     FusionAhrsGetLinearAcceleration(const FusionAhrs *ahrs);
-FusionVector     FusionAhrsGetEarthAcceleration(const FusionAhrs *ahrs);
-FusionAhrsInternalStates FusionAhrsGetInternalStates(const FusionAhrs *ahrs);
-FusionAhrsFlags          FusionAhrsGetFlags(const FusionAhrs *ahrs);
-void                     FusionAhrsSetHeading(FusionAhrs *ahrs, float headingDeg);
+void FusionAhrsUpdate(FusionAhrs *const ahrs, const FusionVector gyroscope, const FusionVector accelerometer, const FusionVector magnetometer, const float deltaTime);
+
+void FusionAhrsUpdateNoMagnetometer(FusionAhrs *const ahrs, const FusionVector gyroscope, const FusionVector accelerometer, const float deltaTime);
+
+void FusionAhrsUpdateExternalHeading(FusionAhrs *const ahrs, const FusionVector gyroscope, const FusionVector accelerometer, const float heading, const float deltaTime);
+
+FusionQuaternion FusionAhrsGetQuaternion(const FusionAhrs *const ahrs);
+
+void FusionAhrsSetQuaternion(FusionAhrs *const ahrs, const FusionQuaternion quaternion);
+
+FusionVector FusionAhrsGetGravity(const FusionAhrs *const ahrs);
+
+FusionVector FusionAhrsGetLinearAcceleration(const FusionAhrs *const ahrs);
+
+FusionVector FusionAhrsGetEarthAcceleration(const FusionAhrs *const ahrs);
+
+FusionAhrsInternalStates FusionAhrsGetInternalStates(const FusionAhrs *const ahrs);
+
+FusionAhrsFlags FusionAhrsGetFlags(const FusionAhrs *const ahrs);
+
+void FusionAhrsSetHeading(FusionAhrs *const ahrs, const float heading);
 
 #endif
+
+//------------------------------------------------------------------------------
+// End of file

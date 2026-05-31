@@ -74,18 +74,12 @@ message(STATUS "Eigen3 ready")
 add_executable(fox_mocap WIN32
     scr/main.cpp
     scr/main.h
-    scr/foxmath.cpp
-    scr/foxmath.h
-    scr/foxbody.cpp
-    scr/foxbody.h
-    scr/foxergo.cpp
-    scr/foxergo.h
-    scr/foxwire.cpp
-    scr/foxwire.h
     scr/resources.qrc
     scr/fusion/Fusion.h
     scr/fusion/FusionAhrs.c
     scr/fusion/FusionAhrs.h
+    scr/fusion/FusionBias.c
+    scr/fusion/FusionBias.h
     scr/fusion/FusionCompass.c
     scr/fusion/FusionCompass.h
     scr/fusion/FusionConvention.h

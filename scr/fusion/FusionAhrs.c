@@ -1,1014 +1,499 @@
+/**
+ * @file FusionAhrs.c
+ * @author Seb Madgwick
+ * @brief Attitude and Heading Reference System (AHRS) algorithm.
+ */
 
+//------------------------------------------------------------------------------
+// Includes
+
+#include <float.h>
 #include "FusionAhrs.h"
 #include <math.h>
-#include <string.h>
-#include <float.h>
 
-#define KFA_GRAVITY_MS2          9.812687f
+//------------------------------------------------------------------------------
+// Definitions
 
-#define KFA_SIGMA_ACC_MS2        0.05f
-#define KFA_SIGMA_GYR_DEG_S      0.20f
-#define KFA_SIGMA_MAG_NORM       0.028f
+/**
+ * @brief Gain used during startup.
+ */
+#define STARTUP_GAIN (10.0f)
 
-#define KFA_ACC_TRUST_WIDTH      0.10f
-#define KFA_ACC_SIG_STATIC_RAD   0.05f
-#define KFA_ACC_SIG_DYN_RAD      5.0f
-#define KFA_ACC_P_ORIENT_FLOOR   1.218e-3f
+/**
+ * @brief Startup period in seconds.
+ */
+#define STARTUP_PERIOD (3.0f)
 
-#define KFA_INIT_SD_ORIENT_DEG   3.0f
-#define KFA_INIT_SD_GYRBIAS_DEG  0.4f
-#define KFA_INIT_SD_ACCBIAS_MS2  0.10f
-#define KFA_INIT_SD_MAG_NORM     0.20f
-#define KFA_INIT_SD_VEL_MS       2.0f
+//------------------------------------------------------------------------------
+// Function declarations
 
-#define KFA_S_QV_ACC_LP          0.04f
-#define KFA_S_QV_MAG_RW          0.01f
-#define KFA_GYR_BIAS_MIN_DEG     0.005f
-#define KFA_GYR_BIAS_MAX_DEG     0.07f
-#define KFA_MAG_RES_THRESH       0.03f
-#define KFA_MAG_RES_TIME_UP_S    0.6f
-#define KFA_MAG_RES_TIME_DOWN_S  3.0f
-#define KFA_REDEF_CLOSED_THR_S   5.0f
-#define KFA_REDEF_RAMP_S         2.0f
-#define KFA_REDEF_SIGMA_DOWNSCALE 0.10f
+static inline FusionVector HalfGravity(const FusionAhrs *const ahrs);
 
-#define KFA_LPA_TAU_S            10.0f
-#define KFA_ACCDIV_THRESH_LOW    0.5f
-#define KFA_ACCDIV_THRESH_HIGH   3.0f
-#define KFA_ACCDIV_VEL_THRESH    2.0f
-#define KFA_ACCDIV_HIGH_HOLD_S   0.5f
-#define KFA_FACCBOOST_MAX        1000.0f
-#define KFA_FACCBOOST_RAMP_UP_S  5.0f
-#define KFA_FACCBOOST_RAMP_DN_S  60.0f
-#define KFA_VEL_TAU_S            2.0f
+static inline FusionVector HalfMagnetic(const FusionAhrs *const ahrs);
 
-#define KFA_MAG_NORM_REF         1.0f
-#define KFA_MAG_NORM_GATE        0.03f
-#define KFA_MAG_DIP_GATE_DEG     3.5f
-#define KFA_MAG_ANG_GATE_DEG     6.0f
+static inline FusionVector Feedback(const FusionVector sensor, const FusionVector reference);
 
-#define KFA_TAU_M0_FAST_S        30.0f
-#define KFA_TAU_M0_MED_S         120.0f
-#define KFA_TAU_M0_SLOW_S        300.0f
-#define KFA_MAG_LEARN_OMEGA_DEG  10.0f
-#define KFA_MAG_LEARN_NORMDIFF   0.1f
+static inline int Clamp(const int value, const int min, const int max);
 
-#define KFA_ZRU_VARIANCE         9.0f
-#define KFA_ZRU_MIN_SAMPLES      15
-#define KFA_ZRU_UPDATE_RATE      2
-
-#define KFA_STILLNESS_OMEGA_DEG  0.3f
-#define KFA_STILLNESS_HOLD_S     5.0f
-#define KFA_STILLNESS_ACC_BAND_MS2 0.5f
-
-#define KFA_SKIN_TAU_S           0.15f
-
-#define KFA_P_DIAG_MIN           1.0e-12f
-#define KFA_P_DIAG_MAX           1.0e+6f
-
-#define N15 17
-#define IDX_MAGNORM 15
-#define IDX_SKINPHI 16
-
-static inline float DegToRad(float d) { return d * 0.017453292519943295f; }
-static inline float RadToDeg(float r) { return r * 57.29577951308232f; }
-
-static void Symm15(float *P) {
-    for (int i = 0; i < N15; ++i)
-        for (int j = i + 1; j < N15; ++j) {
-            const float avg = 0.5f * (P[i * N15 + j] + P[j * N15 + i]);
-            P[i * N15 + j] = avg;
-            P[j * N15 + i] = avg;
-        }
-    for (int i = 0; i < N15; ++i) {
-        float d = P[i * N15 + i];
-        if (!(d > KFA_P_DIAG_MIN)) d = KFA_P_DIAG_MIN;
-        else if (d > KFA_P_DIAG_MAX) d = KFA_P_DIAG_MAX;
-        P[i * N15 + i] = d;
-    }
-}
-
-static void Joseph_3x15(float *P,
-                        const float *H,
-                        const float *K,
-                        const float Rdiag[3]) {
-    float M[N15 * N15];
-    memset(M, 0, sizeof(M));
-    for (int i = 0; i < N15; ++i) M[i * N15 + i] = 1.0f;
-    for (int i = 0; i < N15; ++i)
-        for (int j = 0; j < N15; ++j) {
-            float s = 0.0f;
-            for (int k = 0; k < 3; ++k) s += K[i * 3 + k] * H[k * N15 + j];
-            M[i * N15 + j] -= s;
-        }
-
-    float T[N15 * N15];
-    for (int i = 0; i < N15; ++i)
-        for (int j = 0; j < N15; ++j) {
-            float s = 0.0f;
-            for (int k = 0; k < N15; ++k) s += M[i * N15 + k] * P[k * N15 + j];
-            T[i * N15 + j] = s;
-        }
-
-    for (int i = 0; i < N15; ++i)
-        for (int j = 0; j < N15; ++j) {
-            float s = 0.0f;
-            for (int k = 0; k < N15; ++k) s += T[i * N15 + k] * M[j * N15 + k];
-            P[i * N15 + j] = s;
-        }
-
-    for (int i = 0; i < N15; ++i)
-        for (int j = 0; j < N15; ++j) {
-            float s = 0.0f;
-            for (int k = 0; k < 3; ++k) s += K[i * 3 + k] * Rdiag[k] * K[j * 3 + k];
-            P[i * N15 + j] += s;
-        }
-
-    Symm15(P);
-}
-
-static int InvSym3(const float M[9], float Inv[9]) {
-    const float a = M[0], b = M[1], c = M[2];
-    const float d = M[4], e = M[5];
-    const float f = M[8];
-    const float det = a * (d * f - e * e) - b * (b * f - e * c) + c * (b * e - d * c);
-    if (fabsf(det) < 1e-12f) return 0;
-    const float inv = 1.0f / det;
-    Inv[0] = inv * (d * f - e * e);
-    Inv[1] = inv * (c * e - b * f);
-    Inv[2] = inv * (b * e - c * d);
-    Inv[3] = Inv[1];
-    Inv[4] = inv * (a * f - c * c);
-    Inv[5] = inv * (b * c - a * e);
-    Inv[6] = Inv[2];
-    Inv[7] = Inv[5];
-    Inv[8] = inv * (a * d - b * b);
-    return 1;
-}
-
-static FusionQuaternion ExpQuat(FusionVector phi) {
-    const float n = sqrtf(phi.axis.x * phi.axis.x +
-                          phi.axis.y * phi.axis.y +
-                          phi.axis.z * phi.axis.z);
-    FusionQuaternion q;
-    if (n < 1e-9f) {
-        q.element.w = 1.0f - 0.125f * n * n;
-        const float s = 0.5f * (1.0f - n * n / 24.0f);
-        q.element.x = s * phi.axis.x;
-        q.element.y = s * phi.axis.y;
-        q.element.z = s * phi.axis.z;
-    } else {
-        const float h = 0.5f * n;
-        const float s = sinf(h) / n;
-        q.element.w = cosf(h);
-        q.element.x = s * phi.axis.x;
-        q.element.y = s * phi.axis.y;
-        q.element.z = s * phi.axis.z;
-    }
-    return q;
-}
-
-static FusionVector RotByQ(FusionQuaternion q, FusionVector v) {
-#define Q q.element
-    const float xx = Q.x * Q.x, yy = Q.y * Q.y, zz = Q.z * Q.z;
-    const float wx = Q.w * Q.x, wy = Q.w * Q.y, wz = Q.w * Q.z;
-    const float xy = Q.x * Q.y, xz = Q.x * Q.z, yz = Q.y * Q.z;
-    FusionVector r = {{
-        (1 - 2 * (yy + zz)) * v.axis.x + 2 * (xy - wz)       * v.axis.y + 2 * (xz + wy)       * v.axis.z,
-        2 * (xy + wz)       * v.axis.x + (1 - 2 * (xx + zz)) * v.axis.y + 2 * (yz - wx)       * v.axis.z,
-        2 * (xz - wy)       * v.axis.x + 2 * (yz + wx)       * v.axis.y + (1 - 2 * (xx + yy)) * v.axis.z,
-    }};
-#undef Q
-    return r;
-}
-
-static FusionVector RotByQInv(FusionQuaternion q, FusionVector v) {
-    q.element.x = -q.element.x;
-    q.element.y = -q.element.y;
-    q.element.z = -q.element.z;
-    return RotByQ(q, v);
-}
-
-static FusionQuaternion Slerp(FusionQuaternion a, FusionQuaternion b, float t) {
-    float dot = a.element.w * b.element.w + a.element.x * b.element.x +
-                a.element.y * b.element.y + a.element.z * b.element.z;
-    if (dot < 0.0f) {
-        b.element.w = -b.element.w;
-        b.element.x = -b.element.x;
-        b.element.y = -b.element.y;
-        b.element.z = -b.element.z;
-        dot = -dot;
-    }
-    if (dot > 0.9995f) {
-        FusionQuaternion r = {{
-            a.element.w + t * (b.element.w - a.element.w),
-            a.element.x + t * (b.element.x - a.element.x),
-            a.element.y + t * (b.element.y - a.element.y),
-            a.element.z + t * (b.element.z - a.element.z),
-        }};
-        return FusionQuaternionNormalise(r);
-    }
-    const float theta_0 = acosf(dot);
-    const float theta   = theta_0 * t;
-    const float sin_t0  = sinf(theta_0);
-    const float s_a     = sinf(theta_0 - theta) / sin_t0;
-    const float s_b     = sinf(theta)           / sin_t0;
-    FusionQuaternion r = {{
-        s_a * a.element.w + s_b * b.element.w,
-        s_a * a.element.x + s_b * b.element.x,
-        s_a * a.element.y + s_b * b.element.y,
-        s_a * a.element.z + s_b * b.element.z,
-    }};
-    return r;
-}
-
-static void Skew3(FusionVector v, float M[9]) {
-    M[0] = 0;             M[1] = -v.axis.z;    M[2] =  v.axis.y;
-    M[3] = v.axis.z;      M[4] = 0;            M[5] = -v.axis.x;
-    M[6] = -v.axis.y;     M[7] =  v.axis.x;    M[8] = 0;
-}
-
-static void Sub3x3(const float *P15, int rowStart, int colStart, float out9[9]) {
-    for (int i = 0; i < 3; ++i)
-        for (int j = 0; j < 3; ++j)
-            out9[i * 3 + j] = P15[(rowStart + i) * N15 + (colStart + j)];
-}
-
-static void ApplyDeltaX(FusionAhrs *ahrs, const float dx[N15]) {
-
-    FusionVector dth = { .axis = { dx[0], dx[1], dx[2] } };
-    ahrs->q = FusionQuaternionNormalise(FusionQuaternionProduct(ahrs->q, ExpQuat(dth)));
-
-    ahrs->b_g.axis.x += dx[3];  ahrs->b_g.axis.y += dx[4];  ahrs->b_g.axis.z += dx[5];
-    ahrs->b_a.axis.x += dx[6];  ahrs->b_a.axis.y += dx[7];  ahrs->b_a.axis.z += dx[8];
-    ahrs->m0.axis.x  += dx[9];  ahrs->m0.axis.y  += dx[10]; ahrs->m0.axis.z  += dx[11];
-    ahrs->v_lp.axis.x+= dx[12]; ahrs->v_lp.axis.y+= dx[13]; ahrs->v_lp.axis.z+= dx[14];
-    ahrs->magNormBias   += dx[IDX_MAGNORM];
-    ahrs->skinPhiScalar += dx[IDX_SKINPHI];
-}
+//------------------------------------------------------------------------------
+// Variables
 
 const FusionAhrsSettings fusionAhrsDefaultSettings = {
-    .convention             = FusionConventionNwu,
-    .sampleRateHz           = 240.0f,
-    .magDipModelDeg         = 78.0f,
-    .magDeclinationDeg      = 0.0f,
-    .magNormReferenceLocal  = 0.0f,
-    .magDipGateRelax        = 0.0f,
-    .magAngGateRelax        = 0.0f,
-    .magNormGateRelax       = 0.0f,
-    .learnMagField          = true,
+    .convention = FusionConventionNwu,
+    .gain = 0.5f,
+    .gyroscopeRange = 0.0f,
+    .accelerationRejection = 90.0f,
+    .magneticRejection = 90.0f,
+    .recoveryTriggerPeriod = 0,
 };
 
-static void RebuildM0(FusionAhrs *ahrs) {
+//------------------------------------------------------------------------------
+// Functions
 
-    const float dip = DegToRad(ahrs->settings.magDipModelDeg);
-    const float dec = DegToRad(ahrs->settings.magDeclinationDeg);
-    const float cd  = cosf(dip);
-    ahrs->m0.axis.x =  cd * cosf(dec);
-    ahrs->m0.axis.y = -cd * sinf(dec);
-    ahrs->m0.axis.z = -sinf(dip);
-}
-
-void FusionAhrsRestart(FusionAhrs *ahrs) {
-    ahrs->q   = FUSION_QUATERNION_IDENTITY;
-    ahrs->b_g = FUSION_VECTOR_ZERO;
-    ahrs->b_a = FUSION_VECTOR_ZERO;
-    RebuildM0(ahrs);
-    ahrs->m0_avg = ahrs->m0;
-    ahrs->m0_avg_ready = false;
-    ahrs->v_lp = FUSION_VECTOR_ZERO;
-
-    const float sO = DegToRad(KFA_INIT_SD_ORIENT_DEG);
-    const float sG = DegToRad(KFA_INIT_SD_GYRBIAS_DEG);
-    const float sA = KFA_INIT_SD_ACCBIAS_MS2;
-    const float sM = KFA_INIT_SD_MAG_NORM;
-    const float sV = KFA_INIT_SD_VEL_MS;
-    memset(ahrs->P, 0, sizeof(ahrs->P));
-    for (int i = 0; i < 3; ++i) ahrs->P[(0  + i) * N15 + (0  + i)] = sO * sO;
-    for (int i = 0; i < 3; ++i) ahrs->P[(3  + i) * N15 + (3  + i)] = sG * sG;
-    for (int i = 0; i < 3; ++i) ahrs->P[(6  + i) * N15 + (6  + i)] = sA * sA;
-    for (int i = 0; i < 3; ++i) ahrs->P[(9  + i) * N15 + (9  + i)] = sM * sM;
-    for (int i = 0; i < 3; ++i) ahrs->P[(12 + i) * N15 + (12 + i)] = sV * sV;
-
-    const float sN = 0.05f;
-    const float sS = 3.0f * 0.017453292519943295f;
-    ahrs->P[IDX_MAGNORM * N15 + IDX_MAGNORM] = sN * sN;
-    ahrs->P[IDX_SKINPHI * N15 + IDX_SKINPHI] = sS * sS;
-    ahrs->magNormBias   = 0.0f;
-    ahrs->skinPhiScalar = 0.0f;
-
-    ahrs->a_lp = FUSION_VECTOR_ZERO;
-    ahrs->a_lp_ready = false;
-    ahrs->a_lin_body  = FUSION_VECTOR_ZERO;
-    ahrs->a_lin_world = FUSION_VECTOR_ZERO;
-    ahrs->a_lin_ready = false;
-    ahrs->fAccBoost = 1.0f;
-    ahrs->dAccHighTime = 0.0f;
-    ahrs->sBg = DegToRad(KFA_GYR_BIAS_MIN_DEG);
-    ahrs->tauM0 = KFA_TAU_M0_MED_S;
-    ahrs->magClearStreakSec = 0.0f;
-    ahrs->magClosedStreakSec = 0.0f;
-    ahrs->magRedefBoostTimer = 0.0f;
-    ahrs->magWasClosed = false;
-    ahrs->stillnessTime = 0.0f;
-    ahrs->zruSampleCount = 0;
-    ahrs->zruFrameCounter = 0;
-    ahrs->qSkin = FUSION_QUATERNION_IDENTITY;
-    ahrs->qSkinReady = false;
-    ahrs->sigmaAcc = KFA_SIGMA_ACC_MS2;
-    ahrs->sigmaGyr = DegToRad(KFA_SIGMA_GYR_DEG_S);
-    ahrs->sigmaMag = KFA_SIGMA_MAG_NORM;
-    ahrs->dAcc = 0.0f;
-    ahrs->magResidualNorm = 0.0f;
-    ahrs->magGateOpen = false;
-    ahrs->accUsedThisFrame = false;
-    ahrs->zruActiveThisFrame = false;
-    ahrs->qSeeded = false;
-}
-
-void FusionAhrsSetSettings(FusionAhrs *ahrs, const FusionAhrsSettings *settings) {
-    ahrs->settings = *settings;
-    if (ahrs->settings.sampleRateHz <= 0.0f) ahrs->settings.sampleRateHz = 240.0f;
-    RebuildM0(ahrs);
-}
-
-void FusionAhrsInitialise(FusionAhrs *ahrs) {
-    ahrs->settings = fusionAhrsDefaultSettings;
+/**
+ * @brief Initialises the AHRS structure.
+ * @param ahrs AHRS structure.
+ */
+void FusionAhrsInitialise(FusionAhrs *const ahrs) {
+    FusionAhrsSetSettings(ahrs, &fusionAhrsDefaultSettings);
     FusionAhrsRestart(ahrs);
 }
 
-void FusionAhrsSetNoise(FusionAhrs *ahrs,
-                        float sigmaAccMs2,
-                        float sigmaGyrDegS,
-                        float sigmaMagNorm)
-{
-    if (sigmaAccMs2  > 0.0f) ahrs->sigmaAcc = sigmaAccMs2;
-    if (sigmaGyrDegS > 0.0f) ahrs->sigmaGyr = DegToRad(sigmaGyrDegS);
-    if (sigmaMagNorm > 0.0f) ahrs->sigmaMag = sigmaMagNorm;
+/**
+ * @brief Restarts the AHRS algorithm.
+ * @param ahrs AHRS structure.
+ */
+void FusionAhrsRestart(FusionAhrs *const ahrs) {
+    ahrs->quaternion = FUSION_QUATERNION_IDENTITY;
+    ahrs->accelerometer = FUSION_VECTOR_ZERO;
+    ahrs->halfGravity = FUSION_VECTOR_ZERO;
+    ahrs->startup = true;
+    ahrs->rampedGain = STARTUP_GAIN;
+    ahrs->angularRateRecovery = false;
+    ahrs->halfAccelerometerFeedback = FUSION_VECTOR_ZERO;
+    ahrs->halfMagnetometerFeedback = FUSION_VECTOR_ZERO;
+    ahrs->accelerometerIgnored = false;
+    ahrs->accelerationRecoveryTrigger = 0;
+    ahrs->accelerationRecoveryTimeout = ahrs->settings.recoveryTriggerPeriod;
+    ahrs->magnetometerIgnored = false;
+    ahrs->magneticRecoveryTrigger = 0;
+    ahrs->magneticRecoveryTimeout = ahrs->settings.recoveryTriggerPeriod;
 }
 
-void FusionAhrsSetSampleRate(FusionAhrs *ahrs, float sampleRateHz)
-{
-    if (sampleRateHz > 1.0f) ahrs->settings.sampleRateHz = sampleRateHz;
+/**
+ * @brief Sets the settings.
+ * @param ahrs AHRS structure.
+ * @param settings Settings.
+ */
+void FusionAhrsSetSettings(FusionAhrs *const ahrs, const FusionAhrsSettings *const settings) {
+    ahrs->settings.convention = settings->convention;
+    ahrs->settings.gain = settings->gain;
+    ahrs->settings.gyroscopeRange = settings->gyroscopeRange == 0.0f ? FLT_MAX : 0.98f * settings->gyroscopeRange;
+    ahrs->settings.accelerationRejection = settings->accelerationRejection == 0.0f ? FLT_MAX : powf(0.5f * sinf(FusionDegreesToRadians(settings->accelerationRejection)), 2);
+    ahrs->settings.magneticRejection = settings->magneticRejection == 0.0f ? FLT_MAX : powf(0.5f * sinf(FusionDegreesToRadians(settings->magneticRejection)), 2);
+    ahrs->settings.recoveryTriggerPeriod = settings->recoveryTriggerPeriod;
+    ahrs->accelerationRecoveryTimeout = ahrs->settings.recoveryTriggerPeriod;
+    ahrs->magneticRecoveryTimeout = ahrs->settings.recoveryTriggerPeriod;
+    if ((settings->gain == 0.0f) || (settings->recoveryTriggerPeriod == 0)) {
+        ahrs->settings.accelerationRejection = FLT_MAX; // disable acceleration and magnetic rejection features if gain is zero
+        ahrs->settings.magneticRejection = FLT_MAX;
+    }
+    if (ahrs->startup == false) {
+        ahrs->rampedGain = ahrs->settings.gain;
+    }
+    ahrs->rampedGainStep = (STARTUP_GAIN - ahrs->settings.gain) / STARTUP_PERIOD;
 }
 
-static void Predict(FusionAhrs *ahrs, FusionVector gyroDegS, float dt) {
-    FusionVector omega = {{
-        DegToRad(gyroDegS.axis.x) - ahrs->b_g.axis.x,
-        DegToRad(gyroDegS.axis.y) - ahrs->b_g.axis.y,
-        DegToRad(gyroDegS.axis.z) - ahrs->b_g.axis.z,
-    }};
+/**
+ * @brief Updates the AHRS algorithm using the gyroscope, accelerometer, and
+ * magnetometer.
+ * @param ahrs AHRS structure.
+ * @param gyroscope Gyroscope in degrees per second.
+ * @param accelerometer Accelerometer in g.
+ * @param magnetometer Magnetometer in any calibrated units.
+ * @param deltaTime Delta time in seconds.
+ */
+void FusionAhrsUpdate(FusionAhrs *const ahrs, const FusionVector gyroscope, const FusionVector accelerometer, const FusionVector magnetometer, const float deltaTime) {
+    ahrs->accelerometer = accelerometer;
 
-    FusionVector phi = { .axis = { omega.axis.x * dt, omega.axis.y * dt, omega.axis.z * dt } };
-    ahrs->q = FusionQuaternionNormalise(FusionQuaternionProduct(ahrs->q, ExpQuat(phi)));
+    // Restart if gyroscope range exceeded
+    if ((fabsf(gyroscope.axis.x) > ahrs->settings.gyroscopeRange) || (fabsf(gyroscope.axis.y) > ahrs->settings.gyroscopeRange) || (fabsf(gyroscope.axis.z) > ahrs->settings.gyroscopeRange)) {
+        const FusionQuaternion quaternion = ahrs->quaternion;
+        FusionAhrsRestart(ahrs);
+        ahrs->quaternion = quaternion;
+        ahrs->angularRateRecovery = true;
+    }
 
-    float Phi[N15 * N15];
-    memset(Phi, 0, sizeof(Phi));
-    for (int i = 0; i < N15; ++i) Phi[i * N15 + i] = 1.0f;
-    float W[9]; Skew3(omega, W);
-    for (int i = 0; i < 3; ++i)
-        for (int j = 0; j < 3; ++j) Phi[i * N15 + j] -= W[i * 3 + j] * dt;
-    for (int i = 0; i < 3; ++i) Phi[i * N15 + (3 + i)] = -dt;
-
-    float T[N15 * N15];
-    for (int i = 0; i < N15; ++i)
-        for (int j = 0; j < N15; ++j) {
-            float s = 0.0f;
-            for (int k = 0; k < N15; ++k) s += Phi[i * N15 + k] * ahrs->P[k * N15 + j];
-            T[i * N15 + j] = s;
+    // Ramp down gain during startup
+    if (ahrs->startup) {
+        ahrs->rampedGain -= ahrs->rampedGainStep * deltaTime;
+        if ((ahrs->rampedGain < ahrs->settings.gain) || (ahrs->settings.gain == 0.0f)) {
+            ahrs->rampedGain = ahrs->settings.gain;
+            ahrs->startup = false;
+            ahrs->angularRateRecovery = false;
         }
-    for (int i = 0; i < N15; ++i)
-        for (int j = 0; j < N15; ++j) {
-            float s = 0.0f;
-            for (int k = 0; k < N15; ++k) s += T[i * N15 + k] * Phi[j * N15 + k];
-            ahrs->P[i * N15 + j] = s;
+    }
+
+    // Calculate direction of gravity indicated by algorithm
+    ahrs->halfGravity = HalfGravity(ahrs);
+
+    // Calculate accelerometer feedback
+    FusionVector halfAccelerometerFeedback = FUSION_VECTOR_ZERO;
+    ahrs->accelerometerIgnored = true;
+    if (FusionVectorIsZero(accelerometer) == false) {
+        // Calculate accelerometer feedback scaled by 0.5
+        ahrs->halfAccelerometerFeedback = Feedback(FusionVectorNormalise(accelerometer), ahrs->halfGravity);
+
+        // Don't ignore accelerometer if acceleration error below threshold
+        if (ahrs->startup || (FusionVectorNormSquared(ahrs->halfAccelerometerFeedback) <= ahrs->settings.accelerationRejection)) {
+            ahrs->accelerometerIgnored = false;
+            ahrs->accelerationRecoveryTrigger -= 9;
+        } else {
+            ahrs->accelerationRecoveryTrigger += 1;
         }
 
-    const float fs = (ahrs->settings.sampleRateHz > 1.0f)
-                      ? ahrs->settings.sampleRateHz : 240.0f;
-    const float n_gyr_psd = ahrs->sigmaGyr / sqrtf(fs);
-    const float qO = n_gyr_psd * n_gyr_psd;
-    const float qG = ahrs->sBg * ahrs->sBg;
-    const float qA = KFA_S_QV_ACC_LP * KFA_S_QV_ACC_LP;
-    const float qM = KFA_S_QV_MAG_RW * KFA_S_QV_MAG_RW;
-    const float qV = KFA_S_QV_ACC_LP * KFA_S_QV_ACC_LP;
-    for (int i = 0; i < 3; ++i) ahrs->P[(0  + i) * N15 + (0  + i)] += qO * dt;
-    for (int i = 0; i < 3; ++i) ahrs->P[(3  + i) * N15 + (3  + i)] += qG * dt;
-    for (int i = 0; i < 3; ++i) ahrs->P[(6  + i) * N15 + (6  + i)] += qA * dt;
-    for (int i = 0; i < 3; ++i) ahrs->P[(9  + i) * N15 + (9  + i)] += qM * dt;
-    for (int i = 0; i < 3; ++i) ahrs->P[(12 + i) * N15 + (12 + i)] += qV * dt;
+        // Don't ignore accelerometer during acceleration recovery
+        if (ahrs->accelerationRecoveryTrigger > ahrs->accelerationRecoveryTimeout) {
+            ahrs->accelerationRecoveryTimeout = 0;
+            ahrs->accelerometerIgnored = false;
+        } else {
+            ahrs->accelerationRecoveryTimeout = ahrs->settings.recoveryTriggerPeriod;
+        }
+        ahrs->accelerationRecoveryTrigger = Clamp(ahrs->accelerationRecoveryTrigger, 0, ahrs->settings.recoveryTriggerPeriod);
 
-    const float qN = 1.0e-4f * 1.0e-4f;
-    ahrs->P[IDX_MAGNORM * N15 + IDX_MAGNORM] += qN * dt;
+        // Apply accelerometer feedback
+        if (ahrs->accelerometerIgnored == false) {
+            halfAccelerometerFeedback = ahrs->halfAccelerometerFeedback;
+        }
+    }
 
-    const float skinSigma = 3.0f * 0.017453292519943295f;
-    const float skinTau   = KFA_SKIN_TAU_S;
-    const float skinDecay = expf(-2.0f * dt / skinTau);
-    ahrs->P[IDX_SKINPHI * N15 + IDX_SKINPHI] *= skinDecay;
-    ahrs->skinPhiScalar  *= expf(-dt / skinTau);
-    const float qS = (skinSigma * skinSigma) * (1.0f - skinDecay);
-    ahrs->P[IDX_SKINPHI * N15 + IDX_SKINPHI] += qS;
+    // Calculate magnetometer feedback
+    FusionVector halfMagnetometerFeedback = FUSION_VECTOR_ZERO;
+    ahrs->magnetometerIgnored = true;
+    if (FusionVectorIsZero(magnetometer) == false) {
+        // Calculate direction of magnetic field indicated by algorithm
+        const FusionVector halfMagnetic = HalfMagnetic(ahrs);
 
-    Symm15(ahrs->P);
+        // Calculate magnetometer feedback scaled by 0.5
+        ahrs->halfMagnetometerFeedback = Feedback(FusionVectorNormalise(FusionVectorCross(ahrs->halfGravity, magnetometer)), halfMagnetic);
+
+        // Don't ignore magnetometer if magnetic error below threshold
+        if (ahrs->startup || (FusionVectorNormSquared(ahrs->halfMagnetometerFeedback) <= ahrs->settings.magneticRejection)) {
+            ahrs->magnetometerIgnored = false;
+            ahrs->magneticRecoveryTrigger -= 9;
+        } else {
+            ahrs->magneticRecoveryTrigger += 1;
+        }
+
+        // Don't ignore magnetometer during magnetic recovery
+        if (ahrs->magneticRecoveryTrigger > ahrs->magneticRecoveryTimeout) {
+            ahrs->magneticRecoveryTimeout = 0;
+            ahrs->magnetometerIgnored = false;
+        } else {
+            ahrs->magneticRecoveryTimeout = ahrs->settings.recoveryTriggerPeriod;
+        }
+        ahrs->magneticRecoveryTrigger = Clamp(ahrs->magneticRecoveryTrigger, 0, ahrs->settings.recoveryTriggerPeriod);
+
+        // Apply magnetometer feedback
+        if (ahrs->magnetometerIgnored == false) {
+            halfMagnetometerFeedback = ahrs->halfMagnetometerFeedback;
+        }
+    }
+
+    // Convert gyroscope to radians per second scaled by 0.5
+    const FusionVector halfGyroscope = FusionVectorScale(gyroscope, FusionDegreesToRadians(0.5f));
+
+    // Apply feedback to gyroscope
+    const FusionVector adjustedHalfGyroscope = FusionVectorAdd(halfGyroscope, FusionVectorScale(FusionVectorAdd(halfAccelerometerFeedback, halfMagnetometerFeedback), ahrs->rampedGain));
+
+    // Integrate rate of change of quaternion
+    ahrs->quaternion = FusionQuaternionAdd(ahrs->quaternion, FusionQuaternionVectorProduct(ahrs->quaternion, FusionVectorScale(adjustedHalfGyroscope, deltaTime)));
+
+    // Normalise quaternion
+    ahrs->quaternion = FusionQuaternionNormalise(ahrs->quaternion);
 }
 
-static void UpdateLPAAndDivMon(FusionAhrs *ahrs, FusionVector aSensorMs2, float dt) {
-    FusionVector aCorr = {{
-        aSensorMs2.axis.x - ahrs->b_a.axis.x,
-        aSensorMs2.axis.y - ahrs->b_a.axis.y,
-        aSensorMs2.axis.z - ahrs->b_a.axis.z,
-    }};
-    const float b = expf(-dt / KFA_LPA_TAU_S);
-    if (!ahrs->a_lp_ready) {
-        ahrs->a_lp = aCorr;
-        ahrs->a_lp_ready = true;
-    } else {
-        ahrs->a_lp.axis.x = b * ahrs->a_lp.axis.x + (1 - b) * aCorr.axis.x;
-        ahrs->a_lp.axis.y = b * ahrs->a_lp.axis.y + (1 - b) * aCorr.axis.y;
-        ahrs->a_lp.axis.z = b * ahrs->a_lp.axis.z + (1 - b) * aCorr.axis.z;
+/**
+ * @brief Returns the direction of gravity scaled by 0.5.
+ * @param ahrs AHRS structure.
+ * @return Direction of gravity scaled by 0.5.
+ */
+static inline FusionVector HalfGravity(const FusionAhrs *const ahrs) {
+#define Q ahrs->quaternion.element
+    switch (ahrs->settings.convention) {
+        case FusionConventionNwu:
+        case FusionConventionEnu: {
+            const FusionVector halfGravity = {
+                .axis = {
+                    .x = Q.x * Q.z - Q.w * Q.y,
+                    .y = Q.y * Q.z + Q.w * Q.x,
+                    .z = Q.w * Q.w - 0.5f + Q.z * Q.z,
+                }
+            }; // third column of transposed rotation matrix scaled by 0.5
+            return halfGravity;
+        }
+        case FusionConventionNed: {
+            const FusionVector halfGravity = {
+                .axis = {
+                    .x = Q.w * Q.y - Q.x * Q.z,
+                    .y = -1.0f * (Q.y * Q.z + Q.w * Q.x),
+                    .z = 0.5f - Q.w * Q.w - Q.z * Q.z,
+                }
+            }; // third column of transposed rotation matrix scaled by -0.5
+            return halfGravity;
+        }
     }
-
-    const FusionVector gWorld  = { .axis = { 0.0f, 0.0f, +KFA_GRAVITY_MS2 } };
-    const FusionVector gSensor = RotByQInv(ahrs->q, gWorld);
-    const FusionVector resid = {{
-        aCorr.axis.x - gSensor.axis.x,
-        aCorr.axis.y - gSensor.axis.y,
-        aCorr.axis.z - gSensor.axis.z,
-    }};
-    ahrs->dAcc = sqrtf(resid.axis.x * resid.axis.x +
-                       resid.axis.y * resid.axis.y +
-                       resid.axis.z * resid.axis.z);
-
-    ahrs->a_lin_body  = resid;
-    ahrs->a_lin_world = RotByQ(ahrs->q, resid);
-    ahrs->a_lin_ready = true;
-
-    const float bv = expf(-dt / KFA_VEL_TAU_S);
-    const FusionVector aWorld = RotByQ(ahrs->q, aCorr);
-    ahrs->v_lp.axis.x = bv * ahrs->v_lp.axis.x + (1 - bv) * aWorld.axis.x;
-    ahrs->v_lp.axis.y = bv * ahrs->v_lp.axis.y + (1 - bv) * aWorld.axis.y;
-    ahrs->v_lp.axis.z = bv * ahrs->v_lp.axis.z + (1 - bv) * (aWorld.axis.z - KFA_GRAVITY_MS2);
-    const float vMag = sqrtf(ahrs->v_lp.axis.x * ahrs->v_lp.axis.x +
-                             ahrs->v_lp.axis.y * ahrs->v_lp.axis.y +
-                             ahrs->v_lp.axis.z * ahrs->v_lp.axis.z);
-
-    const bool lowDyn = (ahrs->dAcc < KFA_ACCDIV_THRESH_LOW) && (vMag < KFA_ACCDIV_VEL_THRESH);
-    if (lowDyn) {
-        const float k = 1.0f - expf(-dt / KFA_FACCBOOST_RAMP_UP_S);
-        ahrs->fAccBoost += (KFA_FACCBOOST_MAX - ahrs->fAccBoost) * k;
-    } else {
-        const float k = 1.0f - expf(-dt / KFA_FACCBOOST_RAMP_DN_S);
-        ahrs->fAccBoost += (1.0f - ahrs->fAccBoost) * k;
-    }
-
-    if (ahrs->dAcc > KFA_ACCDIV_THRESH_HIGH) ahrs->dAccHighTime += dt;
-    else                                     ahrs->dAccHighTime  = 0.0f;
-
-    if      (lowDyn)                                            ahrs->tauM0 = KFA_TAU_M0_FAST_S;
-    else if (ahrs->dAccHighTime > KFA_ACCDIV_HIGH_HOLD_S)       ahrs->tauM0 = KFA_TAU_M0_SLOW_S;
-    else                                                        ahrs->tauM0 = KFA_TAU_M0_MED_S;
+#undef Q
+    return FUSION_VECTOR_ZERO; // avoid compiler warning
 }
 
-static void ApplyAccUpdate(FusionAhrs *ahrs, FusionVector aSensorMs2) {
-    const FusionVector aCorr = {{
-        aSensorMs2.axis.x - ahrs->b_a.axis.x,
-        aSensorMs2.axis.y - ahrs->b_a.axis.y,
-        aSensorMs2.axis.z - ahrs->b_a.axis.z,
-    }};
-    const float aN = FusionVectorNorm(aCorr);
-    if (aN < 1e-6f) { ahrs->accUsedThisFrame = false; return; }
-
-    const FusionVector zUp = {{ 0.0f, 0.0f, 1.0f }};
-    FusionVector gHat = RotByQInv(ahrs->q, zUp);
-    const float gHatN = FusionVectorNorm(gHat);
-    if (gHatN < 1e-6f) { ahrs->accUsedThisFrame = false; return; }
-    gHat.axis.x /= gHatN; gHat.axis.y /= gHatN; gHat.axis.z /= gHatN;
-    const float invAN = 1.0f / aN;
-    const FusionVector aHat = {{ aCorr.axis.x * invAN,
-                                 aCorr.axis.y * invAN,
-                                 aCorr.axis.z * invAN }};
-
-    const FusionVector cr = {{
-        gHat.axis.y * aHat.axis.z - gHat.axis.z * aHat.axis.y,
-        gHat.axis.z * aHat.axis.x - gHat.axis.x * aHat.axis.z,
-        gHat.axis.x * aHat.axis.y - gHat.axis.y * aHat.axis.x,
-    }};
-    const float sn = sqrtf(cr.axis.x * cr.axis.x + cr.axis.y * cr.axis.y + cr.axis.z * cr.axis.z);
-    const float dotga = gHat.axis.x * aHat.axis.x + gHat.axis.y * aHat.axis.y + gHat.axis.z * aHat.axis.z;
-    FusionVector axis = zUp; float angle = 0.0f;
-    if (sn < 1e-7f) {
-        if (dotga <= 0.0f) {
-            FusionVector t = {{ 1.0f, 0.0f, 0.0f }};
-            if (fabsf(gHat.axis.x) > 0.9f) { t.axis.x = 0.0f; t.axis.y = 1.0f; }
-            FusionVector p = {{
-                gHat.axis.y * t.axis.z - gHat.axis.z * t.axis.y,
-                gHat.axis.z * t.axis.x - gHat.axis.x * t.axis.z,
-                gHat.axis.x * t.axis.y - gHat.axis.y * t.axis.x,
-            }};
-            const float pn = FusionVectorNorm(p);
-            axis.axis.x = p.axis.x / pn; axis.axis.y = p.axis.y / pn; axis.axis.z = p.axis.z / pn;
-            angle = 3.14159265358979f;
+/**
+ * @brief Returns the direction of the magnetic field scaled by 0.5.
+ * @param ahrs AHRS structure.
+ * @return Direction of the magnetic field scaled by 0.5.
+ */
+static inline FusionVector HalfMagnetic(const FusionAhrs *const ahrs) {
+#define Q ahrs->quaternion.element
+    switch (ahrs->settings.convention) {
+        case FusionConventionNwu: {
+            const FusionVector halfMagnetic = {
+                .axis = {
+                    .x = Q.x * Q.y + Q.w * Q.z,
+                    .y = Q.w * Q.w - 0.5f + Q.y * Q.y,
+                    .z = Q.y * Q.z - Q.w * Q.x,
+                }
+            }; // second column of transposed rotation matrix scaled by 0.5
+            return halfMagnetic;
         }
-    } else {
-        axis.axis.x = cr.axis.x / sn; axis.axis.y = cr.axis.y / sn; axis.axis.z = cr.axis.z / sn;
-        angle = atan2f(sn, dotga);
+        case FusionConventionEnu: {
+            const FusionVector halfMagnetic = {
+                .axis = {
+                    .x = 0.5f - Q.w * Q.w - Q.x * Q.x,
+                    .y = Q.w * Q.z - Q.x * Q.y,
+                    .z = -1.0f * (Q.x * Q.z + Q.w * Q.y),
+                }
+            }; // first column of transposed rotation matrix scaled by -0.5
+            return halfMagnetic;
+        }
+        case FusionConventionNed: {
+            const FusionVector halfMagnetic = {
+                .axis = {
+                    .x = -1.0f * (Q.x * Q.y + Q.w * Q.z),
+                    .y = 0.5f - Q.w * Q.w - Q.y * Q.y,
+                    .z = Q.w * Q.x - Q.y * Q.z,
+                }
+            }; // second column of transposed rotation matrix scaled by -0.5
+            return halfMagnetic;
+        }
     }
-    const float r[3] = { -axis.axis.x * angle, -axis.axis.y * angle, -axis.axis.z * angle };
-
-    float H[3 * N15];
-    memset(H, 0, sizeof(H));
-    H[0 * N15 + 0] = 1.0f; H[1 * N15 + 1] = 1.0f; H[2 * N15 + 2] = 1.0f;
-
-    const float errG  = fabsf(aN - KFA_GRAVITY_MS2) / KFA_GRAVITY_MS2;
-    const float tw    = errG / KFA_ACC_TRUST_WIDTH;
-    const float trust = expf(-tw * tw);
-    const float sig   = KFA_ACC_SIG_STATIC_RAD
-                      + (KFA_ACC_SIG_DYN_RAD - KFA_ACC_SIG_STATIC_RAD) * (1.0f - trust);
-    const float Rs = sig * sig;
-    const float Rdiag[3] = { Rs, Rs, Rs };
-
-    float HP[3 * N15];
-    for (int i = 0; i < 3; ++i)
-        for (int j = 0; j < N15; ++j) {
-            float s = 0.0f;
-            for (int k = 0; k < N15; ++k) s += H[i * N15 + k] * ahrs->P[k * N15 + j];
-            HP[i * N15 + j] = s;
-        }
-    float S[9];
-    for (int i = 0; i < 3; ++i)
-        for (int j = 0; j < 3; ++j) {
-            float s = 0.0f;
-            for (int k = 0; k < N15; ++k) s += HP[i * N15 + k] * H[j * N15 + k];
-            S[i * 3 + j] = s;
-        }
-    S[0] += Rs;  S[4] += Rs;  S[8] += Rs;
-
-    float Sinv[9];
-    if (!InvSym3(S, Sinv)) { ahrs->accUsedThisFrame = false; return; }
-
-    float PHt[N15 * 3];
-    for (int i = 0; i < N15; ++i)
-        for (int j = 0; j < 3; ++j) {
-            float s = 0.0f;
-            for (int k = 0; k < N15; ++k) s += ahrs->P[i * N15 + k] * H[j * N15 + k];
-            PHt[i * 3 + j] = s;
-        }
-    float K[N15 * 3];
-    for (int i = 0; i < N15; ++i)
-        for (int j = 0; j < 3; ++j) {
-            float s = 0.0f;
-            for (int k = 0; k < 3; ++k) s += PHt[i * 3 + k] * Sinv[k * 3 + j];
-            K[i * 3 + j] = s;
-        }
-
-    float dx[N15];
-    for (int i = 0; i < N15; ++i)
-        dx[i] = K[i * 3 + 0] * r[0] + K[i * 3 + 1] * r[1] + K[i * 3 + 2] * r[2];
-    for (int i = 0; i < N15; ++i)
-        if (!isfinite(dx[i])) { ahrs->accUsedThisFrame = false; return; }
-    dx[6] = dx[7] = dx[8] = 0.0f;
-    ApplyDeltaX(ahrs, dx);
-
-    Joseph_3x15(ahrs->P, H, K, Rdiag);
-
-    for (int i = 0; i < 3; ++i)
-        if (ahrs->P[i * N15 + i] < KFA_ACC_P_ORIENT_FLOOR)
-            ahrs->P[i * N15 + i] = KFA_ACC_P_ORIENT_FLOOR;
-
-    {
-        const FusionVector gW = {{ 0.0f, 0.0f, KFA_GRAVITY_MS2 }};
-        const FusionVector gS = RotByQInv(ahrs->q, gW);
-        const float ex = aCorr.axis.x - gS.axis.x;
-        const float ey = aCorr.axis.y - gS.axis.y;
-        const float ez = aCorr.axis.z - gS.axis.z;
-        ahrs->dAcc = sqrtf(ex * ex + ey * ey + ez * ez);
-    }
-    ahrs->accUsedThisFrame = true;
+#undef Q
+    return FUSION_VECTOR_ZERO; // avoid compiler warning
 }
 
-static bool MagGate(FusionAhrs *ahrs, FusionVector m) {
-    const float mNorm = sqrtf(m.axis.x * m.axis.x + m.axis.y * m.axis.y + m.axis.z * m.axis.z);
-    if (mNorm < 1e-6f) return false;
-
-    const float dipRelax  = (ahrs->settings.magDipGateRelax  > 0.0f)
-                                ? ahrs->settings.magDipGateRelax  : 1.0f;
-    const float angRelax  = (ahrs->settings.magAngGateRelax  > 0.0f)
-                                ? ahrs->settings.magAngGateRelax  : 1.0f;
-    const float normRelax = (ahrs->settings.magNormGateRelax > 0.0f)
-                                ? ahrs->settings.magNormGateRelax : 1.0f;
-
-    const float refNorm = (ahrs->settings.magNormReferenceLocal > 1e-3f)
-                              ? ahrs->settings.magNormReferenceLocal
-                              : KFA_MAG_NORM_REF;
-    const float normErr = fabsf(mNorm - refNorm) / refNorm;
-    if (normErr > KFA_MAG_NORM_GATE * normRelax) return false;
-
-    const FusionVector gUp = RotByQInv(ahrs->q, (FusionVector){{0, 0, +1}});
-    const float gDotMUnit = (gUp.axis.x * m.axis.x +
-                             gUp.axis.y * m.axis.y +
-                             gUp.axis.z * m.axis.z) / mNorm;
-    const float dipMeasDeg = RadToDeg(asinf(fmaxf(-1.0f, fminf(1.0f, -gDotMUnit))));
-    float dipRefDeg = ahrs->settings.magDipModelDeg;
-    float decRefDeg = ahrs->settings.magDeclinationDeg;
-    if (ahrs->settings.learnMagField && ahrs->m0_avg_ready) {
-        dipRefDeg = RadToDeg(asinf(fmaxf(-1.0f, fminf(1.0f, -ahrs->m0.axis.z))));
-        decRefDeg = RadToDeg(atan2f(-ahrs->m0.axis.y, ahrs->m0.axis.x));
+/**
+ * @brief Returns the feedback.
+ * @param sensor Sensor.
+ * @param reference Reference.
+ * @return Feedback.
+ */
+static inline FusionVector Feedback(const FusionVector sensor, const FusionVector reference) {
+    if (FusionVectorDot(sensor, reference) < 0.0f) {
+        return FusionVectorNormalise(FusionVectorCross(sensor, reference)); // if error is >90 degrees
     }
-    if (fabsf(dipMeasDeg - dipRefDeg)
-            > KFA_MAG_DIP_GATE_DEG * dipRelax) return false;
-
-    const float gDotM = gUp.axis.x * m.axis.x + gUp.axis.y * m.axis.y + gUp.axis.z * m.axis.z;
-    const FusionVector mHoriz = {{
-        m.axis.x - gDotM * gUp.axis.x,
-        m.axis.y - gDotM * gUp.axis.y,
-        m.axis.z - gDotM * gUp.axis.z,
-    }};
-    const FusionVector mWorld = RotByQ(ahrs->q, mHoriz);
-
-    const float angDeg = RadToDeg(atan2f(-mWorld.axis.y, mWorld.axis.x));
-    if (fabsf(angDeg - decRefDeg)
-            > KFA_MAG_ANG_GATE_DEG * angRelax) return false;
-    return true;
+    return FusionVectorCross(sensor, reference);
 }
 
-static void LearnMagFieldIfStill(FusionAhrs *ahrs, FusionVector m, FusionVector gyroDegS, float dt) {
-    if (!ahrs->settings.learnMagField) return;
-    const float mNorm = sqrtf(m.axis.x * m.axis.x + m.axis.y * m.axis.y + m.axis.z * m.axis.z);
-    if (mNorm < 1e-6f) return;
-    const float ox = gyroDegS.axis.x - RadToDeg(ahrs->b_g.axis.x);
-    const float oy = gyroDegS.axis.y - RadToDeg(ahrs->b_g.axis.y);
-    const float oz = gyroDegS.axis.z - RadToDeg(ahrs->b_g.axis.z);
-    if (sqrtf(ox * ox + oy * oy + oz * oz) >= KFA_MAG_LEARN_OMEGA_DEG) return;
-    const float refNorm = (ahrs->settings.magNormReferenceLocal > 1e-3f)
-                              ? ahrs->settings.magNormReferenceLocal : KFA_MAG_NORM_REF;
-    if (fabsf(mNorm - refNorm) / refNorm > KFA_MAG_LEARN_NORMDIFF) return;
-    const FusionVector mWorld = RotByQ(ahrs->q, m);
-    const float a = expf(-dt / ahrs->tauM0);
-    if (!ahrs->m0_avg_ready) {
-        ahrs->m0_avg = mWorld;
-        ahrs->m0_avg_ready = true;
-    } else {
-        ahrs->m0_avg.axis.x = a * ahrs->m0_avg.axis.x + (1 - a) * mWorld.axis.x;
-        ahrs->m0_avg.axis.y = a * ahrs->m0_avg.axis.y + (1 - a) * mWorld.axis.y;
-        ahrs->m0_avg.axis.z = a * ahrs->m0_avg.axis.z + (1 - a) * mWorld.axis.z;
+/**
+ * @brief Returns a value limited to maximum and minimum.
+ * @param value Value.
+ * @param min Minimum value.
+ * @param max Maximum value.
+ * @return Value limited to maximum and minimum.
+ */
+static inline int Clamp(const int value, const int min, const int max) {
+    if (value < min) {
+        return min;
     }
-    const float n = sqrtf(ahrs->m0_avg.axis.x * ahrs->m0_avg.axis.x +
-                          ahrs->m0_avg.axis.y * ahrs->m0_avg.axis.y +
-                          ahrs->m0_avg.axis.z * ahrs->m0_avg.axis.z);
-    if (n > 1e-6f) {
-        ahrs->m0.axis.x = ahrs->m0_avg.axis.x / n;
-        ahrs->m0.axis.y = ahrs->m0_avg.axis.y / n;
-        ahrs->m0.axis.z = ahrs->m0_avg.axis.z / n;
+    if (value > max) {
+        return max;
+    }
+    return value;
+}
+
+/**
+ * @brief Updates the AHRS algorithm using the gyroscope and accelerometer.
+ * @param ahrs AHRS structure.
+ * @param gyroscope Gyroscope in degrees per second.
+ * @param accelerometer Accelerometer in g.
+ * @param deltaTime Delta time in seconds.
+ */
+void FusionAhrsUpdateNoMagnetometer(FusionAhrs *const ahrs, const FusionVector gyroscope, const FusionVector accelerometer, const float deltaTime) {
+    FusionAhrsUpdate(ahrs, gyroscope, accelerometer, FUSION_VECTOR_ZERO, deltaTime);
+
+    // Zero heading during startup
+    if (ahrs->startup) {
+        FusionAhrsSetHeading(ahrs, 0.0f);
     }
 }
 
-static void ApplyMagUpdate(FusionAhrs *ahrs, FusionVector m, float dt) {
+/**
+ * @brief Updates the AHRS algorithm using the gyroscope, accelerometer, and an
+ * external measurement of heading.
+ * @param ahrs AHRS structure.
+ * @param gyroscope Gyroscope in degrees per second.
+ * @param accelerometer Accelerometer in g.
+ * @param heading Heading in degrees.
+ * @param deltaTime Delta time in seconds.
+ */
+void FusionAhrsUpdateExternalHeading(FusionAhrs *const ahrs, const FusionVector gyroscope, const FusionVector accelerometer, const float heading, const float deltaTime) {
+#define Q ahrs->quaternion.element
+    const float roll = atan2f(Q.w * Q.x + Q.y * Q.z, 0.5f - Q.y * Q.y - Q.x * Q.x);
+#undef Q
 
-    if (m.axis.x == 0.0f && m.axis.y == 0.0f && m.axis.z == 0.0f) {
-        ahrs->magGateOpen = false;
-        ahrs->magClearStreakSec = 0.0f;
-        ahrs->magClosedStreakSec += dt;
-        ahrs->magWasClosed = true;
-        return;
-    }
-    if (!MagGate(ahrs, m)) {
-        ahrs->magGateOpen = false;
-        ahrs->magClearStreakSec = 0.0f;
-        ahrs->magClosedStreakSec += dt;
-        ahrs->magWasClosed = true;
-        return;
-    }
-
-    ahrs->magClearStreakSec += dt;
-    if (ahrs->magClearStreakSec < KFA_MAG_RES_TIME_UP_S) {
-        ahrs->magGateOpen = false;
-
-        return;
-    }
-
-    if (ahrs->magWasClosed &&
-        ahrs->magClosedStreakSec >= KFA_REDEF_CLOSED_THR_S) {
-        ahrs->magRedefBoostTimer = KFA_REDEF_RAMP_S;
-    }
-    ahrs->magClosedStreakSec = 0.0f;
-    ahrs->magWasClosed = false;
-    ahrs->magGateOpen = true;
-
-    const float magNormScale = 1.0f + ahrs->magNormBias;
-    FusionVector hMag = RotByQInv(ahrs->q, ahrs->m0);
-    hMag.axis.x *= magNormScale;
-    hMag.axis.y *= magNormScale;
-    hMag.axis.z *= magNormScale;
-    const float r[3] = {
-        m.axis.x - hMag.axis.x,
-        m.axis.y - hMag.axis.y,
-        m.axis.z - hMag.axis.z,
-    };
-    ahrs->magResidualNorm = sqrtf(r[0] * r[0] + r[1] * r[1] + r[2] * r[2]);
-
-    float H[3 * N15];
-    memset(H, 0, sizeof(H));
-    float Hth[9]; Skew3(hMag, Hth);
-    for (int i = 0; i < 3; ++i)
-        for (int j = 0; j < 3; ++j) H[i * N15 + (0 + j)] = Hth[i * 3 + j];
-
-    const FusionVector ex = RotByQInv(ahrs->q, (FusionVector){{1, 0, 0}});
-    const FusionVector ey = RotByQInv(ahrs->q, (FusionVector){{0, 1, 0}});
-    const FusionVector ez = RotByQInv(ahrs->q, (FusionVector){{0, 0, 1}});
-    H[0 * N15 + 9 + 0] = ex.axis.x;  H[0 * N15 + 9 + 1] = ey.axis.x;  H[0 * N15 + 9 + 2] = ez.axis.x;
-    H[1 * N15 + 9 + 0] = ex.axis.y;  H[1 * N15 + 9 + 1] = ey.axis.y;  H[1 * N15 + 9 + 2] = ez.axis.y;
-    H[2 * N15 + 9 + 0] = ex.axis.z;  H[2 * N15 + 9 + 1] = ey.axis.z;  H[2 * N15 + 9 + 2] = ez.axis.z;
-
-    H[0 * N15 + IDX_MAGNORM] = hMag.axis.x;
-    H[1 * N15 + IDX_MAGNORM] = hMag.axis.y;
-    H[2 * N15 + IDX_MAGNORM] = hMag.axis.z;
-
-    float sigmaMagEff = ahrs->sigmaMag;
-    if (ahrs->magRedefBoostTimer > 0.0f) {
-        const float frac = ahrs->magRedefBoostTimer / KFA_REDEF_RAMP_S;
-
-        const float boostMul = KFA_REDEF_SIGMA_DOWNSCALE
-                             + (1.0f - KFA_REDEF_SIGMA_DOWNSCALE) * (1.0f - frac);
-        sigmaMagEff = ahrs->sigmaMag * boostMul;
-        ahrs->magRedefBoostTimer -= dt;
-        if (ahrs->magRedefBoostTimer < 0.0f) ahrs->magRedefBoostTimer = 0.0f;
-    }
-    const float Rs = sigmaMagEff * sigmaMagEff;
-    const float Rdiag[3] = { Rs, Rs, Rs };
-
-    float HP[3 * N15];
-    for (int i = 0; i < 3; ++i)
-        for (int j = 0; j < N15; ++j) {
-            float s = 0.0f;
-            for (int k = 0; k < N15; ++k) s += H[i * N15 + k] * ahrs->P[k * N15 + j];
-            HP[i * N15 + j] = s;
+    // Calculate equivalent magnetometer
+    const float headingRadians = FusionDegreesToRadians(heading);
+    const float sinHeadingRadians = sinf(headingRadians);
+    const FusionVector magnetometer = {
+        .axis = {
+            .x = cosf(headingRadians),
+            .y = -1.0f * cosf(roll) * sinHeadingRadians,
+            .z = sinHeadingRadians * sinf(roll),
         }
-    float S[9];
-    for (int i = 0; i < 3; ++i)
-        for (int j = 0; j < 3; ++j) {
-            float s = 0.0f;
-            for (int k = 0; k < N15; ++k) s += HP[i * N15 + k] * H[j * N15 + k];
-            S[i * 3 + j] = s;
-        }
-    S[0] += Rs;  S[4] += Rs;  S[8] += Rs;
-
-    float Sinv[9];
-    if (!InvSym3(S, Sinv)) return;
-
-    float PHt[N15 * 3];
-    for (int i = 0; i < N15; ++i)
-        for (int j = 0; j < 3; ++j) {
-            float s = 0.0f;
-            for (int k = 0; k < N15; ++k) s += ahrs->P[i * N15 + k] * H[j * N15 + k];
-            PHt[i * 3 + j] = s;
-        }
-    float K[N15 * 3];
-    for (int i = 0; i < N15; ++i)
-        for (int j = 0; j < 3; ++j) {
-            float s = 0.0f;
-            for (int k = 0; k < 3; ++k) s += PHt[i * 3 + k] * Sinv[k * 3 + j];
-            K[i * 3 + j] = s;
-        }
-
-    float dx[N15];
-    for (int i = 0; i < N15; ++i)
-        dx[i] = K[i * 3 + 0] * r[0] + K[i * 3 + 1] * r[1] + K[i * 3 + 2] * r[2];
-    ApplyDeltaX(ahrs, dx);
-    Joseph_3x15(ahrs->P, H, K, Rdiag);
-
-    const float ratio = ahrs->magResidualNorm / KFA_MAG_RES_THRESH;
-    const float clamped = ratio > 1.0f ? 1.0f : ratio;
-    const float f = 0.15f + 0.85f * clamped * clamped;
-    const float sBgMax = DegToRad(KFA_GYR_BIAS_MAX_DEG);
-    const float sBgMin = DegToRad(KFA_GYR_BIAS_MIN_DEG);
-    const float sBg = sBgMax * f;
-    ahrs->sBg = (sBg > sBgMin) ? sBg : sBgMin;
-
-    const FusionVector mWorld = RotByQ(ahrs->q, m);
-    const float a = expf(-dt / ahrs->tauM0);
-    if (!ahrs->m0_avg_ready) {
-        ahrs->m0_avg = mWorld;
-        ahrs->m0_avg_ready = true;
-    } else {
-        ahrs->m0_avg.axis.x = a * ahrs->m0_avg.axis.x + (1 - a) * mWorld.axis.x;
-        ahrs->m0_avg.axis.y = a * ahrs->m0_avg.axis.y + (1 - a) * mWorld.axis.y;
-        ahrs->m0_avg.axis.z = a * ahrs->m0_avg.axis.z + (1 - a) * mWorld.axis.z;
-    }
-
-    const float mAvgNorm = sqrtf(ahrs->m0_avg.axis.x * ahrs->m0_avg.axis.x +
-                                 ahrs->m0_avg.axis.y * ahrs->m0_avg.axis.y +
-                                 ahrs->m0_avg.axis.z * ahrs->m0_avg.axis.z);
-    if (mAvgNorm > 1e-6f) {
-        const float inv = 1.0f / mAvgNorm;
-        ahrs->m0.axis.x = ahrs->m0_avg.axis.x * inv;
-        ahrs->m0.axis.y = ahrs->m0_avg.axis.y * inv;
-        ahrs->m0.axis.z = ahrs->m0_avg.axis.z * inv;
-    }
-}
-
-static void ApplyZruIfStill(FusionAhrs *ahrs, FusionVector gyroDegS, FusionVector aSensorMs2, float dt) {
-    ahrs->zruActiveThisFrame = false;
-
-    const float omegaDeg = sqrtf(
-        (gyroDegS.axis.x - RadToDeg(ahrs->b_g.axis.x)) * (gyroDegS.axis.x - RadToDeg(ahrs->b_g.axis.x)) +
-        (gyroDegS.axis.y - RadToDeg(ahrs->b_g.axis.y)) * (gyroDegS.axis.y - RadToDeg(ahrs->b_g.axis.y)) +
-        (gyroDegS.axis.z - RadToDeg(ahrs->b_g.axis.z)) * (gyroDegS.axis.z - RadToDeg(ahrs->b_g.axis.z))
-    );
-    const float aNorm = sqrtf(aSensorMs2.axis.x * aSensorMs2.axis.x +
-                              aSensorMs2.axis.y * aSensorMs2.axis.y +
-                              aSensorMs2.axis.z * aSensorMs2.axis.z);
-    const bool stillOmega = (omegaDeg < KFA_STILLNESS_OMEGA_DEG);
-    const bool stillAcc   = (fabsf(aNorm - KFA_GRAVITY_MS2) < KFA_STILLNESS_ACC_BAND_MS2);
-
-    if (stillOmega && stillAcc) {
-        ahrs->stillnessTime += dt;
-        ahrs->zruSampleCount = (ahrs->zruSampleCount < KFA_ZRU_MIN_SAMPLES * 2)
-                               ? ahrs->zruSampleCount + 1 : ahrs->zruSampleCount;
-    } else {
-        ahrs->stillnessTime = 0.0f;
-        ahrs->zruSampleCount = 0;
-        return;
-    }
-
-    if (ahrs->stillnessTime < KFA_STILLNESS_HOLD_S) return;
-    if (ahrs->zruSampleCount < KFA_ZRU_MIN_SAMPLES) return;
-
-    if (++ahrs->zruFrameCounter < KFA_ZRU_UPDATE_RATE) return;
-    ahrs->zruFrameCounter = 0;
-
-    const FusionVector omegaRad = {{
-        DegToRad(gyroDegS.axis.x),
-        DegToRad(gyroDegS.axis.y),
-        DegToRad(gyroDegS.axis.z),
-    }};
-    const float r[3] = {
-        ahrs->b_g.axis.x - omegaRad.axis.x,
-        ahrs->b_g.axis.y - omegaRad.axis.y,
-        ahrs->b_g.axis.z - omegaRad.axis.z,
     };
 
-    float H[3 * N15];
-    memset(H, 0, sizeof(H));
-    for (int i = 0; i < 3; ++i) H[i * N15 + (3 + i)] = 1.0f;
+    // Update algorithm
+    FusionAhrsUpdate(ahrs, gyroscope, accelerometer, magnetometer, deltaTime);
+}
 
-    const float Rdiag[3] = { KFA_ZRU_VARIANCE, KFA_ZRU_VARIANCE, KFA_ZRU_VARIANCE };
+/**
+ * @brief Returns the quaternion.
+ * @param ahrs AHRS structure.
+ * @return Quaternion.
+ */
+FusionQuaternion FusionAhrsGetQuaternion(const FusionAhrs *const ahrs) {
+    return ahrs->quaternion;
+}
 
-    float S[9];
-    Sub3x3(ahrs->P, 3, 3, S);
-    S[0] += KFA_ZRU_VARIANCE;  S[4] += KFA_ZRU_VARIANCE;  S[8] += KFA_ZRU_VARIANCE;
+/**
+ * @brief Sets the quaternion.
+ * @param ahrs AHRS structure.
+ * @param quaternion Quaternion.
+ */
+void FusionAhrsSetQuaternion(FusionAhrs *const ahrs, const FusionQuaternion quaternion) {
+    ahrs->quaternion = quaternion;
+}
 
-    float Sinv[9];
-    if (!InvSym3(S, Sinv)) return;
+/**
+ * @brief Returns the direction of gravity.
+ * @param ahrs AHRS structure.
+ * @return Direction of gravity as a unit vector.
+ */
+FusionVector FusionAhrsGetGravity(const FusionAhrs *const ahrs) {
+    return FusionVectorScale(ahrs->halfGravity, 2.0f);
+}
 
-    float PHt[N15 * 3];
-    for (int i = 0; i < N15; ++i)
-        for (int j = 0; j < 3; ++j)
-            PHt[i * 3 + j] = ahrs->P[i * N15 + (3 + j)];
-    float K[N15 * 3];
-    for (int i = 0; i < N15; ++i)
-        for (int j = 0; j < 3; ++j) {
-            float s = 0.0f;
-            for (int k = 0; k < 3; ++k) s += PHt[i * 3 + k] * Sinv[k * 3 + j];
-            K[i * 3 + j] = s;
+/**
+ * @brief Returns the linear acceleration.
+ * @param ahrs AHRS structure.
+ * @return Linear acceleration in g.
+ */
+FusionVector FusionAhrsGetLinearAcceleration(const FusionAhrs *const ahrs) {
+    switch (ahrs->settings.convention) {
+        case FusionConventionNwu:
+        case FusionConventionEnu: {
+            return FusionVectorSubtract(ahrs->accelerometer, FusionAhrsGetGravity(ahrs));
         }
-
-    float dx[N15];
-    for (int i = 0; i < N15; ++i)
-        dx[i] = K[i * 3 + 0] * r[0] + K[i * 3 + 1] * r[1] + K[i * 3 + 2] * r[2];
-    ApplyDeltaX(ahrs, dx);
-    Joseph_3x15(ahrs->P, H, K, Rdiag);
-
-    ahrs->zruActiveThisFrame = true;
-}
-
-static void ApplySkinPostFilter(FusionAhrs *ahrs, float dt) {
-    if (!ahrs->qSkinReady) {
-        ahrs->qSkin = ahrs->q;
-        ahrs->qSkinReady = true;
-        return;
-    }
-    const float alpha = 1.0f - expf(-dt / KFA_SKIN_TAU_S);
-    ahrs->qSkin = Slerp(ahrs->qSkin, ahrs->q, alpha);
-    ahrs->qSkin = FusionQuaternionNormalise(ahrs->qSkin);
-}
-
-void FusionAhrsUpdate(FusionAhrs *ahrs,
-                      FusionVector gyroscope,
-                      FusionVector accelerometer,
-                      FusionVector magnetometer,
-                      float dt) {
-    if (dt <= 0.0f || dt > 1.0f) return;
-
-    const FusionVector aMs2 = {{
-        accelerometer.axis.x * KFA_GRAVITY_MS2,
-        accelerometer.axis.y * KFA_GRAVITY_MS2,
-        accelerometer.axis.z * KFA_GRAVITY_MS2,
-    }};
-
-    if (!ahrs->qSeeded) {
-        const float aN = FusionVectorNorm(aMs2);
-        if (aN > 0.5f * KFA_GRAVITY_MS2 && aN < 1.8f * KFA_GRAVITY_MS2) {
-            const FusionVector u = FusionVectorNormalise(aMs2);
-            FusionQuaternion qs;
-            const float w = 1.0f + u.axis.z;
-            if (w < 1.0e-6f) {
-                qs.element.w = 0.0f; qs.element.x = 1.0f;
-                qs.element.y = 0.0f; qs.element.z = 0.0f;
-            } else {
-                qs.element.w = w;  qs.element.x =  u.axis.y;
-                qs.element.y = -u.axis.x; qs.element.z = 0.0f;
-            }
-            ahrs->q = FusionQuaternionNormalise(qs);
-            ahrs->qSeeded = true;
+        case FusionConventionNed: {
+            return FusionVectorAdd(ahrs->accelerometer, FusionAhrsGetGravity(ahrs));
         }
     }
-
-    Predict(ahrs, gyroscope, dt);
-
-    UpdateLPAAndDivMon(ahrs, aMs2, dt);
-
-    ApplyAccUpdate(ahrs, aMs2);
-
-    LearnMagFieldIfStill(ahrs, magnetometer, gyroscope, dt);
-    ApplyMagUpdate(ahrs, magnetometer, dt);
-
-    ApplyZruIfStill(ahrs, gyroscope, aMs2, dt);
-
-    ApplySkinPostFilter(ahrs, dt);
+    return FUSION_VECTOR_ZERO; // avoid compiler warning
 }
 
-void FusionAhrsUpdateNoMagnetometer(FusionAhrs *ahrs,
-                                    FusionVector gyroscope,
-                                    FusionVector accelerometer,
-                                    float dt) {
-    FusionAhrsUpdate(ahrs, gyroscope, accelerometer, FUSION_VECTOR_ZERO, dt);
+/**
+ * @brief Returns the Earth acceleration.
+ * @param ahrs AHRS structure.
+ * @return Earth acceleration in g.
+ */
+FusionVector FusionAhrsGetEarthAcceleration(const FusionAhrs *const ahrs) {
+    // Calculate accelerometer in the Earth frame
+#define Q ahrs->quaternion.element
+#define A ahrs->accelerometer.axis
+    FusionVector accelerometer = {
+        .axis = {
+            .x = 2.0f * ((Q.w * Q.w - 0.5f + Q.x * Q.x) * A.x + (Q.x * Q.y - Q.w * Q.z) * A.y + (Q.x * Q.z + Q.w * Q.y) * A.z),
+            .y = 2.0f * ((Q.x * Q.y + Q.w * Q.z) * A.x + (Q.w * Q.w - 0.5f + Q.y * Q.y) * A.y + (Q.y * Q.z - Q.w * Q.x) * A.z),
+            .z = 2.0f * ((Q.x * Q.z - Q.w * Q.y) * A.x + (Q.y * Q.z + Q.w * Q.x) * A.y + (Q.w * Q.w - 0.5f + Q.z * Q.z) * A.z),
+        }
+    }; // rotation matrix multiplied with the accelerometer
+#undef Q
+#undef A
+
+    // Remove gravity in the Earth frame
+    switch (ahrs->settings.convention) {
+        case FusionConventionNwu:
+        case FusionConventionEnu:
+            accelerometer.axis.z -= 1.0f;
+            break;
+        case FusionConventionNed:
+            accelerometer.axis.z += 1.0f;
+            break;
+    }
+    return accelerometer;
 }
 
-FusionQuaternion FusionAhrsGetQuaternion(const FusionAhrs *ahrs) {
-    return ahrs->qSkinReady ? ahrs->qSkin : ahrs->q;
+/**
+ * @brief Returns the internal states.
+ * @param ahrs AHRS structure.
+ * @return Internal states.
+ */
+FusionAhrsInternalStates FusionAhrsGetInternalStates(const FusionAhrs *const ahrs) {
+    const FusionAhrsInternalStates internalStates = {
+        .accelerationError = FusionRadiansToDegrees(FusionArcSin(2.0f * FusionVectorNorm(ahrs->halfAccelerometerFeedback))),
+        .accelerometerIgnored = ahrs->accelerometerIgnored,
+        .accelerationRecoveryTrigger = ahrs->settings.recoveryTriggerPeriod == 0 ? 0.0f : (float) ahrs->accelerationRecoveryTrigger / (float) ahrs->settings.recoveryTriggerPeriod,
+        .magneticError = FusionRadiansToDegrees(FusionArcSin(2.0f * FusionVectorNorm(ahrs->halfMagnetometerFeedback))),
+        .magnetometerIgnored = ahrs->magnetometerIgnored,
+        .magneticRecoveryTrigger = ahrs->settings.recoveryTriggerPeriod == 0 ? 0.0f : (float) ahrs->magneticRecoveryTrigger / (float) ahrs->settings.recoveryTriggerPeriod,
+    };
+    return internalStates;
 }
 
-void FusionAhrsSetQuaternion(FusionAhrs *ahrs, FusionQuaternion q) {
-    ahrs->q = FusionQuaternionNormalise(q);
-    ahrs->qSkinReady = false;
+/**
+ * @brief Returns the flags.
+ * @param ahrs AHRS structure.
+ * @return Flags.
+ */
+FusionAhrsFlags FusionAhrsGetFlags(const FusionAhrs *const ahrs) {
+    const FusionAhrsFlags flags = {
+        .startup = ahrs->startup,
+        .angularRateRecovery = ahrs->angularRateRecovery,
+        .accelerationRecovery = ahrs->accelerationRecoveryTrigger > ahrs->accelerationRecoveryTimeout,
+        .magneticRecovery = ahrs->magneticRecoveryTrigger > ahrs->magneticRecoveryTimeout,
+    };
+    return flags;
 }
 
-FusionVector FusionAhrsGetGravity(const FusionAhrs *ahrs) {
-
-    const FusionVector gWorld = { .axis = { 0.0f, 0.0f, +1.0f } };
-    return RotByQInv(ahrs->q, gWorld);
+/**
+ * @brief Sets the heading.
+ * @param ahrs AHRS structure.
+ * @param heading Heading in degrees.
+ */
+void FusionAhrsSetHeading(FusionAhrs *const ahrs, const float heading) {
+#define Q ahrs->quaternion.element
+    const float yaw = atan2f(Q.w * Q.z + Q.x * Q.y, 0.5f - Q.y * Q.y - Q.z * Q.z);
+#undef Q
+    const float halfYawMinusHeading = 0.5f * (yaw - FusionDegreesToRadians(heading));
+    const FusionQuaternion rotation = {
+        .element = {
+            .w = cosf(halfYawMinusHeading),
+            .x = 0.0f,
+            .y = 0.0f,
+            .z = -1.0f * sinf(halfYawMinusHeading),
+        }
+    };
+    ahrs->quaternion = FusionQuaternionProduct(rotation, ahrs->quaternion);
 }
 
-FusionVector FusionAhrsGetLinearAcceleration(const FusionAhrs *ahrs) {
-
-    if (!ahrs->a_lin_ready) return FUSION_VECTOR_ZERO;
-    const FusionVector r = {{
-        ahrs->a_lin_body.axis.x / KFA_GRAVITY_MS2,
-        ahrs->a_lin_body.axis.y / KFA_GRAVITY_MS2,
-        ahrs->a_lin_body.axis.z / KFA_GRAVITY_MS2,
-    }};
-    return r;
-}
-
-FusionVector FusionAhrsGetEarthAcceleration(const FusionAhrs *ahrs) {
-    if (!ahrs->a_lin_ready) return FUSION_VECTOR_ZERO;
-    const FusionVector r = {{
-        ahrs->a_lin_world.axis.x / KFA_GRAVITY_MS2,
-        ahrs->a_lin_world.axis.y / KFA_GRAVITY_MS2,
-        ahrs->a_lin_world.axis.z / KFA_GRAVITY_MS2,
-    }};
-    return r;
-}
-
-FusionAhrsInternalStates FusionAhrsGetInternalStates(const FusionAhrs *ahrs) {
-    FusionAhrsInternalStates s;
-    s.accelerationError = ahrs->dAcc;
-    s.accelerometerIgnored = !ahrs->accUsedThisFrame;
-    s.accelerationRecoveryTrigger = (ahrs->fAccBoost - 1.0f) / (KFA_FACCBOOST_MAX - 1.0f);
-    s.magneticError = RadToDeg(ahrs->magResidualNorm);
-    s.magnetometerIgnored = !ahrs->magGateOpen;
-    s.magneticRecoveryTrigger = 0.0f;
-    s.magNormBias = ahrs->magNormBias;
-    s.skinPhiDeg  = RadToDeg(ahrs->skinPhiScalar);
-    return s;
-}
-
-FusionAhrsFlags FusionAhrsGetFlags(const FusionAhrs *ahrs) {
-    FusionAhrsFlags f;
-    f.startup = false;
-    f.angularRateRecovery = false;
-    f.accelerationRecovery = !ahrs->accUsedThisFrame;
-    f.magneticRecovery = !ahrs->magGateOpen;
-    return f;
-}
-
-void FusionAhrsSetHeading(FusionAhrs *ahrs, float headingDeg) {
-
-    const float Qw = ahrs->q.element.w, Qx = ahrs->q.element.x;
-    const float Qy = ahrs->q.element.y, Qz = ahrs->q.element.z;
-    const float yaw = atan2f(Qw * Qz + Qx * Qy, 0.5f - Qy * Qy - Qz * Qz);
-    const float half = 0.5f * (yaw - DegToRad(headingDeg));
-    const FusionQuaternion rot = {{ cosf(half), 0.0f, 0.0f, -sinf(half) }};
-    ahrs->q = FusionQuaternionNormalise(FusionQuaternionProduct(rot, ahrs->q));
-    ahrs->qSkinReady = false;
-}
+//------------------------------------------------------------------------------
+// End of file
